@@ -162,7 +162,7 @@ elif [ -f /lib/modules/panel-kopin-a230.ko ]; then
   # loop sets the USB input current limit to what the source allows: 100 mA until a host has
   # configured us (USB allows no more before enumeration; a Mac cuts the port otherwise), 450 mA
   # once configured (500 mA allocation), 1 A (code 0x29) if nothing enumerated within 15 s of VBUS (wall
-  # adapter). Charge current 500 mA (500 mAh cell), CTRL1 = EN_CHARGER|EN_LINCH kept set.
+  # adapter). Charge current 400 mA (the DT battery limit; 0.8C for the 500 mAh cell), CTRL1 = EN_CHARGER|EN_LINCH kept set.
   # mainline/charge-off disables the loop. Same logic as tools/charge-policy.sh.
   ( T0=0; while :; do sleep 3; [ -f /mnt/data/mainline/charge-off ] && continue
       S1=$(chroot $A /usr/sbin/i2cget -f -y 0 0x49 0xe3 2>/dev/null) || continue
@@ -171,8 +171,8 @@ elif [ -f /lib/modules/panel-kopin-a230.ko ]; then
       U=$(cat /sys/class/udc/*/state 2>/dev/null)
       if [ "$U" = configured ]; then L=0x08; elif [ $((NOW - T0)) -ge 15 ]; then L=0x29; else L=0x01; fi
       [ "$(chroot $A /usr/sbin/i2cget -f -y 0 0x49 0xee)" = "$L" ] || chroot $A /usr/sbin/i2cset -f -y 0 0x49 0xee $L
-      [ "$(chroot $A /usr/sbin/i2cget -f -y 0 0x49 0xf0)" = "0x04" ] || chroot $A /usr/sbin/i2cset -f -y 0 0x49 0xf0 0x04
-      [ "$(chroot $A /usr/sbin/i2cget -f -y 0 0x49 0xed)" = "0x04" ] || chroot $A /usr/sbin/i2cset -f -y 0 0x49 0xed 0x04
+      [ "$(chroot $A /usr/sbin/i2cget -f -y 0 0x49 0xf0)" = "0x03" ] || chroot $A /usr/sbin/i2cset -f -y 0 0x49 0xf0 0x03
+      [ "$(chroot $A /usr/sbin/i2cget -f -y 0 0x49 0xed)" = "0x03" ] || chroot $A /usr/sbin/i2cset -f -y 0 0x49 0xed 0x03
       [ "$(chroot $A /usr/sbin/i2cget -f -y 0 0x49 0xe1)" = "0x30" ] || chroot $A /usr/sbin/i2cset -f -y 0 0x49 0xe1 0x30
     done ) >/dev/null 2>&1 &
   # (iw lives in the chroot, not the initramfs)

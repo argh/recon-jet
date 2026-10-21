@@ -10,9 +10,9 @@ Alpine chroot with `i2cget/i2cset -f -y 0 0x49 <reg>`; jetd uses `/dev/i2c-0` di
 | CONTROLLER_CTRL1 | 0xE1 | bit4 EN_CHARGER (VBUS -> VSYS), bit5 EN_LINCH (linear stage VSYS -> VBAT). Must be **0x30** to charge the cell. The in-tree driver only set 0x10, and writes 0x00 on VBUS loss |
 | CONTROLLER_STAT1 | 0xE3 | bit2 VBUS_DET, bit6 LINCH_GATED; 0x84 = VBUS present |
 | LINEAR_CHRG_STS | 0xDE | 0x44 while actually charging (0x40 idle) |
-| CHARGERUSB_VICHRG | 0xF0 | charge current code: 0x03 = 400 mA, 0x04 = 500 mA, 0x0e = 1.5 A (u-boot leaves this) |
+| CHARGERUSB_VICHRG | 0xED | charge current code: 0x03 = 400 mA, 0x04 = 500 mA, 0x0e = 1.5 A (u-boot leaves this) |
 | CHARGERUSB_CINLIMIT | 0xEE | input limit: 50 + 50 x code mA for codes < 0x10 (0x01 = 100 mA, 0x08 = 450 mA, 0x09 = 500 mA, 0x0d = 700 mA); >= 800 mA uses extended codes, 0x29 = 1000 mA; 0x2e = no limit (u-boot leaves this) |
-| CHARGERUSB_CTRLLIMIT2 | 0xED | charge current ceiling, set to 0x04 (500 mA) |
+| CHARGERUSB_CTRLLIMIT2 | 0xF0 | charge current ceiling, set to 0x03 (400 mA, the DT battery limit) |
 | VOREG | | 4.2 V |
 | Charger WDG | | 0x7f as left by the driver |
 | TOGGLE1 | 0x90 | 0x20 enables the fuel gauge |
