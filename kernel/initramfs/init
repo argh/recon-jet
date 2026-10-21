@@ -13,6 +13,7 @@ mount -t sysfs sys /sys
 mkdir -p /dev/pts /tmp /mnt/data
 mount -t devpts devpts /dev/pts
 mount -t tmpfs tmpfs /tmp
+ip link set lo up 2>/dev/null   # loopback: local TCP (jet-app -> jetd) is routed through lo even for usb0/wlan0 addresses
 mount -t configfs none /sys/kernel/config 2>/dev/null
 echo 8 > /proc/sys/kernel/printk
 

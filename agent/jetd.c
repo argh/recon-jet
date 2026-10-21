@@ -5,7 +5,9 @@
  * line protocol to a host hub over TCP (reconnecting forever).
  *
  *   jetd <host[,host...]> <port> [boot-log-seconds, default 20]
- *   Dials the hosts in turn (2 s apart) and also accepts an inbound hub on <port>.
+ *   Dials the hosts in turn (2 s apart) while no hub is connected, and accepts inbound hubs on
+ *   <port>: up to 4 clients at once (the on-device app, the host hub, debug sessions) all receive
+ *   every event and binary payload and may all send commands.
  *
  * Modes (owned by jetd, so they work with the hub gone):
  *   remote   the hub draws the screen and receives every input event (default)
@@ -230,8 +232,18 @@ static int chooser_sel;
 static int dirty;            /* local render needed */
 
 /* ---- hub link ------------------------------------------------------------------ */
-static int sock = -1;
-static size_t bin_need;      /* bytes of binary payload still expected after a W line */
+/* Hubs: up to MAXHUB connected clients (the on-device app, the host hub, debug sessions) all
+ * receive every event (including binary payloads) and may all send commands. */
+#define MAXHUB 4
+struct hub { int fd; char inbuf[1024]; size_t inlen; size_t bin_need; int64_t stuck_since; };
+static struct hub hubs[MAXHUB]; static int nhubs;
+static struct hub *cur_hub;      /* the hub whose line is being handled (W payload accounting) */
+static int only_fd = -1;         /* when >= 0, sendf/send_all go to this hub only (hello + log replay) */
+static void hub_drop(int i) { close(hubs[i].fd); hubs[i] = hubs[--nhubs]; }
+static int hub_add(int fd) {
+    if (nhubs == MAXHUB) hub_drop(0);
+    struct hub *h = &hubs[nhubs++]; memset(h, 0, sizeof *h); h->fd = fd; return nhubs - 1;
+}
 static char hub_hosts[256]; static const char *hub_port;
 static int hub_host_idx;
 static int64_t next_connect;
@@ -242,19 +254,19 @@ static void set_mode(int m);
 /* Hub writes never block the UI loop: a line that does not fit the socket buffer is dropped
  * (log mirroring is best effort), and a link that stays full for 5 s is closed so the dialer
  * reconnects. Blocking here was what froze the log/buttons whenever the USB link went bad. */
-static int64_t sock_stuck_since;
-static void sock_stuck(void) {
-    if (!sock_stuck_since) sock_stuck_since = now_ms();
-    else if (now_ms() - sock_stuck_since > 5000) { close(sock); sock = -1; sock_stuck_since = 0; }
-}
 static void sendf(const char *fmt, ...) {
-    if (sock < 0) return;
+    if (!nhubs) return;
     char b[512]; va_list ap; va_start(ap, fmt); int n = vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
     if (n <= 0) return;
-    ssize_t w = send(sock, b, n, MSG_DONTWAIT | MSG_NOSIGNAL);
-    if (w == n) { sock_stuck_since = 0; return; }
-    if (w < 0 && errno != EAGAIN) { close(sock); sock = -1; sock_stuck_since = 0; return; }
-    sock_stuck();            /* partial or EAGAIN: dropped */
+    for (int i = 0; i < nhubs; i++) {
+        struct hub *h = &hubs[i];
+        if (only_fd >= 0 && h->fd != only_fd) continue;
+        ssize_t w = send(h->fd, b, n, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (w == n) { h->stuck_since = 0; continue; }
+        if (w < 0 && errno != EAGAIN) { hub_drop(i--); continue; }
+        if (!h->stuck_since) h->stuck_since = now_ms();                 /* partial or EAGAIN: dropped */
+        else if (now_ms() - h->stuck_since > 5000) hub_drop(i--);
+    }
 }
 
 static void send_hello(void) { sendf("h %u %u %u %u\n", W, H, cols(), rows()); }
@@ -264,9 +276,8 @@ static void hub_connected(int fd) {
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK);   /* reads stay blocking-on-POLLIN as before */
     int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
-    sock = fd;
-    send_hello();
-    log_on_connect();
+    hub_add(fd);
+    only_fd = fd; send_hello(); log_on_connect(); only_fd = -1;
 }
 static void try_connect(void) {
     struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM }, *res;
@@ -306,11 +317,9 @@ static void listen_open(void) {
 static void accept_hub(void) {
     int fd = accept(listen_fd, NULL, NULL);
     if (fd < 0) return;
-    if (sock >= 0) close(sock);
     int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    sock = fd;
-    send_hello();
-    log_on_connect();
+    hub_add(fd);
+    only_fd = fd; send_hello(); log_on_connect(); only_fd = -1;
 }
 
 /* ---- modes ---------------------------------------------------------------------- */
@@ -329,7 +338,7 @@ static void klog_add(const char *line) {
     int i = (klog_head + klog_n) % LROWS;
     if (klog_n == LROWS) { i = klog_head; klog_head = (klog_head + 1) % LROWS; } else klog_n++;
     snprintf(klog[i], LCOLS + 1, "%s", line);
-    if (sock >= 0 && (mode != M_REMOTE || 1)) sendf("j %s\n", line);
+    if (nhubs) sendf("j %s\n", line);
     if (mode == M_LOG) dirty = 1;
 }
 
@@ -841,20 +850,27 @@ static void check_holds(void) {
 }
 
 /* ---- camera snapshot (V4L2 mmap capture on /dev/video0) --------------------------- */
-static int send_all(const void *buf, size_t len) {     /* binary payloads: wait up to 2 s for room, then give up */
-    const char *p = buf;
+static int send_fd_all(int fd, const char *p, size_t len) {   /* wait up to 2 s for room, then give up */
     while (len) {
-        ssize_t n = send(sock, p, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+        ssize_t n = send(fd, p, len, MSG_DONTWAIT | MSG_NOSIGNAL);
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno != EAGAIN) return -1;
-            struct pollfd pf = { sock, POLLOUT, 0 };
+            struct pollfd pf = { fd, POLLOUT, 0 };
             if (poll(&pf, 1, 2000) <= 0) return -1;
             continue;
         }
         p += n; len -= n;
     }
     return 0;
+}
+static int send_all(const void *buf, size_t len) {     /* binary payloads go to every hub (or only_fd) */
+    int rc = 0;
+    for (int i = 0; i < nhubs; i++) {
+        if (only_fd >= 0 && hubs[i].fd != only_fd) continue;
+        if (send_fd_all(hubs[i].fd, buf, len) < 0) { hub_drop(i--); rc = -1; }
+    }
+    return rc;
 }
 
 static void cam_snapshot(unsigned w, unsigned h, unsigned skip) {
@@ -1007,7 +1023,7 @@ static void cap_send_chunk(void) {
         if (rms > start) { cap_speech = 1; cap_last_voice = now_ms(); }
         else if (cap_speech && rms < end && now_ms() - cap_last_voice > 800) cap_speech = 2;   /* trailing silence done */
     }
-    if (sock >= 0) { sendf("a %d\n", cap_outn * 2); send_all(cap_out, cap_outn * 2); }
+    if (nhubs) { sendf("a %d\n", cap_outn * 2); send_all(cap_out, cap_outn * 2); }
     cap_outn = 0;
 }
 static void cap_stop(const char *why) {
@@ -1092,7 +1108,7 @@ static void handle_line(char *l) {
     case 'V': cap_start(atoi(l + 1)); break;
     case 'Q': power_read(); sendf("q %d %d %d %d 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x %s %d\n", pstate.vbat, pstate.vsys, pstate.vbus, pstate.ma, pstate.ctrl1 & 0xff, pstate.stat1 & 0xff, pstate.lin & 0xff, pstate.cin & 0xff, pstate.vichrg & 0xff, pstate.udc[0] ? pstate.udc : "-", pstate.maxpower); break;
     case 'v': cap_stop("stop"); break;
-    case 'W': bin_need = strtoul(l + 1, NULL, 10); break;          /* payload bytes follow the line */
+    case 'W': if (cur_hub) cur_hub->bin_need = strtoul(l + 1, NULL, 10); break;   /* payload bytes follow the line */
     case 'w': if (play_pid > 0) { play_end = 1; play_drain(); } else sendf("w idle\n"); break;
     case 'M': { char name[16]; if (sscanf(l + 1, "%15s", name) == 1) for (int i = 0; i < M_COUNT; i++) if (!strcmp(name, mode_names[i])) { chooser = 0; set_mode(i); } } break;
     case 'I': console_write(l + 2); dirty = 1; break;
@@ -1119,11 +1135,10 @@ int main(int argc, char **argv) {
 
     dirty = 1; render();   /* log mode from the start */
 
-    char inbuf[1024]; size_t inlen = 0;
     for (;;) {
-        if (sock < 0 && connecting_fd < 0 && now_ms() >= next_connect) try_connect();
-        struct pollfd pf[7 + MAXIN]; int n = 0, isock = -1, ipty = -1, ikmsg = -1, ilisten = -1;
-        if (sock >= 0) { isock = n; pf[n++] = (struct pollfd){ sock, POLLIN, 0 }; }
+        if (!nhubs && connecting_fd < 0 && now_ms() >= next_connect) try_connect();
+        struct pollfd pf[7 + MAXIN + MAXHUB]; int n = 0, ipty = -1, ikmsg = -1, ilisten = -1;
+        int ihub = n; for (int i = 0; i < nhubs; i++) pf[n++] = (struct pollfd){ hubs[i].fd, POLLIN, 0 };
         if (kmsg_fd >= 0) { ikmsg = n; pf[n++] = (struct pollfd){ kmsg_fd, POLLIN, 0 }; }
         if (listen_fd >= 0) { ilisten = n; pf[n++] = (struct pollfd){ listen_fd, POLLIN, 0 }; }
         if (pty_fd >= 0) { ipty = n; pf[n++] = (struct pollfd){ pty_fd, POLLIN, 0 }; }
@@ -1134,7 +1149,7 @@ int main(int argc, char **argv) {
         if (play_fd >= 0 && play_off < play_len) { iplay = n; pf[n++] = (struct pollfd){ play_fd, POLLOUT, 0 }; }
         int iin = n;
         for (int i = 0; i < nin; i++) pf[n++] = (struct pollfd){ infd[i], POLLIN, 0 };
-        int timeout = sock < 0 ? 500 : 5000;
+        int timeout = !nhubs ? 500 : 5000;
         if (reveal >= 0 || auto_remote) timeout = reveal >= 0 ? 25 : 500;
         if (btn[0].down && !btn[0].consumed) { int rem = HOLD_MS - (int)(now_ms() - btn[0].t); timeout = rem < 1 ? 1 : rem; }
         if (glance_path[0] && timeout > 250) timeout = 250;
@@ -1148,26 +1163,26 @@ int main(int argc, char **argv) {
         int64_t prof_t = now_ms();
 #define PROF(i) do { if (prof_on) { int64_t _n = now_ms(); if (_n - prof_t > prof_max[i]) prof_max[i] = _n - prof_t; prof_t = _n; } } while (0)
         if (pr < 0 && errno != EINTR) break;
-        if (isock >= 0 && pf[isock].revents) {
-            ssize_t r = read(sock, inbuf + inlen, sizeof inbuf - 1 - inlen);
-            if (r <= 0) { close(sock); sock = -1; inlen = 0; }
-            else {
-                inlen += r;
-                for (;;) {
-                    if (bin_need) {                                   /* W payload: PCM for the speaker */
-                        size_t take = inlen < bin_need ? inlen : bin_need;
-                        play_queue((unsigned char *)inbuf, take);
-                        memmove(inbuf, inbuf + take, inlen - take); inlen -= take; bin_need -= take;
-                        if (bin_need) break;
-                        continue;
-                    }
-                    char *nl = memchr(inbuf, '\n', inlen);
-                    if (!nl) { if (inlen == sizeof inbuf - 1) inlen = 0; break; }
-                    *nl = 0; handle_line(inbuf);
-                    size_t used = nl - inbuf + 1; memmove(inbuf, inbuf + used, inlen - used); inlen -= used;
+        for (int hi = 0; hi < nhubs; hi++) {
+            if (!pf[ihub + hi].revents) continue;
+            struct hub *h = &hubs[hi];
+            ssize_t r = read(h->fd, h->inbuf + h->inlen, sizeof h->inbuf - 1 - h->inlen);
+            if (r <= 0) { hub_drop(hi); break; }                      /* table changed: re-poll */
+            h->inlen += r; cur_hub = h;
+            for (;;) {
+                if (h->bin_need) {                                    /* W payload: PCM for the speaker */
+                    size_t take = h->inlen < h->bin_need ? h->inlen : h->bin_need;
+                    play_queue((unsigned char *)h->inbuf, take);
+                    memmove(h->inbuf, h->inbuf + take, h->inlen - take); h->inlen -= take; h->bin_need -= take;
+                    if (h->bin_need) break;
+                    continue;
                 }
-                inbuf[inlen] = 0;
+                char *nl = memchr(h->inbuf, '\n', h->inlen);
+                if (!nl) { if (h->inlen == sizeof h->inbuf - 1) h->inlen = 0; break; }
+                *nl = 0; handle_line(h->inbuf);
+                size_t used = nl - h->inbuf + 1; memmove(h->inbuf, h->inbuf + used, h->inlen - used); h->inlen -= used;
             }
+            h->inbuf[h->inlen] = 0; cur_hub = NULL;
         }
         if (iconn >= 0) connect_poll(pf[iconn].revents);
         PROF(0);
@@ -1200,7 +1215,7 @@ int main(int argc, char **argv) {
             reveal += 2; dirty = 1;
             if (reveal >= klog_n) reveal = -1;
         }
-        if (auto_remote && sock >= 0 && reveal < 0 && now_ms() - start_ms >= boot_hold_s * 1000LL) { auto_remote = 0; set_mode(M_REMOTE); }
+        if (auto_remote && nhubs && reveal < 0 && now_ms() - start_ms >= boot_hold_s * 1000LL) { auto_remote = 0; set_mode(M_REMOTE); }
         render();
         PROF(7);
         if (prof_on && now_ms() - prof_last_report > 5000) {

@@ -5,6 +5,11 @@ Static musl binary built with `zig cc -target arm-linux-musleabihf -mcpu=cortex_
 camera snapshots and audio, and speaks a line protocol to a hub. Init starts it as
 `/bin/jetd <hosts> 7777 [boot-log-seconds]` from the initramfs; RSS ~0.5 MB, ~2 % CPU idle.
 
+
+Multiple clients: jetd accepts up to 4 hub connections at once (the on-device app on loopback, the
+host hub, debug sessions); all receive every event and payload, all may send commands. jetd dials
+its host list only while no hub is connected. Loopback must be up (init does `ip link set lo up`).
+
 ## Modes (owned by jetd, so they work with the hub gone)
 
 | Mode | Behaviour |
