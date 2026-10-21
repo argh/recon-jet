@@ -191,6 +191,11 @@ elif [ -f /lib/modules/panel-kopin-a230.ko ]; then
     HUB=$(cat /mnt/data/mainline/hub 2>/dev/null); HUB=${HUB:-$USBNET.12,$USBNET.10,$USBNET.11,$USBNET.13,$USBNET.14}
     (setsid /bin/jetd "$HUB" 7777 > /tmp/jetd.log 2>&1 &) && log "jetd started (hub $HUB)"
   fi
+  # the Node application layer (device/jet-app, installed in the chroot at /opt/jet-app) connects to
+  # jetd on loopback; skip with mainline/jet-app-off
+  if [ -x $A/opt/jet-app/deploy/jet-app.sh ] && [ ! -f /mnt/data/mainline/jet-app-off ]; then
+    ( sleep 2; chroot $A /bin/sh /opt/jet-app/deploy/jet-app.sh start >/dev/null 2>&1 && log "jet-app started" || log "jet-app start FAILED" ) &
+  fi
   # optional post-load snippet from userdata (display experiments), run in the background
   if [ -f /mnt/data/mainline/panel-post ]; then
     (sh /mnt/data/mainline/panel-post > /tmp/panel-post.log 2>&1; log "panel-post done: $(cat /tmp/panel-post.log | tr '\n' ' ')") &
