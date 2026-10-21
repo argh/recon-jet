@@ -1,0 +1,5 @@
+{
+  "_comment": "copy to personal/jet-app.json (gitignored); keys mirror config/jet-app.default.json",
+  "deviceLink": { "host": "jet.local" },
+  "power": { "pollMs": 5000 }
+}

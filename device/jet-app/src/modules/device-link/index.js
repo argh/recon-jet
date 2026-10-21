@@ -1,0 +1,141 @@
+// device-link: TCP client (or acceptor) for jetd's line protocol. Emits jet->host events and
+// exposes host->jet commands. Reconnects forever; writes are dropped while disconnected.
+import { EventEmitter, once } from 'node:events';
+import net from 'node:net';
+import { Schema } from '@versionzero/module-manager';
+import { ProtocolParser, parsePower } from './parser.js';
+
+const s = Schema.create;
+
+export class DeviceLink extends EventEmitter {
+  static moduleInfo = {
+    name: 'device-link',
+    schema: s()
+      .property('host', s('string').default('127.0.0.1').meta('description', 'jetd address to dial'))
+      .property('port', s('number').default(7777).meta('description', 'jetd port (dial target, or our listen port)'))
+      .property('listen', s('boolean').default(false).meta('description', 'accept jetd dialling us instead of dialling it'))
+      .property('bind', s('string').default('0.0.0.0').meta('description', 'listen address when listen=true'))
+      .property('reconnectMs', s('number').default(2000).meta('description', 'redial interval'))
+      .property('dialTimeoutMs', s('number').default(5000).meta('description', 'give up a dial attempt after this long'))
+      .property('replyTimeoutMs', s('number').default(5000).meta('description', 'timeout for request/reply commands'))
+      .property('logger', s('Logger').lax().meta('internal', true)),
+  };
+  host; port; listen; bind; reconnectMs; dialTimeoutMs; replyTimeoutMs; logger;
+
+  /** @type {net.Socket|null} */ #sock = null;
+  #server = null;
+  #timer = null;
+  #stopped = false;
+  #waiters = new Map();   // reply letter -> [{resolve, reject, timer}]
+  hello = null;           // { w, h, cols, rows }
+  mode = null;            // last `m`, or 'remote' assumed after a hello
+  get connected() { return this.#sock !== null; }
+
+  async start() {
+    this.#stopped = false;
+    if (this.listen) {
+      this.#server = net.createServer((sock) => this.#attach(sock)).listen(this.port, this.bind);
+      this.logger?.info({ port: this.port, bind: this.bind }, 'listening for jetd');
+    } else this.#dial();
+  }
+
+  async stop() {
+    this.#stopped = true;
+    clearTimeout(this.#timer);
+    this.#server?.close();
+    this.#sock?.destroy();
+  }
+
+  #dial() {
+    if (this.#stopped || this.#sock) return;
+    const sock = net.connect({ host: this.host, port: this.port });
+    sock.setTimeout(this.dialTimeoutMs, () => sock.destroy(new Error('dial timeout')));   // a down loopback swallows SYNs silently
+    sock.once('connect', () => { sock.setTimeout(0); this.#attach(sock); });
+    sock.once('error', (error) => { this.logger?.debug({ error: error.message }, 'dial failed'); });
+    sock.once('close', () => { if (!this.#sock) this.#timer = setTimeout(() => this.#dial(), this.reconnectMs); });
+  }
+
+  #attach(sock) {
+    if (this.#sock) this.#sock.destroy();
+    this.#sock = sock;
+    sock.setNoDelay(true);
+    sock.setKeepAlive(true, 10000);
+    const parser = new ProtocolParser();
+    sock.on('data', (chunk) => { for (const m of parser.feed(chunk)) this.#dispatch(m); });
+    sock.on('error', (error) => this.logger?.warn({ error: error.message }, 'link error'));
+    sock.on('close', () => {
+      if (this.#sock !== sock) return;
+      this.#sock = null; this.hello = null; this.mode = null;
+      this.#rejectAll(new Error('disconnected'));
+      this.logger?.info('jetd disconnected');
+      this.emit('disconnected');
+      if (!this.listen && !this.#stopped) this.#timer = setTimeout(() => this.#dial(), this.reconnectMs);
+    });
+    this.logger?.info({ peer: `${sock.remoteAddress}:${sock.remotePort}` }, 'jetd connected');
+    this.emit('connected');
+  }
+
+  #dispatch(m) {
+    if (m.type === 'frame') return this.#resolve('f', m, 'frame');
+    if (m.type === 'audio') return this.emit('captureChunk', m.data);
+    const [t, ...a] = m.line.split(' ');
+    switch (t) {
+      case 'h': this.hello = { w: +a[0], h: +a[1], cols: +a[2], rows: +a[3] }; this.mode ??= 'remote'; return this.emit('hello', this.hello);
+      case 'k': return this.emit('key', { code: +a[0], value: +a[1] });
+      case 'r': return this.emit('rel', { dx: +a[0], dy: +a[1] });
+      case 'm': this.mode = a[0]; return this.emit('mode', a[0]);
+      case 'j': return this.emit('log', m.line.slice(2));
+      case 'g': return this.#resolve('g', { worn: +a[0], raw: +a[1] }, 'glance');
+      case 'n': return this.emit('view', { degrees: +a[0] });
+      case 'A': return this.emit('captureEnd', a[0]);
+      case 'w': return this.#resolve('w', a[0], 'playDone');
+      case 'p': return this.#resolve('p', true, 'pong');
+      case 'q': return this.#resolve('q', parsePower(a), 'power');
+      case 'e': this.emit('jetError', a.join(' ')); return this.#reject('f', new Error(a.join(' ')));
+      default: return this.emit('unknown', m.line);
+    }
+  }
+
+  // ---- host -> jet ------------------------------------------------------------------
+  /** Write raw lines (no trailing newline). Returns false when not connected. */
+  send(...lines) {
+    if (!this.#sock) return false;
+    this.#sock.write(lines.join('\n') + '\n');
+    return true;
+  }
+  clear() { return this.send('C'); }
+  flush() { return this.send('F'); }
+  colour(r, g, b) { return this.send(`R ${r} ${g} ${b}`); }
+  text(row, text, { centre = false } = {}) { return this.send(`${centre ? 'A' : 'T'} ${row} ${text}`); }
+  rect(x, y, w, h, [r, g, b]) { return this.send(`B ${x} ${y} ${w} ${h} ${r} ${g} ${b}`); }
+  backlight(level) { return this.send(`L ${level}`); }
+  setMode(name) { return this.send(`M ${name}`); }
+  captureStart(maxSeconds) { return this.send(maxSeconds ? `V ${maxSeconds}` : 'V'); }
+  captureStop() { return this.send('v'); }
+  /** Queue 48 kHz stereo S16 PCM; `playEnd()` closes the clip and resolves when played. */
+  play(pcm) { return this.#sock ? this.#sock.write(Buffer.concat([Buffer.from(`W ${pcm.length}\n`), pcm])) : false; }
+  playEnd() { return this.#request('w', 'w', 15000); }
+  ping() { return this.#request('p', 'P'); }
+  power() { return this.#request('q', 'Q'); }
+  glance() { return this.#request('g', 'G'); }
+  snapshot({ w = 640, h = 480, skip = 6 } = {}) { return this.#request('f', `S ${w} ${h} ${skip}`, 15000); }
+  /** Resolves once connected (immediately if already). */
+  async ready(signal) { if (!this.#sock) await once(this, 'connected', { signal }); }
+
+  // ---- request/reply plumbing --------------------------------------------------------
+  #request(replyLetter, line, timeoutMs = this.replyTimeoutMs) {
+    return new Promise((resolve, reject) => {
+      if (!this.send(line)) return reject(new Error('not connected'));
+      const list = this.#waiters.get(replyLetter) ?? this.#waiters.set(replyLetter, []).get(replyLetter);
+      const entry = { resolve, reject, timer: setTimeout(() => { list.splice(list.indexOf(entry), 1); reject(new Error(`timeout waiting for '${replyLetter}'`)); }, timeoutMs) };
+      list.push(entry);
+    });
+  }
+  #take(letter) { const e = this.#waiters.get(letter)?.shift(); if (e) clearTimeout(e.timer); return e; }
+  #resolve(letter, value, eventName) {
+    if (eventName) this.emit(eventName, value);
+    this.#take(letter)?.resolve(value);
+  }
+  #reject(letter, error) { this.#take(letter)?.reject(error); }
+  #rejectAll(error) { for (const letter of this.#waiters.keys()) while (this.#waiters.get(letter).length) this.#reject(letter, error); }
+}

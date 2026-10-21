@@ -1,0 +1,20 @@
+{
+  "name": "@versionzero/jet-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node application layer for the Recon Jet (talks to jetd over its line protocol)",
+  "type": "module",
+  "engines": { "node": ">=20.9.0" },
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test test/*.test.js",
+    "bundle": "sh deploy/bundle.sh",
+    "deploy": "sh deploy/install.sh"
+  },
+  "dependencies": {
+    "@versionzero/configurator": "^1.0.0",
+    "@versionzero/module-manager": "^1.0.0",
+    "@versionzero/schema": "^1.4.0"
+  }
+}

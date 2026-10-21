@@ -17,3 +17,7 @@ tools/*/su
 *.o
 *.ko
 .DS_Store
+# jet-app
+device/jet-app/node_modules/
+device/jet-app/personal/*
+!device/jet-app/personal/jet-app.example.json
