@@ -1,0 +1,19 @@
+# private: engineering log, captures, credentials, build staging, stock sources and backups
+NOTES.md
+notes/
+work/
+refs/
+bridge/
+# built artifacts
+agent/jetd
+agent/font_psf.h
+tools/*/regdump
+tools/*/fbfill
+tools/*/fbblank
+tools/*/fbbench
+tools/*/reboot2
+tools/*/wdtarm
+tools/*/su
+*.o
+*.ko
+.DS_Store
