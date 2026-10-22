@@ -46,6 +46,8 @@
  *   F [x y w h]       flush (whole screen, or just a rectangle in external-surface mode)
  *   Z x y w h [fps]   live camera scaled into that rectangle (default 10 fps); z stops it;
  *                     reply "Z srcw srch"; S during a viewfinder returns the next streamed frame
+ *   J [n]             resend the last n kernel-log lines (default: the whole ring), then "J n"
+ *   U                 re-read the calibration files (glance, view thresholds) -> "U on off deg still"
  *   Q                 power snapshot -> "q vbat vsys vbus mA ctrl1 stat1 linsts cinlimit vichrg udc maxpower"
  * jet -> host:
  *   h <w> <h> <cols> <rows>     hello (also sent when remote mode is re-entered)
@@ -1014,6 +1016,11 @@ static void vf_frame(void) {
 static char imu_path[3][128]; static double imu_scale_dps = 0.000153 * 57.29578;
 static double imu_bias[3], imu_rot, imu_ring[3][10]; static int imu_ringn, imu_ringfill, imu_still_ms, imu_quiet_ms, imu_biased;
 static int view_deg_thr = 20, view_still_ms = 1000; static int64_t imu_next;
+static void view_thresholds_load(void) {
+    FILE *f = fopen("/mnt/data/mainline/view", "r"); if (!f) f = fopen("/android-data/mainline/view", "r");
+    view_deg_thr = 20; view_still_ms = 1000;
+    if (f) { if (fscanf(f, "%d %d", &view_deg_thr, &view_still_ms) != 2) { view_deg_thr = 20; view_still_ms = 1000; } fclose(f); }
+}
 static int imu_fd = -1;    /* IIO buffer (/dev/iio:deviceN, 3 x le:s16 per sample at the sensor ODR) */
 static int sysfs_write(const char *path, const char *val) { FILE *f = fopen(path, "w"); if (!f) return -1; int r = fputs(val, f) < 0 ? -1 : 0; fclose(f); return r; }
 static void imu_open(void) {
@@ -1040,8 +1047,7 @@ static void imu_open(void) {
         if (imu_fd < 0) fprintf(stderr, "jetd: gyro buffer unavailable, sysfs fallback at 2 Hz\n");
         break;
     }
-    FILE *f = fopen("/mnt/data/mainline/view", "r"); if (!f) f = fopen("/android-data/mainline/view", "r");
-    if (f) { if (fscanf(f, "%d %d", &view_deg_thr, &view_still_ms) != 2) { view_deg_thr = 20; view_still_ms = 1000; } fclose(f); }
+    view_thresholds_load();
     if (imu_path[0][0]) fprintf(stderr, "jetd: gyro %s (view: %d deg, still %d ms)\n", imu_path[0], view_deg_thr, view_still_ms);
 }
 static void imu_poll(void) {
@@ -1200,6 +1206,8 @@ static void handle_line(char *l) {
     case 'Z': { int fps = 10; if (sscanf(l + 1, "%d %d %d %d %d", &x, &y, &w, &h, &fps) >= 4) vf_start(x, y, w, h, fps); } break;
     case 'z': vf_stop(); break;
     case 'K': raw_keys = atoi(l + 1) != 0; break;
+    case 'J': { int n = atoi(l + 1); if (n <= 0 || n > klog_n) n = klog_n; for (int i = klog_n - n; i < klog_n; i++) sendf("j %s\n", klog[(klog_head + i) % LROWS]); sendf("J %d\n", n); } break;   /* log backlog: last n lines */
+    case 'U': { glance_worn = -1; glance_open(); view_thresholds_load(); sendf("U %d %d %d %d\n", glance_on_thr, glance_off_thr, view_deg_thr, view_still_ms); } break;   /* re-read calibration files */
     case 'L': set_backlight(atoi(l + 1)); break;
     case 'P': sendf("p\n"); break;
     case 'G': sendf("g %d %d\n", glance_worn, glance_raw); break;

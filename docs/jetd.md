@@ -153,3 +153,7 @@ layer owns button semantics (hold detection, menus). jetd's other modes keep the
 `K 0` restores the chooser and press-pair reporting.
 
 `Y` stops playback immediately and drops queued audio (barge-in); jetd answers `w flushed`.
+
+`J [n]` resends the last n kernel-log lines (whole ring by default) and ends with `J n`.
+`U` re-reads the calibration files on userdata (glance thresholds, new-view thresholds) and answers
+`U on off deg still`, so the app's setup screens take effect without a restart.
