@@ -7,8 +7,7 @@ the front-hold chooser) are untouched; jet-app is just the hub that happens to l
 
 
 Runtime: Node 22 (Alpine 3.22 `nodejs` package) in the Jet's Alpine chroot; Node 22 has the iterator
-helpers that `@versionzero/module-manager` 1.0.0 uses, so `src/lib/compat.js` can go once that
-package's `engines` field says so.
+helpers that `@versionzero/module-manager` 1.0.0 uses (no shim).
 
 ## What exists
 

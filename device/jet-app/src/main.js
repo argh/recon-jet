@@ -3,7 +3,6 @@
 //   --help, --dump=-, --device-link-host ..., or JET_DEVICE_LINK_HOST=... (see docs/jet-app.md).
 //   JET_LOG_LEVEL and JET_DEVICE_CONFIG are read here, before configuration, and also live in
 //   Jet's schema so the environment source accepts them.
-import './lib/compat.js';
 import { ModuleManager } from '@versionzero/module-manager';
 import { Logger } from './lib/logger.js';
 import { loadLayers, appRoot } from './lib/config.js';
