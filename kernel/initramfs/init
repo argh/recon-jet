@@ -37,7 +37,7 @@ if mount -t ext4 -o noatime $UD /mnt/data 2>/dev/null; then
   M=/mnt/data/mainline/modules/lib/modules/$(uname -r)
   [ -d $M ] && { mkdir -p /lib/modules; ln -sfn $M /lib/modules/$(uname -r); log "userdata modules linked ($M)"; }
   # same tree for modprobe inside the Alpine chroot (userdata is /android-data there)
-  [ -d $M ] && [ -d /mnt/data/alpine ] && { mkdir -p /mnt/data/alpine/lib/modules; ln -sfn /android-data/mainline/modules/lib/modules/$(uname -r) /mnt/data/alpine/lib/modules/$(uname -r); }
+  for R in /mnt/data/rootfs /mnt/data/debian /mnt/data/alpine; do [ -d $M ] && [ -d $R ] && { mkdir -p $R/lib/modules; ln -sfn /android-data/mainline/modules/lib/modules/$(uname -r) $R/lib/modules/$(uname -r); }; done
   [ -d /mnt/data/mainline/firmware ] && [ -e /sys/module/firmware_class/parameters/path ] && echo /mnt/data/mainline/firmware > /sys/module/firmware_class/parameters/path
 else
   log "userdata mount FAILED ($UD)"
@@ -89,8 +89,11 @@ if [ -n "$UDC" ] && mkdir -p $G; then
   ip addr add $USBNET.1/24 dev usb0 2>/dev/null && ip link set usb0 up && log "usb0 $USBNET.1"
   # the initramfs busybox (Alpine busybox-static) has no udhcpd/telnetd: run network services
   # from the Alpine chroot on userdata (same rootfs the bridge uses), plus dropbear for ssh.
-  A=/mnt/data/alpine
+  # the userdata rootfs: mainline/rootfs is a symlink to the active tree (debian, alpine, ...);
+  # kernel/rootfs/ builds the Debian one, kernel/rootfs/install.sh installs and links it
+  A=/mnt/data/rootfs; [ -x $A/bin/sh ] || A=/mnt/data/debian; [ -x $A/bin/sh ] || A=/mnt/data/alpine
   if [ -x $A/bin/sh ]; then
+    log "rootfs $(readlink -f $A)"
     mount -o rbind /dev $A/dev; mount -t proc proc $A/proc; mount -t sysfs sys $A/sys   # rbind: devpts too (jetd console)
     mount -t tmpfs tmpfs $A/tmp; mount -t tmpfs tmpfs $A/run
     mkdir -p $A/android-data; mount -o bind /mnt/data $A/android-data
@@ -108,7 +111,7 @@ if [ -n "$UDC" ] && mkdir -p $G; then
         log "wifi: wpa_supplicant + udhcpc started on wlan0" ) &
     fi
   else
-    log "no Alpine rootfs on userdata: no DHCP/telnet/ssh (serial console only)"
+    log "no rootfs on userdata: no DHCP/telnet/ssh (serial console only)"
   fi
   ( while :; do getty -n -l /bin/sh -L 115200 ttyGS0 vt100 2>/dev/null; sleep 2; done ) &
 else

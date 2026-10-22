@@ -1078,7 +1078,7 @@ static int send_all(const void *buf, size_t len);
  *            on max_s (default 8), or on "v"; then "A <end|max|stop|error>".
  * W <len>    + <len> bytes of 48 kHz stereo S16 PCM to play (aplay hw:0,0); chunks are queued
  *            and drained without blocking the UI; "w" marks the end -> "w" back when played. */
-#define ALPINE "/mnt/data/alpine"
+#define ALPINE "/mnt/data/rootfs"      /* the userdata rootfs (symlink; see kernel/rootfs) */
 static pid_t cap_pid, play_pid;
 static int cap_fd = -1, play_fd = -1;
 static int64_t cap_t0, cap_max_ms, cap_last_voice, play_last;
