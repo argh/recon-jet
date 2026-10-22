@@ -106,3 +106,12 @@ for working around a problem are in the other docs; this is the list of what is 
   `work/`, flag files and env vars; the repo-level config story is not finished.
 - Node on the device (Alpine armv7) is viable for app logic; moving modes/menus/voice out of
   jetd behind a local socket is a plan, not done. Docker on the device: ruled out.
+
+## Voice turn (2026-10-22)
+- First audio arrives ~6 s after the user stops talking with qwen-27b (3.1 s to the first token,
+  then the first sentence); a smaller chat model (`VOICE_CHAT_MODEL`) is the obvious lever, and
+  splitting long first sentences at commas after ~60 characters the second.
+- GNU `tar` on the Debian rootfs fails to load ("unexpected PLT reloc type 0x80"); other binaries
+  are fine, busybox tar works. Cause unknown (loader vs this binary's relocations).
+- qwen3-asr on a quiet room returned empty partials; hallucination on real background noise is
+  untested.
