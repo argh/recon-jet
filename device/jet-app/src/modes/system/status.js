@@ -1,10 +1,10 @@
 // Status: clock, link state, a small battery strip plus the smoothed power readout, charger
 // registers, USB state, the last glance and new-view events. A power poll repaints only when
 // the displayed (rounded) values change; the clock comes from the mode tick.
+import { stateOfCharge } from '../../modules/power/soc.js';
 import { C, MARGIN, TOP, heading, row, hint } from '../../modules/ui/style.js';
 import { readNetwork } from './network.js';
 
-const BATTERY = { empty: 3400, full: 4150 };   // mV, for the strip
 const STRIP = { x: 60, y: TOP + 42, w: 60, h: 8 };
 const NET_TICKS = 5;   // address refresh while showing
 
@@ -34,10 +34,12 @@ export class StatusScreen {
   powerRows() {
     const { power } = this.sys, p = power.last, m = power.smoothed;
     if (!p || !m) return null;
+    const soc = power.soc ?? stateOfCharge(m);
     return {
-      charging: m.vbus > 4300 && m.ma > 0,
+      charging: soc.charging,
+      percent: soc.percent, full: soc.full,
       vbat: m.vbat, vbus: m.vbus,
-      battery: `${m.vbat} mV  ${m.ma >= 0 ? '+' : ''}${m.ma} mA`,
+      battery: `${soc.percent}%  ${m.vbat} mV  ${m.ma >= 0 ? '+' : ''}${m.ma} mA`,
       rails: `${m.vsys} / ${m.vbus} mV`,
       charger: `stat ${hex(p.stat1)}  ctrl ${hex(p.ctrl1)}  lin ${hex(p.linsts)}`,
       limits: `cin ${hex(p.cinlimit)}  vichrg ${hex(p.vichrg)}`,
@@ -54,8 +56,8 @@ export class StatusScreen {
     y = row(s, y, 'link', deviceLink.connected ? `${deviceLink.mode ?? '?'}  ${g.w}x${g.h} ${g.bpp} bpp` : 'down', deviceLink.connected ? C.ok : C.warn);
     const p = this.powerRows();
     if (p) {
-      const level = Math.max(0, Math.min(1, (p.vbat - BATTERY.empty) / (BATTERY.full - BATTERY.empty)));
-      const colour = p.vbat < 3500 ? C.bad : p.vbat < 3700 ? C.warn : C.ok;
+      const level = Math.max(0, Math.min(1, p.percent / 100));
+      const colour = p.percent < 15 ? C.bad : p.percent < 35 ? C.warn : C.ok;
       s.text(MARGIN, y, 'battery', { font: small, colour: C.dim });
       s.strokeRect(STRIP.x, y + 2, STRIP.w, STRIP.h, C.dim);
       s.fillRect(STRIP.x + 1, y + 3, Math.round((STRIP.w - 2) * level), STRIP.h - 2, colour);

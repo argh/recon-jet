@@ -1,6 +1,7 @@
 // The System mode against temp files standing in for userdata and sysfs: the first-use wizard
 // (pad -> glance -> brightness with "n of 3"), what each step writes and sends, the menu, and
 // the Status screen's repaint rule and address rows.
+import { stateOfCharge } from '../src/modules/power/soc.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -125,7 +126,7 @@ test('system: the menu opens every screen; brightness rear reverts; Status repai
   assert.equal(update(3990, -120), 1, 'first reading paints');
   assert.equal(update(3990, -120), 0, 'same rounded readout: nothing');
   assert.equal(update(3980, -120), 1);
-  assert.equal(status.powerRows().battery, '3980 mV  -120 mA');
+  assert.equal(status.powerRows().battery, `${stateOfCharge({ vbat: 3980, ma: -120, vsys: 4010, vbus: 4890 }).percent}%  3980 mV  -120 mA`);
   sys.onGesture('press:rear');
   assert.equal(update(3970, -120), 0, 'not showing: nothing');
   // addresses: the Status rows read what the Network screen reads
