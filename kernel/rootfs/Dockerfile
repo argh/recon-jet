@@ -8,15 +8,18 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       busybox dropbear-bin wpasupplicant iw wireless-tools iproute2 ethtool i2c-tools alsa-utils \
       bluez avahi-daemon libnss-mdns v4l-utils evtest curl ca-certificates xz-utils procps \
-      kmod file less nano \
+      kmod file less nano libatomic1 libstdc++6 openssh-client \
     && rm -rf /var/lib/apt/lists/*
-# busybox applets the initramfs init calls inside the chroot
-RUN for a in udhcpd udhcpc telnetd; do ln -sf /bin/busybox /usr/sbin/$a; done && mkdir -p /var/lib/misc
+# busybox applets the initramfs init calls inside the chroot (Debian's busybox has no telnetd), and
+# the udhcpc lease hook Debian does not ship
+RUN for a in udhcpd udhcpc; do ln -sf /bin/busybox /usr/sbin/$a; done && mkdir -p /var/lib/misc /usr/share/udhcpc
+COPY udhcpc-default.script /usr/share/udhcpc/default.script
+RUN chmod 755 /usr/share/udhcpc/default.script
 # Node 22 (official armv7l build) in /usr/local
 RUN curl -fsSL "https://nodejs.org/dist/latest-v22.x/${NODE_TAR}" -o /tmp/node.tar.xz \
     && tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz && rm /tmp/node.tar.xz \
     && ln -sf /usr/local/bin/node /usr/bin/node && ln -sf /usr/local/bin/npm /usr/bin/npm && node --version
 # mDNS: jet.local on usb0 + wlan0, no dbus needed with the daemon alone
-RUN sed -i 's/^#host-name=.*/host-name=jet/; s/^#allow-interfaces=.*/allow-interfaces=wlan0,usb0/; s/^use-ipv6=yes/use-ipv6=no/' /etc/avahi/avahi-daemon.conf \
+RUN sed -i 's/^#host-name=.*/host-name=jet/; s/^#allow-interfaces=.*/allow-interfaces=wlan0,usb0/; s/^use-ipv6=yes/use-ipv6=no/; s/^#enable-dbus=.*/enable-dbus=no/; s/^enable-dbus=.*/enable-dbus=no/' /etc/avahi/avahi-daemon.conf \
     && mkdir -p /etc/wpa_supplicant /root/.ssh /etc/dropbear /android-data /opt && chmod 700 /root/.ssh
 # the init mounts /proc /sys /dev /tmp /run and binds userdata at /android-data; nothing else runs at boot

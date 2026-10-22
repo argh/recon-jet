@@ -99,7 +99,7 @@ if [ -n "$UDC" ] && mkdir -p $G; then
     mkdir -p $A/android-data; mount -o bind /mnt/data $A/android-data
     chroot $A /bin/sh -c 'mkdir -p /var/lib/misc; touch /var/lib/misc/udhcpd.leases;
       printf "interface usb0\nstart '$USBNET'.10\nend '$USBNET'.20\nlease_file /var/lib/misc/udhcpd.leases\noption subnet 255.255.255.0\n" > /tmp/udhcpd.conf;
-      udhcpd /tmp/udhcpd.conf; telnetd -p 23' && log "udhcpd + telnetd (chroot) on usb0"
+      udhcpd /tmp/udhcpd.conf; command -v telnetd >/dev/null && telnetd -p 23; true' && log "udhcpd (chroot) on usb0"
     ( while :; do chroot $A /usr/sbin/dropbear -F -R -E -p 22 >/tmp/dropbear.log 2>&1; sleep 2; done ) &
     log "dropbear supervisor started (ssh root@$USBNET.1 / jet.local)"
     # WiFi (wlcore built in): join the network in the chroot if it has a wpa_supplicant config
@@ -107,7 +107,7 @@ if [ -n "$UDC" ] && mkdir -p $G; then
       ( for i in 1 2 3 4 5 6 7 8 9 10; do [ -d /sys/class/net/wlan0 ] && break; sleep 1; done
         ip link set wlan0 up || { log "wlan0 up FAILED"; exit 1; }
         chroot $A /bin/sh -c 'wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant/wpa_supplicant.conf >/dev/null 2>&1 </dev/null;
-          udhcpc -i wlan0 -b -q -t 20 >/dev/null 2>&1 </dev/null'
+          udhcpc -i wlan0 -b -q -t 20 -s /usr/share/udhcpc/default.script >/dev/null 2>&1 </dev/null'
         log "wifi: wpa_supplicant + udhcpc started on wlan0" ) &
     fi
   else
