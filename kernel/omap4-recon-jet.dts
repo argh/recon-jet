@@ -682,7 +682,10 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&usb_otg_hs_pins>;
 	interface-type = <1>;
-	mode = <3>;
+	/* peripheral only: in OTG mode (3) a glitch on the floating ID pin flips the controller to
+	 * host, the gadget drops ("reset config", "not attached" with VBUS present) and only a
+	 * replug brings it back; the Jet is never a USB host */
+	mode = <2>;
 	power = <50>;
 };
 
