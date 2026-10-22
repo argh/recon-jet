@@ -65,6 +65,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <math.h>
+#define _GNU_SOURCE
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <linux/i2c.h>
@@ -1096,7 +1097,9 @@ static unsigned char cap_in[76800]; static size_t cap_inlen;
 static unsigned char *play_buf; static size_t play_len, play_off, play_cap; static int play_end;
 
 static pid_t spawn_pipe(char *const argv[], int *fd, int for_write) {
-    int p[2]; if (pipe(p) < 0) return -1;
+    /* O_CLOEXEC: a child must not inherit the other child's pipe (an arecord started while aplay
+     * still runs kept aplay's stdin open, so aplay never saw EOF and jetd blocked in waitpid) */
+    int p[2]; if (pipe2(p, O_CLOEXEC) < 0) return -1;
     pid_t pid = fork();
     if (pid < 0) { close(p[0]); close(p[1]); return -1; }
     if (pid == 0) {
