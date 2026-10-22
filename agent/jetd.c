@@ -39,8 +39,9 @@
  *   V [max_s]         start voice capture (see the voice section), v stops it
  *   W <len> + bytes   queue 48 kHz stereo S16 PCM for the speaker; w = end of clip
  *   Y                 stop playback immediately and drop queued audio (barge-in) -> "w flushed"
- *   K <0|1>           raw keys: in remote mode forward every key down/up as it happens and
- *                     disable jetd's front-hold chooser (the app owns button semantics)
+ *   K <0|1>           raw keys: the client owns the UI: jetd stays in remote mode, forwards every
+ *                     key down/up as it happens and its chooser/setup/log screens are off until
+ *                     the last client disconnects (then the recovery chooser returns)
  *   E <0|1>           external surface: the client writes /dev/fb0 itself (reply "E w h bpp
  *                     line_length"); jetd draws nothing in remote mode, F pushes to the panel
  *   F [x y w h]       flush (whole screen, or just a rectangle in external-surface mode)
@@ -149,7 +150,6 @@ static void fb_flush(void) {
 /* External surface: a client owns the framebuffer pixels (writes /dev/fb0 itself) and asks jetd
  * only to push rectangles to the panel. jetd then draws nothing in remote mode except the live
  * viewfinder rectangle (Z). */
-static int ext_surface;
 static void fb_update(int x, int y, int w, int h) {
     if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; }
     if (x + w > (int)W) w = W - x; if (y + h > (int)H) h = H - y;
@@ -254,6 +254,7 @@ static int chooser_sel;
 static int dirty;            /* local render needed */
 
 /* ---- hub link ------------------------------------------------------------------ */
+static int raw_keys, ext_surface;   /* set by K / E: a client owns keys / pixels (defined here for hub_drop) */
 /* Hubs: up to MAXHUB connected clients (the on-device app, the host hub, debug sessions) all
  * receive every event (including binary payloads) and may all send commands. */
 #define MAXHUB 4
@@ -261,7 +262,7 @@ struct hub { int fd; char inbuf[1024]; size_t inlen; size_t bin_need; int64_t st
 static struct hub hubs[MAXHUB]; static int nhubs;
 static struct hub *cur_hub;      /* the hub whose line is being handled (W payload accounting) */
 static int only_fd = -1;         /* when >= 0, sendf/send_all go to this hub only (hello + log replay) */
-static void hub_drop(int i) { close(hubs[i].fd); hubs[i] = hubs[--nhubs]; }
+static void hub_drop(int i) { close(hubs[i].fd); hubs[i] = hubs[--nhubs]; if (!nhubs) { raw_keys = 0; ext_surface = 0; dirty = 1; } }   /* no client: recovery UI returns */
 static int hub_add(int fd) {
     if (nhubs == MAXHUB) hub_drop(0);
     struct hub *h = &hubs[nhubs++]; memset(h, 0, sizeof *h); h->fd = fd; return nhubs - 1;
@@ -860,9 +861,8 @@ static struct { int down; int64_t t; int consumed; } btn[2];   /* 0 front, 1 rea
 /* K 1: raw keys. In remote mode every key event (down and up, both pod buttons and the touchpad
  * swipe keys) is forwarded as it happens and jetd's own hold-to-open chooser is off, so the
  * application layer owns the button semantics. Other modes keep jetd's handling. */
-static int raw_keys;
 static void raw_key(unsigned code, int value) {
-    if (raw_keys && mode == M_REMOTE && !chooser) { sendf("k %u %d\n", code, value); return; }
+    if (raw_keys && nhubs) { if (mode != M_REMOTE) set_mode(M_REMOTE); chooser = 0; sendf("k %u %d\n", code, value); return; }
     int b = code == BTN_FRONT_CODE ? 0 : code == BTN_REAR_CODE ? 1 : -1;
     if (b < 0) { if (value == 1) dispatch_key(code); return; }
     if (value == 1) { btn[b].down = 1; btn[b].t = now_ms(); btn[b].consumed = 0; }
@@ -1208,7 +1208,7 @@ static void handle_line(char *l) {
     case 'E': ext_surface = atoi(l + 1) != 0; sendf("E %u %u %u %u\n", W, H, vinfo.bits_per_pixel, finfo.line_length); if (!ext_surface) dirty = 1; break;
     case 'Z': { int fps = 10; if (sscanf(l + 1, "%d %d %d %d %d", &x, &y, &w, &h, &fps) >= 4) vf_start(x, y, w, h, fps); } break;
     case 'z': vf_stop(); break;
-    case 'K': raw_keys = atoi(l + 1) != 0; break;
+    case 'K': raw_keys = atoi(l + 1) != 0; if (raw_keys) { chooser = 0; auto_remote = 0; if (mode != M_REMOTE) set_mode(M_REMOTE); dirty = 1; } break;   /* a client owns the UI */
     case 'J': { int n = atoi(l + 1); if (n <= 0 || n > klog_n) n = klog_n; for (int i = klog_n - n; i < klog_n; i++) sendf("j %s\n", klog[(klog_head + i) % LROWS]); sendf("J %d\n", n); } break;   /* log backlog: last n lines */
     case 'U': { glance_worn = -1; glance_open(); view_thresholds_load(); sendf("U %d %d %d %d\n", glance_on_thr, glance_off_thr, view_deg_thr, view_still_ms); } break;   /* re-read calibration files */
     case 'L': set_backlight(atoi(l + 1)); break;
