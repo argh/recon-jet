@@ -144,3 +144,10 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
   nearest-neighbour into that rectangle at up to `fps` (default 10) and pushes only that rectangle;
   reply `Z <srcw> <srch>`. `z` stops it. `S` while the viewfinder runs returns the next streamed
   frame instead of reopening the device. Drawn only in remote mode.
+
+## Raw keys
+
+`K 1` makes jetd forward every key event (down and up, both buttons and the touchpad swipe keys)
+immediately while in remote mode and disables its own front-hold chooser, so the application
+layer owns button semantics (hold detection, menus). jetd's other modes keep their own handling.
+`K 0` restores the chooser and press-pair reporting.

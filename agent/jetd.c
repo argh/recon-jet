@@ -38,6 +38,8 @@
  *    gets a fresh "h" hello whenever remote comes back and should redraw)
  *   V [max_s]         start voice capture (see the voice section), v stops it
  *   W <len> + bytes   queue 48 kHz stereo S16 PCM for the speaker; w = end of clip
+ *   K <0|1>           raw keys: in remote mode forward every key down/up as it happens and
+ *                     disable jetd's front-hold chooser (the app owns button semantics)
  *   E <0|1>           external surface: the client writes /dev/fb0 itself (reply "E w h bpp
  *                     line_length"); jetd draws nothing in remote mode, F pushes to the panel
  *   F [x y w h]       flush (whole screen, or just a rectangle in external-surface mode)
@@ -851,7 +853,12 @@ static void dispatch_rel(int dx, int dy) {
 /* raw evdev: buttons get hold detection, everything else goes straight through */
 static struct { int down; int64_t t; int consumed; } btn[2];   /* 0 front, 1 rear */
 
+/* K 1: raw keys. In remote mode every key event (down and up, both pod buttons and the touchpad
+ * swipe keys) is forwarded as it happens and jetd's own hold-to-open chooser is off, so the
+ * application layer owns the button semantics. Other modes keep jetd's handling. */
+static int raw_keys;
 static void raw_key(unsigned code, int value) {
+    if (raw_keys && mode == M_REMOTE && !chooser) { sendf("k %u %d\n", code, value); return; }
     int b = code == BTN_FRONT_CODE ? 0 : code == BTN_REAR_CODE ? 1 : -1;
     if (b < 0) { if (value == 1) dispatch_key(code); return; }
     if (value == 1) { btn[b].down = 1; btn[b].t = now_ms(); btn[b].consumed = 0; }
@@ -1191,6 +1198,7 @@ static void handle_line(char *l) {
     case 'E': ext_surface = atoi(l + 1) != 0; sendf("E %u %u %u %u\n", W, H, vinfo.bits_per_pixel, finfo.line_length); if (!ext_surface) dirty = 1; break;
     case 'Z': { int fps = 10; if (sscanf(l + 1, "%d %d %d %d %d", &x, &y, &w, &h, &fps) >= 4) vf_start(x, y, w, h, fps); } break;
     case 'z': vf_stop(); break;
+    case 'K': raw_keys = atoi(l + 1) != 0; break;
     case 'L': set_backlight(atoi(l + 1)); break;
     case 'P': sendf("p\n"); break;
     case 'G': sendf("g %d %d\n", glance_worn, glance_raw); break;
