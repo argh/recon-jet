@@ -116,10 +116,11 @@ export class Voice extends EventEmitter {
     this.#play(LISTEN_EARCON());
     // open the mic only after the earcon has played, so jetd's noise-floor window (its first
     // 300 ms of capture) does not measure the beep
-    setTimeout(() => {
+    const open = () => {
       if (this.turn !== turn || this.state !== 'listening') return;
       if (!this.deviceLink.captureStart(this.maxSeconds)) this.#fail('link down');
-    }, this.captureDelayMs);
+    };
+    if (this.captureDelayMs > 0) setTimeout(open, this.captureDelayMs); else open();
     this.#out({ type: 'start', turn });
     this.#session.connect().then(
       () => { if (this.turn === turn) this.#flushOutbox(); },
