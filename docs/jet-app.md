@@ -19,6 +19,7 @@ helpers that `@versionzero/module-manager` 1.0.0 uses (no shim).
 | `input` | sends `K 1` on connect (jetd forwards every key down/up at once and keeps its chooser off while in remote mode) and `K 0` when the run aborts; gestures from the raw stream: `press:front|rear|tap`, `hold:front|rear` (`holdMs`, 1 s: the hold fires while the button is still down; a release before that is the press; events may carry a timestamp `t`, and the release classifies from `t_up - t_down`), `swipe:up|down|left|right` from the key DOWN of the driver's swipe keys (103/108/105/106) only, debounced (`swipeDebounceMs`, 250 ms: a second swipe inside the window is dropped); the summed motion `r dx dy` is logged and re-emitted as `motion` but never navigates; raw keys and motion are logged at debug with timestamps | emits `press`, `hold`, `swipe`, `gesture` (name string) and `motion` |
 | `power` | polls `Q` every `pollMs` (2 s) while connected and jetd is in remote mode, parses the `q` line; `smoothed` = median of the last `samples` (8) polls of battery mV and mA, every mV/mA rounded to `roundStep` (10) | `last`, `smoothed`, `ingest(reading)`, emits `update` |
 | `ui` | screen stack + nested menu overlay; routes gestures (only while jetd is in remote mode); renders at most once per tick (clear, `render(surface)`, `flush()`) and only while `surface.active` (connected, jetd mode `remote`, surface acquired); full repaint on every hello and on `ready`; `leaveTo(mode)` hands the panel to a jetd mode and goes silent until `m remote` + hello | `show(screen)`, `openMenu()`, `closeMenu()`, `toggleMenu()`, `leaveTo(mode)`, `requestRender()`; `Screen` base (`render(surface)`, `onGesture(name)`, `onShow/onHide`), `Menu` (items may have `children`, `back`, `live` or `action`; `enter(item)`, `back()`, `depth`, `title`, `items`, `selected` of the current level), `StatusScreen`; palette `C` in `screen.js` |
+| `voice` | push-to-talk turns streamed through `host/voice-session.js` (WebSocket): idle → listening (earcon, `V`, every `a` chunk forwarded as a binary frame, `end` at `A`) → thinking (partial transcripts; a cached filler phrase `fillerMs` after the final transcript if no audio yet) → speaking (each sentence's audio queued with `W` as it arrives, `w` at `done`) → idle. Trigger `press:front` with no menu open; a press while listening ends the capture (`v`); a press while thinking/speaking is a barge-in (`Y`, `cancel`, new turn). `VoiceScreen` shows the answer wrapped (big font, small when long) and the transcript along the bottom; the ui strip says listening/thinking/speaking. Debug HTTP on `debugPort`: `POST /talk`, `POST /say {text}`, `POST /filler`, `GET /state` | `talk()`, `say(text)`, `makeFiller()`, `state`, `turn`, `transcript`, `answer`, emits `state` |
 | `jet` (`src/jet.js`) | main module (`AppModule`): references every subsystem, which is what instantiates them; heartbeat tick with link state and RSS | |
 
 Screens: **Status** (heading and clock in the big font; link state and geometry, a 60x8 battery
@@ -96,7 +97,7 @@ apart two), the median/rounding smoother and remote-only polling, menu nesting a
 ui (`test/menu.test.js`: enter/back/close, per-level selection), and the menu state machine
 through the real input/surface/ui stack against a stub link (open/close/move/pick, rear up one
 level vs close at the top, `M log`/`M setup` hand-over with no renders or commands until
-`m remote` + hello, camera toggle, power updates repainting only on a changed readout). `test/fake-jetd.js` is a protocol stand-in (hello,
+`m remote` + hello, camera toggle, power updates repainting only on a changed readout). the voice state machine against a fake link, input, ui and session (`test/voice.test.js`: press → earcon + `V` + `start`, chunks forwarded, `end` at `A`, partial/final/tokens/audio/done, the answer kept on screen, stale frames from an ended turn ignored; barge-in during speaking = `Y` + `cancel` + a new turn, press while listening = `v`; the filler fires when audio is late and not when it is early, a soft beep plus a cache render over a second session when there is no cache yet; triggers ignored under a menu or outside remote mode; a host dial failure or link drop ends the turn), the earcon generator and word wrap. `test/fake-jetd.js` is a protocol stand-in (hello,
 `P/Q/G/M/E/Z` replies, event injection) used by the tests and runnable standalone.
 
 ## Configuration
@@ -125,6 +126,10 @@ registers additively (future providers) without editing core.
 | `input.rawKeys` | `true` | send `K 1` on connect (false: jetd's chooser and press pairs, so holds never arrive) |
 | `power.pollMs` / `.samples` / `.roundStep` | `2000` / `8` / `10` | `Q` interval (0 disables); median window; display rounding (mV, mA) |
 | `ui.menuGestures` / `.clockMs` | `["hold:front"]` / `1000` | menu trigger; status refresh |
+| `voice.hostUrl` | (none) | `ws://<mac>:7779`, the `host/voice-session.js` address; set it in the device or personal layer (the Mac's USB address is leased: see `/tmp/jetd.log` or the udhcpd leases); empty = voice off |
+| `voice.enabled` / `.triggers` / `.maxSeconds` | `true` / `["press:front"]` / `8` | front press starts a turn; longest capture |
+| `voice.fillerMs` / `.fillerText` / `.fillerPath` | `700` / `hmm` / `/android-data/mainline/voice/filler.pcm` | filler delay after the transcript; the phrase (rendered once by the host, cached on the device); the cache |
+| `voice.debugPort` | `0` | `JET_VOICE_DEBUG_PORT`: debug HTTP (`POST /talk`, `/say`, `/filler`; `GET /state`) |
 | `jet.logLevel` / `jet.deviceConfig` | `info` / `/android-data/mainline/jet-app.json` | logging; device layer path |
 
 Secrets (none yet) belong in `/android-data/mainline/jet-app.env`, sourced by `deploy/jet-app.sh`.
@@ -165,9 +170,23 @@ gestures, `Q` polling, mode changes and hello-triggered redraws) was exercised t
 Note that jetd holds up to four hub sockets and `E` is a jetd-global flag: a Mac hub drawing with
 `T`/`B` while jet-app owns the surface is ignored until `E 0`.
 
+### Voice (2026-10-22)
+
+The `voice` module runs a streaming push-to-talk turn against `host/voice-session.js` on the Mac
+(`LLM_BASE=... LLM_INSECURE_TLS=1 node host/voice-session.js`, port 7779; `host/voice-client.js`
+drives a turn from a wav file for measurements). Measured on the Jet over USB with the debug
+trigger: the earcon and `V` go out within 2 ms of the press; a quiet room runs to `A max` at 8.5 s
+and the (empty) final transcript is back 215 ms later; a press while listening ends the capture
+in ~90 ms; a `say hello` round trip (host TTS → ffmpeg → USB → `W`) is 250 ms warm, 2.5 s with
+kokoro cold; the filler renders in ~400 ms. Host stages for a 3.7 s spoken question
+(`voice-client.js`, warm): partials every second at ~200 ms each (the whole buffer, no window
+needed), final 380 ms after `end`, first LLM token 3.1 s (qwen-27b prompt eval), 41 tokens in
+4.9 s, first-sentence TTS 1.2 s + ffmpeg 0.13 s, first audio 6.0 s after `end`, so the filler
+plays in every real turn. Cold starts add ~10 s for the chat model and ~2.3 s for kokoro.
+
 ## Deferred (later phases)
 
 `modes` (log/shell/setup rendered by the app itself rather than handed to jetd), `sensors`
-policies, `voice`, `vision`, `providers/*`, `hub` HTTP API on the device, init supervision line,
+policies, `vision`, `providers/*`, `hub` HTTP API on the device, init supervision line,
 the `--config` file option (available but unused; layering is done in `src/lib/config.js`), ESLint
 config, decoding camera `S` frames (UYVY) into the surface.

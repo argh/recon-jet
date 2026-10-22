@@ -44,6 +44,7 @@ Modules: `snd-soc-tfa989x`, `snd-soc-omap-mcbsp`, `snd-soc-dmic`, `snd-soc-omap-
 | `POST /say {text}` | hub | TTS (kokoro was used; returns 24 kHz mono) -> ffmpeg to 48 kHz stereo S16 -> `W` chunks + `w`; resolves on `w done` |
 | `POST /converse` | hub | listen -> chat model -> say, with transcript and answer on the glass; `--ptt` binds it to a front click |
 | `host/listen.sh`, `host/say.sh`, `host/converse.sh` | host | CLI equivalents (arecord/aplay over ssh, older path) |
+| `host/voice-session.js` + jet-app `voice` | host + device | the streaming turn: capture chunks go to the host over a WebSocket as they arrive, partial transcripts come back every second, the answer streams and each sentence is synthesised and queued to `W` while the model is still talking; `Y` + `cancel` for barge-in (see `docs/jet-app.md`) |
 
 Endpoint and model names come from `LLM_BASE`, `LLM_ASR_MODEL`, `LLM_TTS_MODEL`,
 `LLM_TTS_VOICE`, `LLM_CHAT_MODEL` (OpenAI-compatible API).

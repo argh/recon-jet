@@ -3,5 +3,6 @@
   "surface": { "device": "/dev/fb0", "minFlushMs": 30, "viewfinderFps": 10 },
   "input": { "holdMs": 1000, "swipeDebounceMs": 250 },
   "power": { "pollMs": 2000, "samples": 8, "roundStep": 10 },
-  "ui": { "menuGestures": ["hold:front"], "clockMs": 1000 }
+  "ui": { "menuGestures": ["hold:front"], "clockMs": 1000 },
+  "voice": { "enabled": true, "fillerMs": 700, "fillerText": "hmm", "maxSeconds": 8 }
 }

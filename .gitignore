@@ -21,3 +21,5 @@ tools/*/su
 device/jet-app/node_modules/
 device/jet-app/personal/*
 !device/jet-app/personal/jet-app.example.json
+
+host/node_modules/

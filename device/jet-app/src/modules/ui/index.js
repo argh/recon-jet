@@ -10,6 +10,7 @@
 import { Schema } from '@versionzero/module-manager';
 import { Menu } from './menu.js';
 import { StatusScreen } from './status.js';
+import { C, STRIP_H } from './screen.js';
 
 const s = Schema.create;
 
@@ -30,7 +31,9 @@ export class Ui {
 
   /** @type {import('./screen.js').Screen} */ screen;
   /** @type {Menu|null} */ menu = null;
+  /** @type {{text: string, colour: number}|null} the system strip along the top, over any screen */ strip = null;
   #pending = false;
+  #stripTimer = null;
   renders = 0;   // flushed frames (diagnostics, tests)
 
   async start() {
@@ -47,7 +50,18 @@ export class Ui {
     this.#setActive();   // the surface may already be up (jetd connected before we started)
     this.show(this.status);
   }
-  async stop() { this.menu?.onHide(); this.screen?.onHide(); }
+  async stop() { clearTimeout(this.#stripTimer); this.menu?.onHide(); this.screen?.onHide(); }
+
+  /**
+   * The 10 px status strip along the top (listening/looking indicator, transient notices).
+   * `null` clears it; `ms` makes it a notice that clears itself.
+   */
+  setStrip(text, { colour = C.ok, ms = 0 } = {}) {
+    clearTimeout(this.#stripTimer); this.#stripTimer = null;
+    this.strip = text ? { text, colour } : null;
+    if (text && ms > 0) { this.#stripTimer = setTimeout(() => { this.strip = null; this.requestRender(); }, ms); this.#stripTimer.unref?.(); }
+    this.requestRender();
+  }
 
   #setActive() { this.surface.active = this.deviceLink.connected && this.deviceLink.mode === 'remote' && this.surface.ready; }
 
@@ -113,6 +127,10 @@ export class Ui {
     const t0 = performance.now();
     this.surface.clear();
     (this.menu ?? this.screen).render(this.surface);
+    if (this.strip) {   // the small font is 12 px: drawn one row up, its blank top row falls off the panel
+      this.surface.fillRect(0, 0, this.surface.width, STRIP_H, C.panel);
+      this.surface.text(4, -1, this.strip.text, { font: this.surface.fonts.small, colour: this.strip.colour, maxWidth: this.surface.width - 8 });
+    }
     const renderMs = +(performance.now() - t0).toFixed(2);
     const rect = this.surface.flush();
     this.renders++;
