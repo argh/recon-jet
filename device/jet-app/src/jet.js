@@ -1,7 +1,7 @@
 // Jet: the main module. Referencing each subsystem here is what instantiates it.
 import { AppModule, Schema } from '@versionzero/module-manager';
 import { DeviceLink } from './modules/device-link/index.js';
-import { Display } from './modules/display/index.js';
+import { Surface } from './modules/surface/index.js';
 import { Input } from './modules/input/index.js';
 import { Power } from './modules/power/index.js';
 import { Ui } from './modules/ui/index.js';
@@ -15,16 +15,16 @@ export class Jet extends AppModule {
     isMain: true,
     schema: s()
       .property('deviceLink', s('DeviceLink').meta('internal', true))
-      .property('display', s('Display').meta('internal', true))
+      .property('surface', s('Surface').meta('internal', true))
       .property('input', s('Input').meta('internal', true))
       .property('power', s('Power').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
       .property('logLevel', s('string').default('info').values(['debug', 'info', 'warn', 'error']).meta('description', 'log threshold'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer (read before configuration)'))
       .property('tickRate', s('number').default(60000).meta('hidden', true)),
-    register: [DeviceLink, Display, Input, Power, Ui],
+    register: [DeviceLink, Surface, Input, Power, Ui],
   };
-  deviceLink; display; input; power; ui; logLevel; deviceConfig;
+  deviceLink; surface; input; power; ui; logLevel; deviceConfig;
 
   async init() {
     await super.init();

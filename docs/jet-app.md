@@ -1,9 +1,10 @@
 # jet-app: the Node application layer (`device/jet-app/`)
 
-Phase 1 of the Node port (`work/node-port-plan.md`). jet-app runs on the Jet, inside the Alpine
-chroot (Node 20.15, armv7), connects to `jetd` over its TCP line protocol (`docs/jetd.md`) as
-the hub, and draws only while jetd's remote mode is showing. jetd's own modes (log, shell, setup,
-the front-hold chooser) are untouched; jet-app is just the hub that happens to live on the device.
+Phases 1-2 of the Node port (`work/node-port-plan.md`). jet-app runs on the Jet, inside the Alpine
+chroot (Node 22, armv7), connects to `jetd` over its TCP line protocol (`docs/jetd.md`) as the
+hub, takes jetd's external pixel surface and draws only while jetd's remote mode is showing.
+jetd's own modes (log, shell, setup, the front-hold chooser) are untouched; jet-app is just the
+hub that happens to live on the device.
 
 
 Runtime: Node 22 (Alpine 3.22 `nodejs` package) in the Jet's Alpine chroot; Node 22 has the iterator
@@ -13,16 +14,18 @@ helpers that `@versionzero/module-manager` 1.0.0 uses (no shim).
 
 | module (`src/modules/`) | job | events / API |
 |---|---|---|
-| `device-link` | TCP client to jetd (or acceptor when `listen=true`), line + binary framing (`f` frames, `a` audio chunks), reconnect with dial timeout, request/reply helpers | emits `connected`, `disconnected`, `hello`, `key`, `rel`, `mode`, `log`, `glance`, `view`, `captureChunk`, `captureEnd`, `playDone`, `pong`, `power`, `frame`, `jetError`; methods `send`, `clear`, `text`, `rect`, `colour`, `flush`, `backlight`, `setMode`, `captureStart/Stop`, `play`/`playEnd`, `ping`, `power`, `glance`, `snapshot` |
-| `display` | character grid (cols x rows from the hello, 42x12 with the main font) with per-row colour and alignment; `flush()` diffs against what jetd shows and resends only changed rows (`B` black rect + `T`/`A`, `F`), full `C` redraw when more than half changed or after a hello; `active` gates drawing | `grid.set(row, text, {colour, centre})`, `flush()`, `invalidate()`; `layout.js`: `wrap`, `spread`, `truncate` |
+| `device-link` | TCP client to jetd (or acceptor when `listen=true`), line + binary framing (`f` frames, `a` audio chunks), reconnect with dial timeout, request/reply helpers | emits `connected`, `disconnected`, `hello`, `key`, `rel`, `mode`, `log`, `glance`, `view`, `captureChunk`, `captureEnd`, `playDone`, `pong`, `power`, `surface`, `frame`, `jetError`; methods `send`, `clear`, `text`, `rect`, `colour`, `flush`, `flushRect`, `surface`, `viewfinder`, `viewfinderStop`, `backlight`, `setMode`, `captureStart/Stop`, `play`/`playEnd`, `ping`, `power`, `glance`, `snapshot` |
+| `surface` | jetd's external pixel surface: `E 1` on connect, an RGB565 back buffer sized from the reply, canvas-style drawing, PSF fonts, dirty tracking, `flush()` writes the changed rectangle to `/dev/fb0` and sends `F x y w h`; `viewfinder()` hands a rectangle to jetd's camera stream; `E 0` at shutdown | emits `ready`; API below |
 | `input` | gestures from raw events: `press:front|rear|tap`, `hold:front|rear` (`holdMs`, 1 s), `swipe:up|down|left|right` from the driver's swipe keys and from raw `r dx dy` (threshold, deduped against the key that follows) | emits `press`, `hold`, `swipe` and `gesture` (name string) |
 | `power` | polls `Q` every `pollMs` (2 s) while connected, parses the `q` line | `last`, emits `update` |
-| `ui` | screen stack + menu overlay; routes gestures; renders at most once per tick; keeps `display.active` = connected and jetd mode is `remote`; redraws on every hello | `show(screen)`, `openMenu()`, `closeMenu()`, `requestRender()`; `Screen` base (`render(grid)`, `onGesture(name)`), `Menu`, `StatusScreen` |
+| `ui` | screen stack + menu overlay; routes gestures; renders at most once per tick (clear, `render(surface)`, `flush()`); keeps `surface.active` = connected, jetd mode `remote` and surface acquired; full repaint on every hello and on `ready` | `show(screen)`, `openMenu()`, `closeMenu()`, `requestRender()`; `Screen` base (`render(surface)`, `onGesture(name)`), `Menu`, `StatusScreen`; palette `C` in `screen.js` |
 | `jet` (`src/jet.js`) | main module (`AppModule`): references every subsystem, which is what instantiates them; heartbeat tick with link state and RSS | |
 
-Screens: **Status** (clock, link state and geometry, battery mV/mA, VSYS/VBUS, charger and
-limit registers, UDC state and gadget MaxPower, last glance event, last new-view event) and the
-**menu** (`Status`, `Back to jetd remote`). "Back to jetd remote" shows a passive screen that
+Screens: **Status** (heading and clock in the big font; link state and geometry, a battery bar with
+charge bolt, battery mV/mA, VSYS/VBUS, charger and limit registers, UDC state and gadget MaxPower,
+last glance event, last new-view event in the small font) and the **menu** (`Status`, `Camera`,
+`Back to jetd remote`). `Camera` toggles jetd's live viewfinder in the 160x120 thumbnail drawn
+beside the list; closing the menu stops it. "Back to jetd remote" shows a passive screen that
 draws nothing, so jetd's remote mode looks like a plain hub-less remote; the menu gesture brings
 the menu back.
 
@@ -31,13 +34,44 @@ mode chooser) and forwards buttons as a down/up pair at release, so holds never 
 Until jetd forwards raw keys (plan step 2), `press:rear` also opens the menu
 (`ui.menuGestures`).
 
-Library bits: `src/lib/logger.js` (JSON lines on stdout, `JET_LOG_LEVEL`), `src/lib/config.js`
-(layering below), `src/lib/compat.js` (iterator-helper shim: `@versionzero/module-manager` 1.0.0
-calls `map.values().find()`, which Node 20 lacks although the package declares `node >= 20.9`).
+### Surface API (`src/modules/surface/`)
 
-Tests (`npm test`, `node --test`, no device): protocol parser incl. split binary payloads, grid
-diff and flush output, press/hold/swipe detection. `test/fake-jetd.js` is a protocol stand-in
-(hello, `P/Q/G/M` replies, event injection) used by the tests and runnable standalone.
+The surface owns the panel from jetd's `E 1` reply (`{w, h, bpp, stride}`, 428x240, 16 bpp,
+stride 856 on this panel; nothing is hardcoded) until the app exits (`E 0`, sent when the run is
+aborted, before the link closes). Drawing goes to a `Raster` (`raster.js`: pure JS, no device
+knowledge, `pitch` from the stride so rows are written as-is); the module delegates:
+
+| call | meaning |
+|---|---|
+| `clear(colour)`, `fillRect(x, y, w, h, colour)`, `strokeRect(x, y, w, h, colour, {width})`, `line(x0, y0, x1, y1, colour)` | colours are `0xRRGGBB` or `[r, g, b]`, packed to 565 once per call |
+| `text(x, y, str, {font, colour, align, maxWidth, background})` -> box | `font` = `surface.fonts.main` (10x20 bold `ter-u20b`) or `.small` (6x12 `Lat2-Terminus12x6`), default main; `align` `left`/`center`/`right` makes `x` that edge; `maxWidth` truncates with `~`; `background` fills the cell |
+| `measureText(str, {font, maxWidth})` -> `{w, h, chars}` | monospace layout |
+| `blitRGB565(buf, x, y, w, h, {pitch})` | raw 565 pixels |
+| `blitImage(image, x, y, {w, h})` | `{width, height, data}` RGBA or RGB (e.g. `surface.decodeJpeg(buf)`, jpeg-js), nearest-neighbour scaled when `w`/`h` differ |
+| `icon(x, y, icon, colour, {scale})` | 1 bpp icons: `icons.js` (`parseIcon(['#..', ...])`, `surface.icons.battery/bolt/camera/usb`) |
+| `flush()` -> rect or null | union of everything drawn since the last flush, narrowed to the pixels that actually differ from what the panel shows (`diffRect`), written to the device with positional `writeSync` (whole rows in one write; rows crossing the viewfinder as spans), then `F x y w h`; rate-limited by `minFlushMs` |
+| `invalidate()` | full rewrite on the next flush (hello: jetd's other modes drew over us) |
+| `viewfinder(x, y, w, h, fps)` -> `{w, h}` source size, `stopViewfinder()` | `Z`/`z`; while active the rectangle belongs to jetd and is never written; on stop it is forced back on the next flush |
+| `active`, `ready`, `width`, `height`, `geometry`, `viewfinderRect`, `fonts`, `icons`, `raster` | state |
+
+Fonts are PSF1 or PSF2 (`psf.js`, unicode tables honoured, missing glyphs render `?`) loaded from
+`assets/fonts/` (copied from `agent/font/`; `surface.fontDir`, `.mainFont`, `.smallFont`).
+
+Measured on the Jet (Node 22, Cortex-A9): clear 0.1 ms, a 42-character big-font row 3.6 ms, a
+71-character small row 2.6 ms, the status screen (2 big + 12 small rows, bars) ~10 ms to raster,
+diff of a full frame ~2.5 ms, one full-frame write to `/dev/fb0` ~4 ms, a 160x120 thumbnail
+from 640x480 RGBA 6.5 ms. A full repaint through `ui` (render + flush) is 15-30 ms; a clock
+tick is ~5 ms.
+
+Library bits: `src/lib/logger.js` (JSON lines on stdout, `JET_LOG_LEVEL`), `src/lib/config.js`
+(layering below).
+
+Tests (`npm test`, `node --test`, no device): protocol parser incl. split binary payloads, PSF1/2
+parsing, 565 packing, rectangle algebra, `diffRect`, text layout and alignment, blits (jpeg-js
+round trip), the surface flush against a file standing in for `/dev/fb0` (changed rows only,
+viewfinder rectangle untouched), press/hold/swipe detection. `test/fake-jetd.js` is a protocol
+stand-in (hello, `P/Q/G/M/E/Z` replies, event injection) used by the tests and runnable
+standalone.
 
 ## Configuration
 
@@ -59,7 +93,8 @@ registers additively (future providers) without editing core.
 | `deviceLink.host` / `.port` | `127.0.0.1` / `7777` | jetd to dial |
 | `deviceLink.listen` / `.bind` | `false` / `0.0.0.0` | accept jetd dialling us (put our address in `mainline/hub`) instead |
 | `deviceLink.reconnectMs` / `.dialTimeoutMs` / `.replyTimeoutMs` | `2000` / `5000` / `5000` | link timing |
-| `display.cols` / `.rows` / `.minFlushMs` | `42` / `12` / `50` | geometry before the first hello; flush rate limit |
+| `surface.device` / `.minFlushMs` / `.viewfinderFps` | `/dev/fb0` / `30` / `10` | framebuffer to write; flush rate limit; default camera rate |
+| `surface.fontDir` / `.mainFont` / `.smallFont` | `assets/fonts` / `ter-u20b.psf` / `Lat2-Terminus12x6.psf` | PSF fonts |
 | `input.holdMs` / `.swipeThreshold` / `.swipeDedupeMs` / `.tapCode` | `1000` / `20` / `300` / `28` | gesture detection |
 | `power.pollMs` | `2000` | `Q` interval (0 disables) |
 | `ui.menuGestures` / `.clockMs` | `["hold:front","press:rear"]` / `1000` | menu trigger; status refresh |
@@ -69,8 +104,10 @@ Secrets (none yet) belong in `/android-data/mainline/jet-app.env`, sourced by `d
 
 ## Running
 
-On the Mac against a jetd that listens: `JET_DEVICE_LINK_HOST=jet.local npm start`.
-Against the stand-in: `node test/fake-jetd.js 7790` in one terminal, `JET_DEVICE_LINK_PORT=7790 npm start` in another.
+On the Mac against the stand-in: `node test/fake-jetd.js 7790` in one terminal,
+`JET_DEVICE_LINK_PORT=7790 JET_SURFACE_DEVICE=/tmp/fb0 npm start` in another (the surface writes a
+file instead of the panel). Against a real jetd the app must run on the Jet: it writes that
+machine's `/dev/fb0`.
 
 On the device (`/opt/jet-app` inside the chroot = `/android-data/alpine/opt/jet-app`):
 
@@ -80,35 +117,23 @@ JET_HOST=... sh device/jet-app/deploy/install.sh   # scp -O, extract, chown 0:0,
 tools/jsh.sh '/opt/jet-app/deploy/jet-app.sh start|stop|restart|status'   # log: /tmp/jet-app.log (JSON lines)
 ```
 
-No npm on the device, so dependencies come from the Mac's `node_modules` (no native addons).
-Startup is ~2 s to the first dial, RSS ~50 MB on the Jet (Node 20 baseline is most of it).
+No npm on the device, so dependencies come from the Mac's `node_modules` (pure JS only: `jpeg-js` is
+the one runtime dependency beyond the `@versionzero/*` packages).
+Startup is ~2 s to the first dial, RSS ~55 MB on the Jet (the Node baseline is most of it).
 
-## Status of the device link (2026-10-21)
+## Status (2026-10-21)
 
-jet-app runs on the Jet (process supervision, logging, config layering, reconnect loop all
-exercised there), and the whole protocol path was exercised from the device against the
-stand-in on the Mac (`JET_DEVICE_LINK_HOST=<mac> JET_DEVICE_LINK_PORT=7790`): hello -> status
-screen, `Q` polling, rear press -> menu, swipe from `r`+key deduped, front press -> passive
-remote screen, `m log`/`m remote`+hello -> single redraw, glance/view on the status screen,
-disconnect -> redial. Gesture-to-draw latency device -> Mac was 15-40 ms.
-
-It could **not** connect to the real jetd, for two reasons outside this layer:
-
-1. `lo` is DOWN on the device (initramfs init never brings it up), so every locally addressed TCP
-   connection (127.0.0.1 and the device's own usb0/wlan0 addresses alike) is silently dropped.
-   Fix: `ip link set lo up` in `kernel/initramfs/init` (and once by hand for the running system).
-2. The running jetd has no listening socket on 7777 (only its outbound hub link; its bind must
-   have failed at start), so nothing can connect inbound until jetd is restarted.
-
-Both are one-line fixes but touch init/jetd, which phase 1 leaves alone. jet-app keeps dialling
-(5 s dial timeout, 2 s pause) and will take over as soon as a listening jetd is reachable. Note
-that jetd holds a single hub socket: an inbound jet-app displaces a connected Mac hub, and a Mac
-hub dialling the Jet displaces jet-app; `listen=true` with `127.0.0.1` first in `mainline/hub`
-is the intended steady state (plan section 3).
+Phase 2 runs on the Jet against the real jetd (loopback is up, jetd listens on 7777): `E 1` is
+answered with `428 240 16 856`, the status screen and menu are rasterised and flushed as
+rectangles, the camera thumbnail streams through `Z` and stops with `z`, and `E 0` goes out on
+SIGTERM before the link closes. Phase 1 (process supervision, config layering, reconnect loop,
+gestures, `Q` polling, mode changes and hello-triggered redraws) was exercised the same way.
+Note that jetd holds up to four hub sockets and `E` is a jetd-global flag: a Mac hub drawing with
+`T`/`B` while jet-app owns the surface is ignored until `E 0`.
 
 ## Deferred (later phases)
 
 `modes` (log/shell/setup in the app, needs `JETD_RAW_KEYS`/`N`/`K`/`O` in jetd), `sensors`
 policies, `voice`, `vision`, `providers/*`, `hub` HTTP API on the device, init supervision line,
 the `--config` file option (available but unused; layering is done in `src/lib/config.js`), ESLint
-config, 71x20 small-font geometry (the grid already follows the hello).
+config, decoding camera `S` frames (UYVY) into the surface.

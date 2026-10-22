@@ -43,7 +43,7 @@ export class DeviceLink extends EventEmitter {
     this.#stopped = true;
     clearTimeout(this.#timer);
     this.#server?.close();
-    this.#sock?.destroy();
+    this.#sock?.end();   // let queued commands (E 0, z) reach jetd; 'close' follows the FIN
   }
 
   #dial() {
@@ -91,7 +91,9 @@ export class DeviceLink extends EventEmitter {
       case 'w': return this.#resolve('w', a[0], 'playDone');
       case 'p': return this.#resolve('p', true, 'pong');
       case 'q': return this.#resolve('q', parsePower(a), 'power');
-      case 'e': this.emit('jetError', a.join(' ')); return this.#reject('f', new Error(a.join(' ')));
+      case 'E': return this.#resolve('E', { w: +a[0], h: +a[1], bpp: +a[2], stride: +a[3] }, 'surface');
+      case 'Z': return this.#resolve('Z', { w: +a[0], h: +a[1] });
+      case 'e': { const msg = a.join(' '); this.emit('jetError', msg); return this.#reject(msg.startsWith('viewfinder') ? 'Z' : 'f', new Error(msg)); }
       default: return this.emit('unknown', m.line);
     }
   }
@@ -119,6 +121,13 @@ export class DeviceLink extends EventEmitter {
   power() { return this.#request('q', 'Q'); }
   glance() { return this.#request('g', 'G'); }
   snapshot({ w = 640, h = 480, skip = 6 } = {}) { return this.#request('f', `S ${w} ${h} ${skip}`, 15000); }
+  /** Take (or return) the panel pixels; resolves with `{w, h, bpp, stride}` (see docs/jetd.md). */
+  surface(on) { return this.#request('E', `E ${on ? 1 : 0}`); }
+  /** External surface: push one framebuffer rectangle to the panel. */
+  flushRect(x, y, w, h) { return this.send(`F ${x} ${y} ${w} ${h}`); }
+  /** Live camera into a panel rectangle; resolves with the source size `{w, h}`. */
+  viewfinder(x, y, w, h, fps = 10) { return this.#request('Z', `Z ${x} ${y} ${w} ${h} ${fps}`); }
+  viewfinderStop() { return this.send('z'); }
   /** Resolves once connected (immediately if already). */
   async ready(signal) { if (!this.#sock) await once(this, 'connected', { signal }); }
 

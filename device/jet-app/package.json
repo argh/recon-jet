@@ -4,7 +4,9 @@
   "private": true,
   "description": "Node application layer for the Recon Jet (talks to jetd over its line protocol)",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "main": "src/main.js",
   "scripts": {
     "start": "node src/main.js",
@@ -15,6 +17,7 @@
   "dependencies": {
     "@versionzero/configurator": "^1.0.0",
     "@versionzero/module-manager": "^1.0.0",
-    "@versionzero/schema": "^1.4.0"
+    "@versionzero/schema": "^1.4.0",
+    "jpeg-js": "^0.4.4"
   }
 }
