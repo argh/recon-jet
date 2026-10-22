@@ -68,6 +68,21 @@ avahi in the chroot (`host-name=jet`, usb0 + wlan0, no dbus), started by init: t
   bitrate pins at 1 Mbit/s (50 % ping loss, multi-second RTT); `hciconfig hci0 down` restores
   MCS6 immediately. No bluetoothd/dbus is set up yet (hciconfig/hcitool only).
 
+## What the Jet reaches over WiFi
+
+- **The inference server** (jet-app's `llm.base`, an OpenAI-compatible `https://<server>/v1`):
+  `/audio/transcriptions`, `/chat/completions`, `/audio/speech`, and the vision model through
+  chat completions. The voice and vision loops run from the device against it; no Mac is
+  involved. The certificate is a public chain (Let's Encrypt), so plain `https` verifies on the
+  Jet's rootfs: no insecure TLS options anywhere. One keep-alive connection pool, so a turn's
+  ASR, chat and TTS calls reuse the TLS session. The address is per-device configuration
+  (`mainline/jet-app.json`), never in the repo.
+- The Jet sits on an IoT VLAN; the LLM, web and npm endpoints are opened to it there (a 403 from
+  the server is a proxy ACL, not TLS). mDNS does not cross VLANs: from the Mac on the main VLAN
+  `jet.local` resolves only over USB, so without USB use the Jet's IoT address
+  (`JET_HOST=<address>` for `tools/jsh.sh` and the deploy scripts; the lease can change).
+- Avahi, `apk`/`apt` and the deploy `scp` as before; the hub below is optional.
+
 ## Hub (`host/jet-hub.js`, Node, no dependencies)
 
 - TCP **7777**: jetd protocol (listen for the Jet dialling in, or dial the Jet:
@@ -77,6 +92,8 @@ avahi in the chroot (`host-name=jet`, usb0 + wlan0, no dbus), started by init: t
 - `HUB_JET_PORT` / `HUB_HTTP_PORT` override the ports so a second hub can run beside another.
 - `LLM_BASE` etc. point at the local LLM server (OpenAI-compatible); `host/vision.js` sends
   `chat_template_kwargs: {enable_thinking: false}` to the VLM or it burns its budget thinking.
+- The hub, `host/voice-session.js` and the scripts are developer tools now (`host/README.md`):
+  the device talks to the inference server itself.
 
 ## Known link problems (see open-questions.md)
 

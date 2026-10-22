@@ -2,5 +2,6 @@
   "_comment": "copy to personal/jet-app.json (gitignored); keys mirror config/jet-app.default.json",
   "deviceLink": { "host": "jet.local" },
   "power": { "pollMs": 5000 },
-  "voice": { "hostUrl": "ws://mac.example:7779" }
+  "llm": { "base": "https://llm.example/v1" },
+  "voice": { "debugPort": 7781 }
 }

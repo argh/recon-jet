@@ -9,6 +9,7 @@ import { Power } from './modules/power/index.js';
 import { Sensors } from './modules/sensors/index.js';
 import { Ui } from './modules/ui/index.js';
 import { Modes } from './modules/modes/index.js';
+import { Llm } from './modules/llm/index.js';
 import { Voice } from './modules/voice/index.js';
 import { LogMode } from './modes/log/index.js';
 import { DemoMode } from './modes/demo/index.js';
@@ -30,6 +31,7 @@ export class Jet extends AppModule {
       .property('sensors', s('Sensors').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
       .property('modes', s('Modes').meta('internal', true))
+      .property('llm', s('Llm').meta('internal', true))
       .property('voice', s('Voice').meta('internal', true))
       .property('logMode', s('LogMode').meta('internal', true))
       .property('demoMode', s('DemoMode').meta('internal', true))
@@ -38,9 +40,9 @@ export class Jet extends AppModule {
       .property('logLevel', s('string').default('info').values(['debug', 'info', 'warn', 'error']).meta('description', 'log threshold'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer (read before configuration)'))
       .property('tickRate', s('number').default(60000).meta('hidden', true)),
-    register: [DeviceLink, Surface, Input, Power, Sensors, Ui, Modes, Voice, LogMode, DemoMode, SystemMode, AssistantMode],
+    register: [DeviceLink, Surface, Input, Power, Sensors, Ui, Modes, Llm, Voice, LogMode, DemoMode, SystemMode, AssistantMode],
   };
-  deviceLink; surface; input; power; sensors; ui; modes; voice; logMode; demoMode; systemMode; assistantMode; logLevel; deviceConfig;
+  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; logMode; demoMode; systemMode; assistantMode; logLevel; deviceConfig;
 
   async init() {
     await super.init();

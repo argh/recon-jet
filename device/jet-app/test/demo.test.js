@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import jpeg from 'jpeg-js';
-import { uyvyToRgba } from '../src/modes/demo/uyvy.js';
+import { uyvyToRgba } from '../src/lib/uyvy.js';
 import { DemoMode } from '../src/modes/demo/index.js';
 import { fakeLink, settle } from './helpers.js';
 

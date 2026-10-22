@@ -77,6 +77,17 @@ for working around a problem are in the other docs; this is the list of what is 
 - aplay drain latency (~3 s for a 1 s clip) not optimised.
 - Wake word on device: not started (needs a small embedded library; mics work now).
 - Mic gain/quality with the pod worn, and 192 kHz vs 96 kHz capture, not compared.
+- **jetd capture/playback deadlock** (2026-10-22): `spawn_pipe` in `agent/jetd.c` leaves the
+  other stream's pipe fds open across `fork`, so an `arecord` started while `aplay` is still
+  playing a long clip inherits aplay's stdin write end; at the clip's end `play_close` blocks in
+  `waitpid(aplay)` forever (no EOF), jetd stops reading arecord, arecord blocks on its full pipe:
+  no `A`, every later command (`S`) times out. Fix in jetd: `O_CLOEXEC` on the pipe fds (or kill
+  the child before waiting). Until then jet-app sends `Y` before `V` when a clip is in flight,
+  and the recovery is `kill -KILL` of the arecord child (SIGTERM is swallowed by alsa-utils'
+  restarted `write`); jetd resumes by itself.
+- After the Jet's own speaker played the question into the mic, the VAD did not end the capture
+  on trailing silence (ran to `max`); whether the floor measured during the earcon tail or the
+  speaker's room echo keeps `rms` above `floor * 1.5` is not checked.
 
 ## Radios
 
@@ -108,9 +119,14 @@ for working around a problem are in the other docs; this is the list of what is 
   jetd behind a local socket is a plan, not done. Docker on the device: ruled out.
 
 ## Voice turn (2026-10-22)
-- First audio arrives ~6 s after the user stops talking with qwen-27b (3.1 s to the first token,
-  then the first sentence); a smaller chat model (`VOICE_CHAT_MODEL`) is the obvious lever, and
-  splitting long first sentences at commas after ~60 characters the second.
+- First audio arrives ~6 s after the user stops talking with qwen-27b warm (0.6-3 s to the first
+  token, then the first sentence), 10 s when llama-swap has to reload it after a vision `look`
+  (the chat and vision models evict each other); a smaller chat model (`llm.chatModel`) is the
+  obvious lever, keeping both resident the second, splitting long first sentences at commas
+  after ~60 characters the third.
+- qwen-27b and qwen-vision emit a short `reasoning_content` preamble (~100 characters, about a
+  second) whatever the request says (`chat_template_kwargs.enable_thinking`, `reasoning_effort`,
+  `/no_think` all tried); the device drops it. A server-side reasoning budget of 0 is untried.
 - GNU `tar` on the Debian rootfs fails to load ("unexpected PLT reloc type 0x80"); other binaries
   are fine, busybox tar works. Cause unknown (loader vs this binary's relocations).
 - qwen3-asr on a quiet room returned empty partials; hallucination on real background noise is

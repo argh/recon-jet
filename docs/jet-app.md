@@ -21,7 +21,8 @@ Runtime: Node 22 in the Jet's chroot; Node 22 has the iterator helpers that
 | `sensors` | the last glance (`g worn raw`) and new-view (`n degrees`) events, timestamped | `glance`, `view`, emits `glance`, `view` |
 | `ui` | the system layer of the screen: renders at most once per tick (clear, `root.render(surface)`, the 10 px status strip, `flush()`) and only while `surface.active` (connected, jetd mode `remote`, surface acquired); full repaint on every hello and on `ready`; owns no screens | `root` (the mode registry), `setStrip(text, {colour, ms})`, `requestRender()`, `active`, `renders` |
 | `modes` | the mode registry and switcher (below): modes register in their `start()`, `begin()` enters the start mode, front hold opens the chooser-style switcher, every other gesture goes to the current mode; the last mode is persisted in `stateFile` | `register(mode)`, `list`, `current`, `get(id)`, `switchTo(id)`, `begin()`, `openSwitcher/closeSwitcher`, `render`, emits `mode` |
-| `voice` | push-to-talk turns streamed through `host/voice-session.js` (WebSocket): idle → listening (earcon, `V`, every `a` chunk forwarded) → thinking (partial transcripts; the cached filler phrase `fillerMs` after the final transcript if no audio yet) → speaking (sentence audio queued with `W`, `w` at `done`) → idle. No gesture is read here: the Assistant mode calls it. `look(jpeg, question)` is the vision request (own session, `{type:"look"}`) the Demo mode makes. Debug HTTP on `debugPort`: `POST /talk`, `/cancel`, `/say {text}`, `/filler`, `GET /state` | `startTurn()` (ends the capture while listening, barge-in while thinking/speaking), `cancel()`, `clear()`, `look()`, `say(text)`, `makeFiller()`, `state`, `turn`, `transcript`, `answer`, `configured`, emits `state` |
+| `llm` | the OpenAI-compatible inference server the Jet reaches over WiFi (`llm.base`, plain https): `transcribe(pcm16kMono)` (wav + multipart built in memory, `/audio/transcriptions`), `chatStream(messages, onToken, signal)` (`/chat/completions` with `stream: true`, SSE parsed as it arrives, `reasoning_content` deltas dropped, `chat_template_kwargs {enable_thinking: false}` + `reasoning_effort` sent), `speak(text, signal)` (`/audio/speech` wav → 24 kHz mono decoded and resampled in JS to the 48 kHz stereo S16 jetd plays), `describe(jpeg, question, onToken, signal)` (chat with an `image_url` data URI, the vision model); one keep-alive agent, a timeout per call, `AbortSignal` cancel | `configured`, `models`, the four calls |
+| `voice` | push-to-talk turns run on the device: `session.js` is an in-process `VoiceSession` over `llm` (no Mac in the loop): idle → listening (earcon, `V`, every `a` chunk to the session, which transcribes the whole buffer every `partialMs`) → thinking (partial transcripts; the cached filler phrase `fillerMs` after the final transcript if no audio yet) → speaking (each sentence synthesised in order while the model streams, queued with `W`, `w` at `done`) → idle. Events `partial`, `final`, `token`, `audio`, `done`, `error`, each tagged with the turn; cancel/barge-in aborts the requests in flight through one `AbortController` per turn. No gesture is read here: the Assistant mode calls it. `look(jpeg, question)` is the vision request the Demo mode makes. Debug HTTP on `debugPort`: `POST /talk`, `/cancel`, `/say {text}`, `/filler`, `/look {question?}` (snapshot through jetd → JPEG → vision), `GET /state` | `startTurn()` (ends the capture while listening, barge-in while thinking/speaking), `cancel()`, `clear()`, `look()`, `say(text)`, `makeFiller()`, `state`, `turn`, `transcript`, `answer`, `configured`, emits `state` |
 | `jet` (`src/jet.js`) | main module (`AppModule`): references every subsystem and the public modes, which is what instantiates them; `main()` calls `modes.begin()` once everything has started; heartbeat tick with link state and RSS | |
 
 Shared drawing bits in `src/modules/ui/`: `style.js` (palette `C`, `MARGIN`, `STRIP_H`, `TOP`,
@@ -121,8 +122,17 @@ a late answer after leaving dropped, a failing snapshot shown); the voice state 
 a fake link, ui and session (`test/voice.test.js`: `startTurn` → earcon + `V` + `start`, chunks
 forwarded, `end` at `A`, partial/final/tokens/audio/done, stale frames ignored; barge-in = `Y` +
 `cancel` + a new turn, press while listening = `v`; `cancel()` while listening or speaking;
-`look()` over its own session; the filler timing and cache; not-configured refused; a host dial
-failure or link drop ends the turn), the earcon generator and word wrap. `test/fake-jetd.js` is a
+`look()` through the session; the filler timing and cache; not-configured refused; a session
+error or link drop ends the turn), the earcon generator and word wrap; the in-process session
+against a fake llm (`test/session.test.js`: partials while listening, final → tokens → one audio
+frame per sentence in order even when a later sentence synthesises faster → done; an empty
+transcript; cancel mid-stream aborts the requests and emits nothing more; upstream failures as
+one `error`; `say`/`look` independent of the turn; the sentence splitter); the `llm` module
+(`test/llm.test.js`: wav header/parser incl. extra chunks and an overrun data size, the multipart
+body, the SSE parser across split chunks and a split UTF-8 character, the resampler (24 kHz mono
+→ 48 kHz stereo lengths and a 1 kHz tone), and the module against a fake OpenAI-compatible server
+on loopback: the multipart upload, reasoning deltas ignored and the thinking switches sent, the
+vision data URI, the TTS wav → 48 kHz stereo, a non-200, cancel and timeout). `test/fake-jetd.js` is a
 protocol stand-in (hello, `P/Q/G/M/E/Z/J/U` replies, a kernel-log ring, event injection) used by
 the tests and runnable standalone; `test/helpers.js` builds the real input/surface/ui/modes stack.
 
@@ -157,10 +167,15 @@ registers additively (future providers) without editing core.
 | `demoMode.question` / `.jpegQuality` | (a describe prompt) / `60` | the look request |
 | `systemMode.ofmArgsFile` / `.glanceFile` / `.backlightFile` | `/android-data/mainline/ofm-args` / `glance` / `backlight` | what the calibration screens write |
 | `systemMode.ofmSysfs` / `.backlightSysfs` / `.iioDir` / `.netDir` | `/sys/module/jet_ofm/parameters` / `/sys/class/backlight/kopin-a230/brightness` / `/sys/bus/iio/devices` / `/sys/class/net` | live hardware paths |
-| `voice.hostUrl` | (none) | `ws://<mac>:7779`, the `host/voice-session.js` address; set it in the device or personal layer (the Mac's USB address is leased: see `/tmp/jetd.log` or the udhcpd leases); empty = voice off |
+| `llm.base` | (none) | the OpenAI-compatible base URL, `https://<server>/v1`; no default in the repo: set it in the device layer (`/android-data/mainline/jet-app.json`) or the personal layer; empty = voice and vision off |
+| `llm.asrModel` / `.chatModel` / `.ttsModel` / `.ttsVoice` / `.visionModel` | `qwen3-asr` / `qwen-27b` / `kokoro` / `af_heart` / `qwen-vision` | the models |
+| `llm.thinkingKwarg` / `.reasoningEffort` | `true` / `none` | send `chat_template_kwargs {enable_thinking: false}` (off for servers that reject unknown fields); `reasoning_effort` (empty = not sent). On llama.cpp with qwen-27b only `reasoning_effort: none` actually stops the reasoning stream; either way reasoning deltas are never spoken |
+| `llm.maxTokens` / `.visionMaxTokens` | `200` / `150` | answer budgets |
+| `llm.asrTimeoutMs` / `.chatTimeoutMs` / `.ttsTimeoutMs` | `20000` / `90000` / `30000` | per-call timeouts (the chat one covers the whole stream) |
 | `voice.enabled` / `.maxSeconds` | `true` / `8` | turns allowed; longest capture |
+| `voice.systemPrompt` / `.partialMs` | (spoken-answer prompt) / `1000` | the chat model's system prompt; partial transcript interval |
 | `voice.fillerMs` / `.fillerText` / `.fillerPath` | `700` / `hmm` / `/android-data/mainline/voice/filler.pcm` | filler delay after the transcript; the phrase (rendered once by the host, cached on the device); the cache |
-| `voice.debugPort` | `0` | `JET_VOICE_DEBUG_PORT`: debug HTTP (`POST /talk`, `/cancel`, `/say`, `/filler`; `GET /state`) |
+| `voice.debugPort` | `0` | `JET_VOICE_DEBUG_PORT`: debug HTTP (`POST /talk`, `/cancel`, `/say`, `/filler`, `/look`; `GET /state`) |
 | `jet.logLevel` / `jet.deviceConfig` | `info` / `/android-data/mainline/jet-app.json` | logging; device layer path |
 
 Secrets (none yet) belong in `/android-data/mainline/jet-app.env`, sourced by `deploy/jet-app.sh`.
@@ -218,19 +233,46 @@ gestures, `Q` polling, mode changes and hello-triggered redraws) was exercised t
 Note that jetd holds up to four hub sockets and `E` is a jetd-global flag: a Mac hub drawing with
 `T`/`B` while jet-app owns the surface is ignored until `E 0`.
 
-### Voice (2026-10-22)
+### Voice on the device (2026-10-22)
 
-The `voice` module runs a streaming push-to-talk turn against `host/voice-session.js` on the Mac
-(`LLM_BASE=... LLM_INSECURE_TLS=1 node host/voice-session.js`, port 7779; `host/voice-client.js`
-drives a turn from a wav file for measurements). Measured on the Jet over USB with the debug
-trigger: the earcon and `V` go out within 2 ms of the press; a quiet room runs to `A max` at 8.5 s
-and the (empty) final transcript is back 215 ms later; a press while listening ends the capture
-in ~90 ms; a `say hello` round trip (host TTS → ffmpeg → USB → `W`) is 250 ms warm, 2.5 s with
-kokoro cold; the filler renders in ~400 ms. Host stages for a 3.7 s spoken question
-(`voice-client.js`, warm): partials every second at ~200 ms each (the whole buffer, no window
-needed), final 380 ms after `end`, first LLM token 3.1 s (qwen-27b prompt eval), 41 tokens in
-4.9 s, first-sentence TTS 1.2 s + ffmpeg 0.13 s, first audio 6.0 s after `end`, so the filler
-plays in every real turn. Cold starts add ~10 s for the chat model and ~2.3 s for kokoro.
+The voice loop runs on the Jet: the `voice` module's session drives the `llm` module directly
+over WiFi, and the Mac is no longer in the loop (the earlier path, `voice.hostUrl` →
+`host/voice-session.js` over a WebSocket with ffmpeg for the resample, is retired; the host
+scripts stay as developer tools, `host/README.md`). The only configuration is `llm.*`
+(`llm.base` on the device in `mainline/jet-app.json`); the `ws` dependency is gone and the
+wav/multipart/SSE/resample work is pure JS in `src/modules/llm/`.
+
+Measured on the Jet over WiFi with the debug trigger (2026-10-22, `jetd-new16`, warm server
+unless noted). `POST /say` of a 3.2 s phrase: 516 ms to the PCM (TTS + transfer + the JS
+resample; 2.7 s the first time with kokoro cold), played 3.27 s later. A quiet-room turn: the
+earcon plays 264 ms after the press, the capture runs to `A max` 8.5 s after the press, partials
+every second at 167-396 ms (the whole buffer, 0.6 s → 7.6 s), the empty final 434 ms after the
+capture ends, "nothing heard" 442 ms after it. A spoken turn (the question played through the
+Jet's own speaker during the capture, so the mic heard it): transcript "What color is the sky on
+a clear day?" exactly, partials 319-811 ms for 0.6-5.8 s of audio, final 505 ms for 7.2 s, the
+filler rendered and cached in 464 ms, first LLM token 8.3 s (qwen-27b cold after a `look`
+swapped the vision model in; ~0.6 s warm from the Mac), 17 tokens in 9.2 s, the one-sentence TTS
+637 ms for 3.9 s of speech, first audio 10.3 s after the capture ended, idle 4.0 s after
+`done` (jetd's `w`). `POST /look`: snapshot 866 ms (640x480 → 320x240 JPEG, 10 KB), vision
+6.6 s with the first token at 6.0 s (qwen-vision loading), 30 tokens. The stages the device adds
+over the host path (TLS, multipart, resample) are within the noise: a partial costs the same
+~200-400 ms from the Jet as from the Mac. Neither `enable_thinking: false` nor
+`reasoning_effort: none` reliably stops qwen-27b/qwen-vision from emitting a short
+`reasoning_content` preamble (~110-130 characters, about a second); it is dropped, never spoken.
+
+Found on the way: jetd's `spawn_pipe` does not set CLOEXEC, so an `arecord` started (`V`)
+while a long clip is still playing inherits `aplay`'s stdin pipe; at the clip's end jetd blocks
+in `waitpid(aplay)` (aplay never sees EOF), stops reading arecord, and both wedge: no `A`, `S`
+times out. Barge-in is safe (`Y` SIGKILLs aplay first) and so is the earcon (drained before
+`V` is read); a debug `say` followed by a `talk` within the clip is the trigger. jet-app now
+sends `Y` before a capture whenever a clip it queued is still unreported; the jetd fix
+(close-on-exec on the pipe fds, or kill before close) is in `docs/open-questions.md`. Recovery
+without restarting jetd: SIGKILL the arecord child (SIGTERM is swallowed by alsa-utils' restarted
+write).
+
+Earlier, over the host path (USB, `host/voice-session.js`, for comparison): first LLM token 3.1 s,
+first audio 6.0 s after `end` for a 3.7 s question, `say hello` 250 ms warm; the LLM-bound
+stages are the same server either way.
 
 ## Deferred (later phases)
 

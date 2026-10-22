@@ -104,6 +104,9 @@ there is no network configuration on the glass yet (WiFi lives in the chroot's
 wpa_supplicant.conf) and the "done" step is a 3 s notice; the "client present" flag is `K 1`
 (jetd's chooser is off while raw keys are on, and `K 0` goes out when the app stops cleanly);
 the status strip shows text notices and the voice/look indicator but no link/charge icons yet.
+Assistant (voice) and Demo (describe) run against the inference server from the device over
+WiFi (`llm.base`); the Mac-side voice session is retired, so the glasses work with no host
+attached once the WiFi and `llm.base` are configured.
 
 ## Open questions
 

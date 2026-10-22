@@ -6,7 +6,7 @@
 import jpeg from 'jpeg-js';
 import { Schema } from '@versionzero/module-manager';
 import { C, MARGIN, TOP, hint, row, paragraph } from '../../modules/ui/style.js';
-import { uyvyToRgba } from './uyvy.js';
+import { uyvyToRgba } from '../../lib/uyvy.js';
 
 const s = Schema.create;
 const CAMERA = { w: 160, h: 120 };

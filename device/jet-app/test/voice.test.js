@@ -1,6 +1,7 @@
-// The voice state machine against a fake link, a fake ui and a fake session: startTurn ->
-// listening (earcon, V, start) -> chunks -> end -> partial/final -> tokens/audio -> done ->
-// idle; barge-in; cancel; look; the filler timer; the tones; word wrap.
+// The voice state machine against a fake link, a fake ui and a fake session (the real one is
+// tested in session.test.js): startTurn -> listening (earcon, V, start) -> chunks -> end ->
+// partial/final -> tokens/audio -> done -> idle; barge-in; cancel; look; the filler timer; the
+// tones; word wrap.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -12,13 +13,14 @@ import { Voice } from '../src/modules/voice/index.js';
 import { tones, LISTEN_EARCON } from '../src/modules/voice/tones.js';
 import { wrapWords } from '../src/modules/ui/style.js';
 
+/** Records the state machine's calls as frames (`sent`); the tests emit the events by hand. */
 class FakeSession extends EventEmitter {
-  constructor() { super(); this.sent = []; this.open = true; this.connects = 0; this.closed = false; }
-  connect() { this.connects++; return this.open ? Promise.resolve() : Promise.reject(new Error('refused')); }
-  send(o) { if (!this.open) return false; this.sent.push(o); return true; }
-  sendAudio(b) { if (!this.open) return false; this.sent.push(b); return true; }
-  close() { this.closed = true; }
-  say(text) { return Promise.resolve(Buffer.from(`say:${text}`)); }
+  constructor(llm) { super(); this.llm = llm; this.sent = []; this.said = []; this.current = null; }
+  start(id) { if (this.current !== null) this.cancel(); this.current = id; this.sent.push({ type: 'start', turn: id }); }
+  audio(pcm) { if (this.current === null || this.ended) return false; this.sent.push(pcm); return true; }
+  end() { if (this.current === null) return Promise.resolve(false); this.ended = true; this.sent.push({ type: 'end' }); return Promise.resolve(true); }
+  cancel() { if (this.current === null) return false; this.sent.push({ type: 'cancel', turn: this.current }); this.current = null; this.ended = false; return true; }
+  say(text) { this.said.push(text); return Promise.resolve(Buffer.from(`say:${text}`)); }
   look(jpeg, question, { onToken }) { this.looked = { jpeg, question }; onToken('a cat '); onToken('on a mat'); return Promise.resolve('a cat on a mat'); }
 }
 
@@ -34,13 +36,15 @@ async function make(overrides = {}) {
   const ui = { strips: [], renders: 0, setStrip(t, o) { this.strips.push(t); }, requestRender() { this.renders++; } };
   const sessions = [];
   const fillerPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'jet-voice-')), 'voice', 'filler.pcm');
-  const voice = Object.assign(new Voice(), { enabled: true, hostUrl: 'ws://test', fillerMs: 60, fillerText: 'hmm', fillerPath, maxSeconds: 8, captureDelayMs: 0, debugPort: 0, deviceLink: link, ui, ...overrides });
-  voice.createSession = () => { const s = new FakeSession(); sessions.push(s); return s; };
+  const llm = { configured: true };
+  const voice = Object.assign(new Voice(), { enabled: true, llm, fillerMs: 60, fillerText: 'hmm', fillerPath, maxSeconds: 8, captureDelayMs: 0, debugPort: 0, deviceLink: link, ui, ...overrides });
+  voice.createSession = (l) => { const s = new FakeSession(l); sessions.push(s); return s; };
   const states = [];
   voice.on('state', (s) => states.push(s.to));
   await voice.start();
   await sleep(5);   // the filler read fails asynchronously
-  return { voice, link, ui, states, session: sessions[0], sessions, fillerPath };
+  assert.equal(sessions.length, 1); assert.equal(sessions[0].llm, llm, 'the session drives the llm module');
+  return { voice, link, ui, states, session: sessions[0], llm, fillerPath };
 }
 const press = (voice) => voice.startTurn();
 const ctl = (session) => session.sent.filter((f) => !Buffer.isBuffer(f));
@@ -112,6 +116,20 @@ test('voice: barge-in during speaking flushes jetd, cancels the host turn and st
   assert.ok(ctl(session).some((f) => f.type === 'cancel' && f.turn === 2));
 });
 
+test('voice: a clip still playing (say, filler) is flushed with Y before a new capture', async (t) => {
+  const { voice, link } = await make();
+  t.after(() => voice.stop());
+  await voice.say('hello');   // W + w queued, jetd has not reported it played
+  const before = link.sent.length;
+  press(voice);
+  assert.deepEqual(link.sent.slice(before, before + 2), ['Y', `W ${LISTEN_EARCON().length}`], 'flushed, then the earcon');
+  link.emit('playDone', 'flushed'); link.emit('playDone', 'done'); await sleep(1);
+  voice.cancel();
+  const n = link.sent.length;
+  press(voice);
+  assert.equal(link.sent[n], `W ${LISTEN_EARCON().length}`, 'nothing playing: no Y');
+});
+
 test('voice: cancel stops the capture or the playback, tells the host, and leaves the answer', async (t) => {
   const { voice, link, ui, session } = await make();
   t.after(() => voice.stop());
@@ -135,22 +153,22 @@ test('voice: cancel stops the capture or the playback, tells the host, and leave
   assert.equal(voice.answer, ''); assert.equal(voice.transcript, '');
 });
 
-test('voice: look sends a JPEG to the host over its own session and streams the answer', async (t) => {
-  const { voice, sessions } = await make();
+test('voice: look hands a JPEG to the session and streams the answer; refused without a server', async (t) => {
+  const { voice, session } = await make();
   t.after(() => voice.stop());
   const tokens = [];
   const answer = await voice.look(Buffer.from('JPEGDATA'), 'what?', { onToken: (x) => tokens.push(x) });
   assert.equal(answer, 'a cat on a mat');
   assert.deepEqual(tokens, ['a cat ', 'on a mat']);
-  assert.equal(sessions.length, 2, 'its own session');
-  assert.deepEqual(sessions[1].looked, { jpeg: Buffer.from('JPEGDATA').toString('base64'), question: 'what?' });
-  assert.ok(sessions[1].closed);
-  const off = Object.assign(new Voice(), { enabled: true, hostUrl: '', deviceLink: {}, ui: {} });
-  await assert.rejects(off.look(Buffer.alloc(1), 'q'), /hostUrl/);
+  assert.deepEqual(session.looked, { jpeg: Buffer.from('JPEGDATA'), question: 'what?' });
+  const off = Object.assign(new Voice(), { enabled: true, llm: { configured: false }, deviceLink: new EventEmitter(), ui: {} });
+  await off.start();
+  await assert.rejects(off.look(Buffer.alloc(1), 'q'), /llm.base/);
+  await assert.rejects(off.say('x'), /llm.base/);
 });
 
 test('voice: the filler plays when answer audio is late, not when it is early; a soft beep makes the cache', async (t) => {
-  const { voice, link, session, sessions, fillerPath } = await make();
+  const { voice, link, session, fillerPath } = await make();
   t.after(() => voice.stop());
   press(voice); link.emit('captureEnd', 'end');
   session.emit('final', { type: 'final', text: 'hi', turn: 1 });
@@ -158,9 +176,9 @@ test('voice: the filler plays when answer audio is late, not when it is early; a
   session.emit('audio', { type: 'audio', bytes: 4, sentence: 'Hi.', pcm: Buffer.alloc(4), turn: 1 });
   await sleep(80);
   assert.deepEqual(link.sent.filter((l) => l[0] === 'W'), [`W ${LISTEN_EARCON().length}`, 'W 4'], 'no filler: audio came first');
-  assert.equal(sessions.length, 1);
+  assert.deepEqual(session.said, []);
   session.emit('done', { type: 'done', answer: 'Hi.', turn: 1 }); link.emit('playDone', 'done'); await sleep(1);
-  // late audio: soft beep (no cache yet), and the cache gets rendered over a second session
+  // late audio: soft beep (no cache yet), and the cache gets rendered through the session's TTS
   press(voice); link.emit('captureEnd', 'end');
   session.emit('final', { type: 'final', text: 'hi', turn: 2 });
   await sleep(90);
@@ -168,8 +186,7 @@ test('voice: the filler plays when answer audio is late, not when it is early; a
   assert.equal(ws.length, 4, 'earcon, answer, earcon, soft beep');
   assert.ok(+ws[3].slice(2) > 0 && +ws[3].slice(2) !== LISTEN_EARCON().length);
   await sleep(20);
-  assert.equal(sessions.length, 2, 'the filler was made over its own session');
-  assert.ok(sessions[1].closed);
+  assert.deepEqual(session.said, ['hmm'], 'the filler was rendered once');
   assert.equal(fs.readFileSync(fillerPath).toString(), 'say:hmm');
   assert.equal(voice.fillerCached, true);
   session.emit('audio', { type: 'audio', bytes: 4, sentence: 'Hi.', pcm: Buffer.alloc(4), turn: 2 });
@@ -182,19 +199,23 @@ test('voice: the filler plays when answer audio is late, not when it is early; a
   assert.equal(voice.state, 'thinking');
 });
 
-test('voice: not configured is refused; host failure ends the turn', async (t) => {
-  const { voice, link, ui, session } = await make();
+test('voice: not configured is refused; a session error ends the turn', async (t) => {
+  const { voice, link, ui, session, llm } = await make();
   t.after(() => voice.stop());
   voice.enabled = false; assert.equal(press(voice), false); assert.equal(voice.state, 'idle'); assert.equal(ui.strips.at(-1), 'voice: not configured');
   voice.enabled = true;
-  session.open = false;   // the host is down: start/chunks queue, then the dial fails
+  llm.configured = false; assert.equal(press(voice), false); assert.equal(voice.configured, false);
+  llm.configured = true;
   press(voice);
   assert.equal(voice.state, 'listening');
   link.emit('captureChunk', Buffer.alloc(10));
-  await sleep(5);
+  session.emit('error', { type: 'error', turn: voice.turn, message: 'asr down' });   // the server failed mid-capture
   assert.equal(voice.state, 'idle');
   assert.equal(link.sent.at(-3), 'v', 'capture stopped');
-  assert.ok(ui.strips.at(-1).startsWith('voice: no host'));
+  assert.deepEqual(ctl(session).at(-1), { type: 'cancel', turn: voice.turn });
+  assert.equal(ui.strips.at(-1), 'voice: asr down');
+  session.emit('error', { type: 'error', turn: voice.turn, message: 'late' });
+  assert.equal(ui.strips.at(-1), 'voice: asr down', 'an error for a finished turn is ignored');
   // nothing heard: done with an empty answer straight from thinking
   session.open = true;
   press(voice); link.emit('captureEnd', 'max');

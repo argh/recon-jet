@@ -21,7 +21,8 @@ Modules: `snd-soc-tfa989x`, `snd-soc-omap-mcbsp`, `snd-soc-dmic`, `snd-soc-omap-
   0xd85f = PLLS+CLKS+SWS+AMPS afterwards.
 - **Rule: play 2-channel streams.** A mono stream through `plughw` makes McBSP run a 16-bit frame,
   which the amp does not decode as I2S (silent with PLL locked). Upmix mono TTS to 48 kHz
-  stereo S16 on the host (`ffmpeg -f s16le -ar 48000 -ac 2`) and play on `hw:0,0`.
+  stereo S16 before `hw:0,0`: jet-app does it in JS on the device (`src/modules/llm/resample.js`,
+  linear interpolation, both channels the same); the host scripts used `ffmpeg -f s16le -ar 48000 -ac 2`.
 - The amp runs **untuned**: Android loaded NXP's speaker/DSP config with the closed "climax"
   tool; mainline's tfa989x driver is a plain I2S bypass. Loud enough for TTS and alerts.
 - Verified: `speaker-test -D hw:0,0 -t sine -f 440`; kokoro TTS clips.
@@ -44,12 +45,18 @@ Modules: `snd-soc-tfa989x`, `snd-soc-omap-mcbsp`, `snd-soc-dmic`, `snd-soc-omap-
 | `POST /say {text}` | hub | TTS (kokoro was used; returns 24 kHz mono) -> ffmpeg to 48 kHz stereo S16 -> `W` chunks + `w`; resolves on `w done` |
 | `POST /converse` | hub | listen -> chat model -> say, with transcript and answer on the glass; `--ptt` binds it to a front click |
 | `host/listen.sh`, `host/say.sh`, `host/converse.sh` | host | CLI equivalents (arecord/aplay over ssh, older path) |
-| `host/voice-session.js` + jet-app `voice` | host + device | the streaming turn: capture chunks go to the host over a WebSocket as they arrive, partial transcripts come back every second, the answer streams and each sentence is synthesised and queued to `W` while the model is still talking; `Y` + `cancel` for barge-in (see `docs/jet-app.md`) |
+| jet-app `voice` + `llm` | device | **the current loop, all on the Jet over WiFi**: capture chunks are transcribed on the device's behalf by the inference server every second (partials), the final transcript goes to the chat model with `stream: true`, each sentence is synthesised as it completes and queued to `W` while the model is still talking, `Y` + an `AbortController` for barge-in; the 24 kHz mono TTS wav is decoded and resampled to 48 kHz stereo in JS (see `docs/jet-app.md`) |
+| `host/voice-session.js` + `host/voice-client.js` | host | the retired WebSocket path (the Mac did the same stages with ffmpeg); kept as a developer tool for measuring the server from the Mac |
 
-Endpoint and model names come from `LLM_BASE`, `LLM_ASR_MODEL`, `LLM_TTS_MODEL`,
-`LLM_TTS_VOICE`, `LLM_CHAT_MODEL` (OpenAI-compatible API).
+The device reads the endpoint and model names from the `llm.*` configuration (`llm.base`,
+`llm.asrModel`, `llm.chatModel`, `llm.ttsModel`, `llm.ttsVoice`, `llm.visionModel`); the host
+tools use `LLM_BASE`, `LLM_ASR_MODEL`, `LLM_TTS_MODEL`, `LLM_TTS_VOICE`, `LLM_CHAT_MODEL`.
 
 ## Latency numbers (over WiFi, measured)
+
+On-device loop (jet-app `voice` + `llm`, 2026-10-22): see the voice status in `docs/jet-app.md`.
+
+Earlier hub/host path:
 
 | Path | Time |
 |---|---|
