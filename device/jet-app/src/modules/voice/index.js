@@ -43,6 +43,7 @@ export class Voice extends EventEmitter {
       .property('fillerText', s('string').default('hmm').meta('description', 'the filler phrase (rendered by the host once, cached on the device)'))
       .property('fillerPath', s('string').default('/android-data/mainline/voice/filler.pcm').meta('description', 'filler cache (48 kHz stereo S16 raw)'))
       .property('maxSeconds', s('number').default(8).meta('description', 'longest capture (jetd V argument)'))
+      .property('captureDelayMs', s('number').default(250).meta('description', 'ms between the earcon and opening the mic'))
       .property('triggers', s('array').property('*', s('string')).default(['press:front']).meta('description', 'gestures that start a turn (or barge in) when no menu is open'))
       .property('debugPort', s('number').default(0).meta('description', 'debug HTTP port (POST /talk, /say, /filler; GET /state); 0 = off'))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
@@ -50,7 +51,7 @@ export class Voice extends EventEmitter {
       .property('ui', s('Ui').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  enabled; hostUrl; fillerMs; fillerText; fillerPath; maxSeconds; triggers; debugPort; deviceLink; input; ui; logger;
+  enabled; hostUrl; fillerMs; fillerText; fillerPath; maxSeconds; captureDelayMs; triggers; debugPort; deviceLink; input; ui; logger;
 
   /** @type {'idle'|'listening'|'thinking'|'speaking'} */ state = 'idle';
   turn = 0;           // the current (or last) turn id; events from older turns are ignored
@@ -113,7 +114,12 @@ export class Voice extends EventEmitter {
     this.ui.setStrip('listening', { colour: C.ok });
     if (this.ui.screen !== this.screen) this.ui.show(this.screen);
     this.#play(LISTEN_EARCON());
-    if (!this.deviceLink.captureStart(this.maxSeconds)) return this.#fail('link down');
+    // open the mic only after the earcon has played, so jetd's noise-floor window (its first
+    // 300 ms of capture) does not measure the beep
+    setTimeout(() => {
+      if (this.turn !== turn || this.state !== 'listening') return;
+      if (!this.deviceLink.captureStart(this.maxSeconds)) this.#fail('link down');
+    }, this.captureDelayMs);
     this.#out({ type: 'start', turn });
     this.#session.connect().then(
       () => { if (this.turn === turn) this.#flushOutbox(); },

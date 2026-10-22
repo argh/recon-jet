@@ -35,7 +35,7 @@ async function make(overrides = {}) {
     show(s) { this.screen = s; }, setStrip(t, o) { this.strips.push(t); }, requestRender() { this.renders++; } };
   const sessions = [];
   const fillerPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'jet-voice-')), 'voice', 'filler.pcm');
-  const voice = Object.assign(new Voice(), { enabled: true, hostUrl: 'ws://test', fillerMs: 60, fillerText: 'hmm', fillerPath, maxSeconds: 8, triggers: ['press:front'], debugPort: 0, deviceLink: link, input, ui, ...overrides });
+  const voice = Object.assign(new Voice(), { enabled: true, hostUrl: 'ws://test', fillerMs: 60, fillerText: 'hmm', fillerPath, maxSeconds: 8, captureDelayMs: 0, triggers: ['press:front'], debugPort: 0, deviceLink: link, input, ui, ...overrides });
   voice.createSession = () => { const s = new FakeSession(); sessions.push(s); return s; };
   const states = [];
   voice.on('state', (s) => states.push(s.to));
