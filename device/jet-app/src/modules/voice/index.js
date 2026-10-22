@@ -41,7 +41,7 @@ export class Voice extends EventEmitter {
       .property('enabled', s('boolean').default(true).meta('description', 'voice turns allowed'))
       .property('hostUrl', s('string').default('').meta('description', 'voice session server, ws://host:7779 (device or personal config layer; empty = off)'))
       .property('fillerMs', s('number').default(700).meta('description', 'play the filler when no answer audio has arrived this long after the transcript'))
-      .property('fillerText', s('string').default('hmm').meta('description', 'the filler phrase (rendered by the host once, cached on the device)'))
+      .property('fillerText', s('string').default('Hmm, let me think.').meta('description', 'the filler phrase (rendered by the host once, cached on the device)'))
       .property('fillerPath', s('string').default('/android-data/mainline/voice/filler.pcm').meta('description', 'filler cache (48 kHz stereo S16 raw)'))
       .property('maxSeconds', s('number').default(8).meta('description', 'longest capture (jetd V argument)'))
       .property('captureDelayMs', s('number').default(250).meta('description', 'ms between the earcon and opening the mic'))
