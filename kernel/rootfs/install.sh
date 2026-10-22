@@ -19,8 +19,8 @@ $SSH 'set -e; D=/android-data/debian
   cp /etc/dropbear/dropbear_* $D/etc/dropbear/ 2>/dev/null || true
   cp /etc/resolv.conf $D/etc/resolv.conf 2>/dev/null || true
   mkdir -p $D/opt/jet-app; tar -C $D/opt/jet-app -xzf /android-data/jet-app.tgz; rm /android-data/jet-app.tgz
-  mount -t proc proc $D/proc; mount -t sysfs sys $D/sys; mount --bind /dev $D/dev
-  chroot $D /bin/sh -c "cd /opt/jet-app && npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -2; node --version"
-  umount $D/dev $D/sys $D/proc
+  # the bundle already carries node_modules (pure JS, built on the host; the private registry is
+  # not reachable from the Jet), so no npm on the device: just prove the runtime works
+  chroot $D /usr/bin/node -e "console.log(\"node\", process.version, \"ok\")"
   ln -sfn debian /android-data/rootfs; ls -la /android-data/rootfs
   echo "installed; reboot to switch (reboot2)"'
