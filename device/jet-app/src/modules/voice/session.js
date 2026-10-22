@@ -2,6 +2,7 @@
 // frames are audio; an `audio` event tag is paired with the binary frame that follows it and
 // emitted as one `audio` event `{sentence, bytes, pcm, turn}`. Every other server message is
 // emitted under its `type` ('partial', 'final', 'token', 'done', 'error'), plus 'open'/'close'.
+// `say()` and `look()` are one-shot requests (TTS, vision) for a session with no turn running.
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 
@@ -57,16 +58,29 @@ export class VoiceSession extends EventEmitter {
    * Only when no turn is running on this session (the server answers `busy` otherwise).
    */
   say(text, { timeoutMs = 20000 } = {}) {
+    const parts = [];
+    return this.#oneShot({ type: 'say', text }, { timeoutMs, onAudio: (a) => parts.push(a.pcm), result: () => Buffer.concat(parts) });
+  }
+
+  /**
+   * Ask the vision model about a JPEG (base64); `onToken` gets the answer as it streams, the
+   * promise resolves with the whole answer. Only when no turn is running on this session.
+   */
+  look(jpegBase64, question, { onToken, timeoutMs = 90000 } = {}) {
+    let answer = '';
+    return this.#oneShot({ type: 'look', jpeg: jpegBase64, question }, { timeoutMs, onToken: (m) => { answer += m.text; onToken?.(m.text); }, result: (m) => m.answer ?? answer });
+  }
+
+  #oneShot(request, { timeoutMs, onAudio, onToken, result }) {
     return new Promise((resolve, reject) => {
-      const parts = [];
-      const cleanup = () => { clearTimeout(timer); this.off('audio', onAudio); this.off('done', onDone); this.off('error', onError); this.off('close', onClose); };
-      const onAudio = (a) => parts.push(a.pcm);
-      const onDone = () => { cleanup(); resolve(Buffer.concat(parts)); };
+      const cleanup = () => { clearTimeout(timer); this.off('audio', a); this.off('token', k); this.off('done', onDone); this.off('error', onError); this.off('close', onClose); };
+      const a = (m) => onAudio?.(m), k = (m) => onToken?.(m);
+      const onDone = (m) => { cleanup(); resolve(result(m)); };
       const onError = (e) => { cleanup(); reject(new Error(e.message)); };
       const onClose = () => { cleanup(); reject(new Error('session closed')); };
-      const timer = setTimeout(() => { cleanup(); reject(new Error('say timeout')); }, timeoutMs);
-      this.on('audio', onAudio); this.on('done', onDone); this.on('error', onError); this.on('close', onClose);
-      if (!this.send({ type: 'say', text })) { cleanup(); reject(new Error('not connected')); }
+      const timer = setTimeout(() => { cleanup(); reject(new Error(`${request.type} timeout`)); }, timeoutMs);
+      this.on('audio', a); this.on('token', k); this.on('done', onDone); this.on('error', onError); this.on('close', onClose);
+      if (!this.send(request)) { cleanup(); reject(new Error('not connected')); }
     });
   }
 }

@@ -15,9 +15,11 @@ const deviceConfig = process.env.JET_DEVICE_CONFIG;
 try {
   const { defaults, files } = await loadLayers({ deviceConfig });
   const mm = new ModuleManager().registerInstance(logger, { name: 'logger', lifecycle: false }).register(Jet);
-  // personal/index.js may export `modules` (classes with moduleInfo) to add providers without editing core
+  // personal/index.js may export `modules` (classes with moduleInfo, e.g. private modes that
+  // register with `modes`); registered as instances so they are configured and started without
+  // anything in core referencing them
   const extra = await import(path.join(appRoot, 'personal', 'index.js')).then((m) => m.modules ?? [], () => []);
-  for (const ModuleClass of extra) mm.register(ModuleClass);
+  for (const ModuleClass of extra) mm.registerInstance(new ModuleClass());
   logger.info({ files, extraModules: extra.map((m) => m.name) }, 'config layers');
   await mm.run({ defaults });
 } catch (error) {

@@ -1,6 +1,8 @@
-// voice: one push-to-talk turn at a time, streamed through host/voice-session.js.
+// voice: one push-to-talk turn at a time, streamed through host/voice-session.js. No gesture
+// is read here: a mode (Assistant) calls `startTurn()` / `cancel()`; `look(jpeg, question)` is
+// the vision request the Demo mode makes over the same host.
 //
-//   idle --press--> listening --A--> thinking --audio--> speaking --done+played--> idle
+//   idle --startTurn--> listening --A--> thinking --audio--> speaking --done+played--> idle
 //
 // listening: an earcon plays at once, jetd captures (`V maxSeconds`, energy VAD) and every `a`
 //   chunk goes to the host as a binary frame; `A` ends it (`{type:"end"}`); a second press ends
@@ -9,8 +11,8 @@
 //   with no audio yet, a cached filler phrase plays ("hmm", rendered once by the host and kept
 //   at `fillerPath`), or a soft beep while that cache is being made.
 // speaking: audio frames are queued to jetd (`W`) as they arrive, `w` at `done`, idle once jetd
-//   reports the clip played. The answer text stays on the screen (rear press returns to Status).
-// A press during thinking/speaking is a barge-in: `Y` flushes jetd's playback, the host gets
+//   reports the clip played. The answer and transcript stay for the mode to show.
+// `startTurn()` during thinking/speaking is a barge-in: `Y` flushes jetd's playback, the host gets
 // `{type:"cancel"}`, and a new turn starts. Nothing here blocks: the host link is a WebSocket,
 // audio goes to jetd as it arrives, the filler file is read and written asynchronously.
 //
@@ -18,16 +20,15 @@
 // at the press even when the host has to be (re)dialled; a dial failure ends the turn.
 //
 // Debug: `voice.debugPort` (JET_VOICE_DEBUG_PORT) serves POST /talk (start a turn, as the
-// button would), POST /say {text} (host TTS round trip to the speaker), POST /filler (re-render
+// Assistant mode's front press would), POST /say {text} (host TTS round trip to the speaker), POST /filler (re-render
 // the filler), GET /state.
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { Schema } from '@versionzero/module-manager';
-import { C } from '../ui/screen.js';
+import { C } from '../ui/style.js';
 import { VoiceSession } from './session.js';
-import { VoiceScreen } from './screen.js';
 import { LISTEN_EARCON, SOFT_BEEP, ERROR_EARCON } from './tones.js';
 
 const s = Schema.create;
@@ -37,21 +38,19 @@ export class Voice extends EventEmitter {
   static moduleInfo = {
     name: 'voice',
     schema: s()
-      .property('enabled', s('boolean').default(true).meta('description', 'the front press starts a voice turn'))
+      .property('enabled', s('boolean').default(true).meta('description', 'voice turns allowed'))
       .property('hostUrl', s('string').default('').meta('description', 'voice session server, ws://host:7779 (device or personal config layer; empty = off)'))
       .property('fillerMs', s('number').default(700).meta('description', 'play the filler when no answer audio has arrived this long after the transcript'))
       .property('fillerText', s('string').default('hmm').meta('description', 'the filler phrase (rendered by the host once, cached on the device)'))
       .property('fillerPath', s('string').default('/android-data/mainline/voice/filler.pcm').meta('description', 'filler cache (48 kHz stereo S16 raw)'))
       .property('maxSeconds', s('number').default(8).meta('description', 'longest capture (jetd V argument)'))
       .property('captureDelayMs', s('number').default(250).meta('description', 'ms between the earcon and opening the mic'))
-      .property('triggers', s('array').property('*', s('string')).default(['press:front']).meta('description', 'gestures that start a turn (or barge in) when no menu is open'))
       .property('debugPort', s('number').default(0).meta('description', 'debug HTTP port (POST /talk, /say, /filler; GET /state); 0 = off'))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
-      .property('input', s('Input').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  enabled; hostUrl; fillerMs; fillerText; fillerPath; maxSeconds; captureDelayMs; triggers; debugPort; deviceLink; input; ui; logger;
+  enabled; hostUrl; fillerMs; fillerText; fillerPath; maxSeconds; captureDelayMs; debugPort; deviceLink; ui; logger;
 
   /** @type {'idle'|'listening'|'thinking'|'speaking'} */ state = 'idle';
   turn = 0;           // the current (or last) turn id; events from older turns are ignored
@@ -61,7 +60,6 @@ export class Voice extends EventEmitter {
   /** The session factory (tests inject a fake). @type {(url: string) => VoiceSession} */
   createSession = (url) => new VoiceSession(url, { logger: this.logger });
   now = () => Date.now();
-  /** @type {VoiceScreen} */ screen;
   /** @type {VoiceSession|null} */ #session = null;
   #outbox = [];          // frames for the current turn waiting for the socket to open
   #fillerTimer = null;
@@ -71,11 +69,11 @@ export class Voice extends EventEmitter {
   #stateT = 0;
 
   get fillerCached() { return this.#fillerPcm !== null; }
+  /** A host session exists and turns are allowed. */
+  get configured() { return this.enabled && this.#session !== null; }
 
   async start() {
     this.#stateT = this.now();
-    this.screen = new VoiceScreen(this.ui, this);
-    this.input.on('gesture', (g) => this.#onGesture(g));
     this.deviceLink.on('captureChunk', (pcm) => this.#onChunk(pcm));
     this.deviceLink.on('captureEnd', (reason) => this.#onCaptureEnd(reason));
     this.deviceLink.on('disconnected', () => { if (this.state !== 'idle') this.#fail('link down'); });
@@ -92,27 +90,41 @@ export class Voice extends EventEmitter {
     this.#debug?.close();
   }
 
-  // ---- triggers ---------------------------------------------------------------------------
-  #onGesture(gesture) {
-    if (!this.triggers.includes(gesture) || this.ui.menu || this.deviceLink.mode !== 'remote') return;
-    this.talk();
-  }
-
-  /** Start a turn (the front press): a barge-in when one is running. Returns false when voice is off. */
-  talk() {
-    if (!this.enabled || !this.#session) { this.ui.setStrip('voice: not configured', { colour: C.warn, ms: 3000 }); return false; }
+  // ---- the mode's calls ----------------------------------------------------------------------
+  /**
+   * Start a turn (the Assistant mode's front press): ends the capture early while listening, a
+   * barge-in while thinking/speaking. Returns false when voice is off.
+   */
+  startTurn() {
+    if (!this.configured) { this.ui.setStrip('voice: not configured', { colour: C.warn, ms: 3000 }); return false; }
     if (this.state === 'listening') { this.logger?.info({ turn: this.turn }, 'press: capture ends early'); this.deviceLink.captureStop(); return true; }
     if (this.state !== 'idle') this.#bargeIn();
     this.#begin();
     return true;
   }
 
+  /** Abort the running turn (nothing is said, nothing more plays); idle stays idle. */
+  cancel() {
+    if (this.state === 'idle') return false;
+    this.logger?.info({ turn: this.turn, state: this.state }, 'cancel');
+    clearTimeout(this.#fillerTimer);
+    if (this.state === 'listening') this.deviceLink.captureStop();
+    else this.deviceLink.send('Y');
+    this.#session?.send({ type: 'cancel', turn: this.turn });
+    this.#outbox = [];
+    this.#setState('idle');
+    this.ui.setStrip(null);
+    return true;
+  }
+
+  /** Forget the last transcript and answer. */
+  clear() { this.transcript = ''; this.answer = ''; }
+
   #begin() {
     const turn = ++this.turn;
     this.transcript = ''; this.answer = ''; this.audioFrames = 0; this.#outbox = [];
     this.#setState('listening');
     this.ui.setStrip('listening', { colour: C.ok });
-    if (this.ui.screen !== this.screen) this.ui.show(this.screen);
     this.#play(LISTEN_EARCON());
     // open the mic only after the earcon has played, so jetd's noise-floor window (its first
     // 300 ms of capture) does not measure the beep
@@ -261,6 +273,18 @@ export class Voice extends EventEmitter {
     finally { session.close(); }
   }
 
+  /**
+   * Ask the host's vision model about a JPEG, over its own connection; `onToken` streams the
+   * answer, the promise resolves with the whole of it.
+   * @param {Buffer} jpg @param {string} question @param {{onToken?: (text: string) => void}} [options]
+   */
+  async look(jpg, question, { onToken } = {}) {
+    if (!this.hostUrl) throw new Error('voice.hostUrl is not set');
+    const session = this.createSession(this.hostUrl);
+    try { await session.connect(); return await session.look(jpg.toString('base64'), question, { onToken }); }
+    finally { session.close(); }
+  }
+
   /** Debug: speak `text` through the host and the Jet's speaker; resolves with the PCM size. */
   async say(text) {
     const t0 = this.now();
@@ -280,7 +304,8 @@ export class Voice extends EventEmitter {
         const run = (p) => p.then((r) => reply(200, r), (e) => reply(500, { error: e.message }));
         try {
           if (req.method === 'GET' && req.url === '/state') return reply(200, { state: this.state, turn: this.turn, transcript: this.transcript, answer: this.answer, fillerCached: this.fillerCached, session: this.#session?.open ?? false });
-          if (req.method === 'POST' && req.url === '/talk') return reply(200, { started: this.talk(), turn: this.turn });
+          if (req.method === 'POST' && req.url === '/talk') return reply(200, { started: this.startTurn(), turn: this.turn });
+          if (req.method === 'POST' && req.url === '/cancel') return reply(200, { cancelled: this.cancel() });
           if (req.method === 'POST' && req.url === '/say') return run(this.say(String((body ? JSON.parse(body) : {}).text ?? 'hello')));
           if (req.method === 'POST' && req.url === '/filler') return run(this.makeFiller().then((pcm) => ({ bytes: pcm.length })));
           reply(404, { error: 'no such route' });

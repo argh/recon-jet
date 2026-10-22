@@ -11,6 +11,8 @@
 //   {type:"end"}               capture finished: transcribe, answer, speak
 //   {type:"cancel"}            abort everything in flight (barge-in)
 //   {type:"say", text}         synthesise `text` only (audio frames, then done); not during a turn
+//   {type:"look", jpeg, question}  ask the vision model about a base64 JPEG (tokens, then done
+//                              with the answer; no audio); not during a turn
 // server -> client
 //   {type:"partial", text}     transcript so far (about once a second while listening)
 //   {type:"final", text}       the transcript the answer is based on
@@ -20,7 +22,8 @@
 //   {type:"error", message}
 //
 // Env: LLM_BASE (required, OpenAI-compatible base URL), LLM_ASR_MODEL (qwen3-asr), LLM_TTS_MODEL
-// (kokoro), LLM_TTS_VOICE (af_heart), VOICE_CHAT_MODEL (qwen-27b), LLM_INSECURE_TLS=1 (private CA),
+// (kokoro), LLM_TTS_VOICE (af_heart), VOICE_CHAT_MODEL (qwen-27b), LLM_VISION_MODEL (qwen-vision),
+// LLM_INSECURE_TLS=1 (private CA),
 // VOICE_PARTIAL_MS (1000), VOICE_PARTIAL_WINDOW_S (10: partials transcribe the last N seconds).
 // Stage timings go to stdout as JSON lines.
 
@@ -91,7 +94,7 @@ class SseParser {
 
 function realUpstream(env = process.env) {
   const base = env.LLM_BASE || '';
-  const models = { asr: env.LLM_ASR_MODEL || 'qwen3-asr', tts: env.LLM_TTS_MODEL || 'kokoro', voice: env.LLM_TTS_VOICE || 'af_heart', chat: env.VOICE_CHAT_MODEL || env.LLM_CHAT_MODEL || 'qwen-27b' };
+  const models = { asr: env.LLM_ASR_MODEL || 'qwen3-asr', tts: env.LLM_TTS_MODEL || 'kokoro', voice: env.LLM_TTS_VOICE || 'af_heart', chat: env.VOICE_CHAT_MODEL || env.LLM_CHAT_MODEL || 'qwen-27b', vision: env.LLM_VISION_MODEL || 'qwen-vision' };
   const agent = base.startsWith('https') ? new https.Agent({ rejectUnauthorized: env.LLM_INSECURE_TLS ? false : undefined, keepAlive: true }) : new http.Agent({ keepAlive: true });
 
   /** POST; `onChunk` streams the body as text, otherwise the whole body is resolved as a Buffer. */
@@ -127,10 +130,10 @@ function realUpstream(env = process.env) {
       return (r.text || '').trim();
     },
     /** Streams the answer through `onToken`; resolves with the whole text. */
-    async chat(messages, { signal, onToken }) {
+    async chat(messages, { signal, onToken, model = models.chat, maxTokens = 200 }) {
       const sse = new SseParser();
       let text = '';
-      const body = JSON.stringify({ model: models.chat, stream: true, max_tokens: 200, chat_template_kwargs: { enable_thinking: false }, messages });
+      const body = JSON.stringify({ model, stream: true, max_tokens: maxTokens, chat_template_kwargs: { enable_thinking: false }, messages });
       await request('/chat/completions', { headers: { 'Content-Type': 'application/json' }, body, signal, onChunk: (chunk) => {
         for (const ev of sse.feed(chunk)) {
           const tok = ev.choices?.[0]?.delta?.content;
@@ -138,6 +141,11 @@ function realUpstream(env = process.env) {
         }
       } });
       return text;
+    },
+    /** A JPEG (base64) and a question -> the vision model's answer, streamed through `onToken` (as host/vision.js does it). */
+    look(jpegBase64, question, { signal, onToken }) {
+      const content = [{ type: 'text', text: question }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpegBase64}` } }];
+      return this.chat([{ role: 'user', content }], { signal, onToken, model: models.vision, maxTokens: 150 });
     },
     /** Text -> TTS wav -> 48 kHz stereo S16 raw (ffmpeg). Resolves `{pcm, ttsMs, ffmpegMs}`. */
     async speak(text, signal) {
@@ -186,6 +194,7 @@ class Connection {
       case 'end': return this.#end();
       case 'cancel': return this.#cancel('cancel');
       case 'say': return this.#say(msg);
+      case 'look': return this.#look(msg);
       default: return this.#error(`unknown type ${msg.type}`);
     }
   }
@@ -283,6 +292,21 @@ class Connection {
       this.#emitAudio(pcm, msg.text);
       this.#emit({ type: 'done', answer: msg.text });
     } catch (e) { if (!j.abort.signal.aborted) this.#error(`say: ${e.message}`); }
+    finally { if (this.job === j) this.job = null; }
+  }
+
+  async #look(msg) {
+    if (this.job) return this.#error('busy');
+    if (typeof msg.jpeg !== 'string' || !msg.jpeg) return this.#error('look needs a base64 jpeg');
+    const j = this.job = { kind: 'look', turn: msg.turn, abort: new AbortController() };
+    const t0 = performance.now();
+    let tokens = 0;
+    try {
+      const answer = await this.up.look(msg.jpeg, String(msg.question || 'Describe what is in this image in one short sentence.'), { signal: j.abort.signal, onToken: (tok) => { tokens++; this.#emit({ type: 'token', text: tok }); } });
+      if (j.abort.signal.aborted) return;
+      log({ stage: 'look', ms: ms(t0), jpegBytes: Math.round(msg.jpeg.length * 3 / 4), tokens, answer });
+      this.#emit({ type: 'done', answer });
+    } catch (e) { if (!j.abort.signal.aborted) this.#error(`look: ${e.message}`); }
     finally { if (this.job === j) this.job = null; }
   }
 

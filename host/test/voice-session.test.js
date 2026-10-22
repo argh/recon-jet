@@ -43,6 +43,7 @@ function fakeUpstream({ chatDelayMs = 0, speakDelayMs = 0 } = {}) {
       return text;
     },
     async speak(text, signal) { await sleep(speakDelayMs, signal); calls.speak.push(text); return { pcm: Buffer.alloc(text.length, 7), ttsMs: 1, ffmpegMs: 1 }; },
+    async look(jpeg, question, { signal, onToken }) { calls.look = { jpeg, question }; for (const t of ['a ', 'desk']) { await sleep(chatDelayMs, signal); onToken(t); } return 'a desk'; },
   };
 }
 
@@ -114,5 +115,26 @@ test('protocol: cancel aborts the answer in flight; say returns audio and done',
   assert.equal(c.events[done].answer, 'hello');
   c.send({ type: 'end' });
   await c.until('error', done + 1);
+  c.ws.close();
+});
+
+test('protocol: look streams the vision answer and ends with done; refused during a turn', async (t) => {
+  const up = fakeUpstream();
+  const wss = createVoiceServer({ port: 0, host: '127.0.0.1', upstream: up, partialMs: 30 });
+  await once(wss, 'listening');
+  t.after(() => wss.close());
+  const c = await client(wss.address().port);
+  c.send({ type: 'look', jpeg: 'AAAA', question: 'what?', turn: 3 });
+  const done = await c.until('done');
+  assert.deepEqual(c.events.slice(0, done + 1).map((e) => e.type), ['token', 'token', 'done']);
+  assert.equal(c.events[done].answer, 'a desk'); assert.equal(c.events[done].turn, 3);
+  assert.deepEqual(up.calls.look, { jpeg: 'AAAA', question: 'what?' });
+  c.send({ type: 'look', jpeg: '' });
+  const err = await c.until('error', done + 1);
+  assert.match(c.events[err].message, /jpeg/);
+  c.send({ type: 'start', turn: 4 });
+  c.send({ type: 'look', jpeg: 'AAAA' });
+  const busy = await c.until('error', err + 1);
+  assert.equal(c.events[busy].message, 'busy');
   c.ws.close();
 });

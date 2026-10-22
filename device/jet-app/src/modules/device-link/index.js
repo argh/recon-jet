@@ -85,6 +85,8 @@ export class DeviceLink extends EventEmitter {
       case 'r': return this.emit('rel', { dx: +a[0], dy: +a[1] });
       case 'm': this.mode = a[0]; return this.emit('mode', a[0]);
       case 'j': return this.emit('log', m.line.slice(2));
+      case 'J': return this.#resolve('J', +a[0], 'logBacklog');
+      case 'U': return this.#resolve('U', { on: +a[0], off: +a[1], deg: +a[2], still: +a[3] }, 'calibration');
       case 'g': return this.#resolve('g', { worn: +a[0], raw: +a[1] }, 'glance');
       case 'n': return this.emit('view', { degrees: +a[0] });
       case 'A': return this.emit('captureEnd', a[0]);
@@ -120,6 +122,10 @@ export class DeviceLink extends EventEmitter {
   ping() { return this.#request('p', 'P'); }
   power() { return this.#request('q', 'Q'); }
   glance() { return this.#request('g', 'G'); }
+  /** Ask for the last `n` kernel-log lines again (the whole ring by default) as `j` lines; resolves with the count. */
+  logBacklog(n) { return this.#request('J', n ? `J ${n}` : 'J'); }
+  /** Make jetd re-read the calibration files; resolves with `{on, off, deg, still}`. */
+  reloadCalibration() { return this.#request('U', 'U'); }
   snapshot({ w = 640, h = 480, skip = 6 } = {}) { return this.#request('f', `S ${w} ${h} ${skip}`, 15000); }
   /** Take (or return) the panel pixels; resolves with `{w, h, bpp, stride}` (see docs/jetd.md). */
   surface(on) { return this.#request('E', `E ${on ? 1 : 0}`); }

@@ -16,7 +16,7 @@ the contract between jetd (device server), jet-app (application layer) and mode 
 
 jetd keeps exactly two screens: the boot/fallback log and its recovery chooser, both only while no
 client owns the surface. Everything else (setup screens included) lives in jet-app; jetd's
-setup mode and `M setup` stay for recovery and go away once the Node System screens exist.
+setup mode and `M setup` stay for recovery only (the Node System screens exist since phase 3).
 
 ## Gesture vocabulary
 
@@ -58,7 +58,7 @@ A mode is a plugin: `{ id, label, enter(ctx), leave(), onGesture(g), render(surf
 registered with the mode registry (module-manager module; private modes register from
 `personal/`). The switcher lists registered modes in registration order; the first registered
 is the default unless `ui.defaultMode` says otherwise; the last used mode is persisted on the
-device (`mainline/jet-app.json` state file) and restored at boot.
+device (`mainline/jet-app-state.json`) and restored at boot.
 
 Shipped (public):
 
@@ -66,14 +66,14 @@ Shipped (public):
 |---|---|
 | Log | kernel log from jetd's `j` stream with scrollback and horizontal offset; the first thing shown after boot; also the crash diagnostics view |
 | Demo | a small, readable example others extend: clock, sensor readouts, camera thumbnail, "front press = describe what I see" through the configured LLM |
-| System | Status (power, link, sensors), Pad calibration, Glance calibration, Brightness, Network (addresses, WiFi state), About (versions); also runs as the first-use wizard |
+| System | Status (power, link, addresses, sensors), Pad calibration, Glance calibration, Brightness, Power (live PMIC), Network (addresses, WiFi state), About (versions); also runs as the first-use wizard |
+| Assistant | push-to-talk: front press to talk (the only mode where a press starts a voice turn); transcript and answer on the glass; audio out |
 
 Private (examples of what `personal/` adds; not in the repo):
 
 | Mode | Idea |
 |---|---|
 | Location intel | "what is extra intel about where I am": location from the phone or WiFi, OSINT tools behind the host agent, a short refreshed digest |
-| Assistant | wake word or front press to talk; transcript and answer on the glass; audio out |
 | Live | continuous augmented senses: camera scene + sensors + location + time, analysed on change (new view, glance, voice), each analysis refining the last (belief with confidence and recency), quiet when nothing is new |
 
 ## Setup and first use
@@ -93,6 +93,17 @@ jet-app applies them live through sysfs / jetd commands.
   re-enabled when the client drops (recovery).
 - Log backlog on connect (`j` lines): done; add a count parameter so the Log mode can request the
   full ring.
+
+## Status (2026-10-22)
+
+Implemented in jet-app phase 3 (`docs/jet-app.md`): the registry and switcher, Log, Demo, System
+and Assistant, persistence, the first-use wizard. Where the implementation deviates from the text
+above: the state file is `mainline/jet-app-state.json` (`mainline/jet-app.json` is the per-device
+configuration layer); the wizard has three steps (pad, glance, brightness; "n of 3"), because
+there is no network configuration on the glass yet (WiFi lives in the chroot's
+wpa_supplicant.conf) and the "done" step is a 3 s notice; the "client present" flag is `K 1`
+(jetd's chooser is off while raw keys are on, and `K 0` goes out when the app stops cleanly);
+the status strip shows text notices and the voice/look indicator but no link/charge icons yet.
 
 ## Open questions
 

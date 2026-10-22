@@ -1,60 +1,67 @@
 # jet-app: the Node application layer (`device/jet-app/`)
 
-Phases 1-2 of the Node port (`work/node-port-plan.md`). jet-app runs on the Jet, inside the Alpine
-chroot (Node 22, armv7), connects to `jetd` over its TCP line protocol (`docs/jetd.md`) as the
-hub, takes jetd's external pixel surface and draws only while jetd's remote mode is showing.
-jetd's own modes (log, shell, setup, the front-hold chooser) are untouched; jet-app is just the
-hub that happens to live on the device.
+Phases 1-3 of the Node port (`work/node-port-plan.md`). jet-app runs on the Jet, inside the
+userdata chroot (Node 22, armv7), connects to `jetd` over its TCP line protocol (`docs/jetd.md`),
+takes jetd's external pixel surface (`E 1`) and its raw keys (`K 1`), and from then on owns every
+screen: jetd stays in remote mode the whole time and its own chooser is off. jetd's own screens
+(boot log, recovery chooser, setup) are only for the time no client holds the surface.
+The interaction contract is `docs/interaction-design.md`; this file is the module map.
 
+Runtime: Node 22 in the Jet's chroot; Node 22 has the iterator helpers that
+`@versionzero/module-manager` 1.0.0 uses (no shim).
 
-Runtime: Node 22 (Alpine 3.22 `nodejs` package) in the Jet's Alpine chroot; Node 22 has the iterator
-helpers that `@versionzero/module-manager` 1.0.0 uses (no shim).
+## Modules (`src/modules/`)
 
-## What exists
-
-| module (`src/modules/`) | job | events / API |
+| module | job | events / API |
 |---|---|---|
-| `device-link` | TCP client to jetd (or acceptor when `listen=true`), line + binary framing (`f` frames, `a` audio chunks), reconnect with dial timeout, request/reply helpers | emits `connected`, `disconnected`, `hello`, `key`, `rel`, `mode`, `log`, `glance`, `view`, `captureChunk`, `captureEnd`, `playDone`, `pong`, `power`, `surface`, `frame`, `jetError`; methods `send`, `clear`, `text`, `rect`, `colour`, `flush`, `flushRect`, `surface`, `viewfinder`, `viewfinderStop`, `backlight`, `setMode`, `captureStart/Stop`, `play`/`playEnd`, `ping`, `power`, `glance`, `snapshot` |
+| `device-link` | TCP client to jetd (or acceptor when `listen=true`), line + binary framing (`f` frames, `a` audio chunks), reconnect with dial timeout, request/reply helpers | emits `connected`, `disconnected`, `hello`, `key`, `rel`, `mode`, `log`, `logBacklog`, `calibration`, `glance`, `view`, `captureChunk`, `captureEnd`, `playDone`, `pong`, `power`, `surface`, `frame`, `jetError`; methods `send`, `clear`, `text`, `rect`, `colour`, `flush`, `flushRect`, `surface`, `viewfinder`, `viewfinderStop`, `backlight`, `setMode`, `captureStart/Stop`, `play`/`playEnd`, `ping`, `power`, `glance`, `logBacklog(n)` (`J`), `reloadCalibration()` (`U`), `snapshot` |
 | `surface` | jetd's external pixel surface: `E 1` on connect, an RGB565 back buffer sized from the reply, canvas-style drawing, PSF fonts, dirty tracking, `flush()` writes the changed rectangle to `/dev/fb0` and sends `F x y w h`; `viewfinder()` hands a rectangle to jetd's camera stream; `E 0` at shutdown | emits `ready`; API below |
-| `input` | sends `K 1` on connect (jetd forwards every key down/up at once and keeps its chooser off while in remote mode) and `K 0` when the run aborts; gestures from the raw stream: `press:front|rear|tap`, `hold:front|rear` (`holdMs`, 1 s: the hold fires while the button is still down; a release before that is the press; events may carry a timestamp `t`, and the release classifies from `t_up - t_down`), `swipe:up|down|left|right` from the key DOWN of the driver's swipe keys (103/108/105/106) only, debounced (`swipeDebounceMs`, 250 ms: a second swipe inside the window is dropped); the summed motion `r dx dy` is logged and re-emitted as `motion` but never navigates; raw keys and motion are logged at debug with timestamps | emits `press`, `hold`, `swipe`, `gesture` (name string) and `motion` |
-| `power` | polls `Q` every `pollMs` (2 s) while connected and jetd is in remote mode, parses the `q` line; `smoothed` = median of the last `samples` (8) polls of battery mV and mA, every mV/mA rounded to `roundStep` (10) | `last`, `smoothed`, `ingest(reading)`, emits `update` |
-| `ui` | screen stack + nested menu overlay; routes gestures (only while jetd is in remote mode); renders at most once per tick (clear, `render(surface)`, `flush()`) and only while `surface.active` (connected, jetd mode `remote`, surface acquired); full repaint on every hello and on `ready`; `leaveTo(mode)` hands the panel to a jetd mode and goes silent until `m remote` + hello | `show(screen)`, `openMenu()`, `closeMenu()`, `toggleMenu()`, `leaveTo(mode)`, `requestRender()`; `Screen` base (`render(surface)`, `onGesture(name)`, `onShow/onHide`), `Menu` (items may have `children`, `back`, `live` or `action`; `enter(item)`, `back()`, `depth`, `title`, `items`, `selected` of the current level), `StatusScreen`; palette `C` in `screen.js` |
-| `voice` | push-to-talk turns streamed through `host/voice-session.js` (WebSocket): idle → listening (earcon, `V`, every `a` chunk forwarded as a binary frame, `end` at `A`) → thinking (partial transcripts; a cached filler phrase `fillerMs` after the final transcript if no audio yet) → speaking (each sentence's audio queued with `W` as it arrives, `w` at `done`) → idle. Trigger `press:front` with no menu open; a press while listening ends the capture (`v`); a press while thinking/speaking is a barge-in (`Y`, `cancel`, new turn). `VoiceScreen` shows the answer wrapped (big font, small when long) and the transcript along the bottom; the ui strip says listening/thinking/speaking. Debug HTTP on `debugPort`: `POST /talk`, `POST /say {text}`, `POST /filler`, `GET /state` | `talk()`, `say(text)`, `makeFiller()`, `state`, `turn`, `transcript`, `answer`, emits `state` |
-| `jet` (`src/jet.js`) | main module (`AppModule`): references every subsystem, which is what instantiates them; heartbeat tick with link state and RSS | |
+| `input` | sends `K 1` on connect (jetd forwards every key down/up at once and keeps its chooser off) and `K 0` when the run aborts; gestures from the raw stream: `press:front|rear|tap`, `hold:front|rear` (`holdMs`, 1 s: the hold fires while the button is still down; a release before that is the press), `swipe:up|down|left|right` from the key DOWN of the driver's swipe keys only, debounced (`swipeDebounceMs`, 250 ms); the summed motion `r dx dy` is re-emitted as `motion` (pad calibration measures it) but never navigates; nothing fires on a release | emits `press`, `hold`, `swipe`, `gesture` (name string) and `motion` |
+| `power` | polls `Q` every `pollMs` (2 s) while connected and jetd is in remote mode; `smoothed` = median of the last `samples` (8) polls of battery mV and mA, rounded to `roundStep` (10) | `last`, `smoothed`, `ingest(reading)`, emits `update` |
+| `sensors` | the last glance (`g worn raw`) and new-view (`n degrees`) events, timestamped | `glance`, `view`, emits `glance`, `view` |
+| `ui` | the system layer of the screen: renders at most once per tick (clear, `root.render(surface)`, the 10 px status strip, `flush()`) and only while `surface.active` (connected, jetd mode `remote`, surface acquired); full repaint on every hello and on `ready`; owns no screens | `root` (the mode registry), `setStrip(text, {colour, ms})`, `requestRender()`, `active`, `renders` |
+| `modes` | the mode registry and switcher (below): modes register in their `start()`, `begin()` enters the start mode, front hold opens the chooser-style switcher, every other gesture goes to the current mode; the last mode is persisted in `stateFile` | `register(mode)`, `list`, `current`, `get(id)`, `switchTo(id)`, `begin()`, `openSwitcher/closeSwitcher`, `render`, emits `mode` |
+| `voice` | push-to-talk turns streamed through `host/voice-session.js` (WebSocket): idle → listening (earcon, `V`, every `a` chunk forwarded) → thinking (partial transcripts; the cached filler phrase `fillerMs` after the final transcript if no audio yet) → speaking (sentence audio queued with `W`, `w` at `done`) → idle. No gesture is read here: the Assistant mode calls it. `look(jpeg, question)` is the vision request (own session, `{type:"look"}`) the Demo mode makes. Debug HTTP on `debugPort`: `POST /talk`, `/cancel`, `/say {text}`, `/filler`, `GET /state` | `startTurn()` (ends the capture while listening, barge-in while thinking/speaking), `cancel()`, `clear()`, `look()`, `say(text)`, `makeFiller()`, `state`, `turn`, `transcript`, `answer`, `configured`, emits `state` |
+| `jet` (`src/jet.js`) | main module (`AppModule`): references every subsystem and the public modes, which is what instantiates them; `main()` calls `modes.begin()` once everything has started; heartbeat tick with link state and RSS | |
 
-Screens: **Status** (heading and clock in the big font; link state and geometry, a 60x8 battery
-strip with the charge bolt, smoothed battery mV/mA, VSYS/VBUS, charger and limit registers, UDC
-state and gadget MaxPower, last glance event, last new-view event in the small font; its 1 s
-clock timer runs only while it is showing and not covered by the menu, and a power poll
-re-renders only when the rounded readout changed) and the **menu**: a vertical list in a
-bordered box laid out like jetd's mode chooser, with the selection drawn as a filled bar and a
-`>` marker, next to the 160x120 camera thumbnail. A sub-menu replaces the list in the same box,
-titled by the item that opened it; the parent keeps its selection for when you come back.
+Shared drawing bits in `src/modules/ui/`: `style.js` (palette `C`, `MARGIN`, `STRIP_H`, `TOP`,
+`wrapWords`, `hint`, `heading`, `row`, `paragraph`) and `chooser.js` (`Chooser`: the one list box,
+2 px yellow border, yellow title, the selected row a filled green bar with black text, hint line at
+the bottom; `move(d)`, `select(id)`, `item`, `render(s)`).
 
-| menu item | effect |
-|---|---|
-| `Camera: on/off` | toggles jetd's live viewfinder in the thumbnail; closing the menu stops it |
-| `Kernel log` | `M log`: jetd's own log viewer |
-| `System` > | opens the sub-menu below |
-| &nbsp;&nbsp;`Status` | closes the menu, shows the status screen |
-| &nbsp;&nbsp;`Setup` | `M setup`: jetd's own setup menu (pad/glance calibration, brightness, power) |
-| &nbsp;&nbsp;`Back` | up to the top level |
+## Modes (`src/modes/`)
 
-Button semantics (jetd raw keys, `K 1`): **hold front** (~1 s) opens the menu, and closes it
-again from any level; **swipe up/down** moves the selection; **front press** (or a pad tap)
-picks; **rear press** goes up one level, and closes the menu at the top level. Plain presses
-outside the menu do nothing (screens may consume them).
+A mode is a plugin `{ id, label, enter(ctx), leave(), onGesture(g) -> handled, render(surface),
+tick?() }`, optionally `firstUse()`; it is a module-manager module that injects `modes` and calls
+`modes.register(this)` first thing in its `start()` (registration order = switcher order; register
+before any `await`). `personal/index.js` may export `modules: [Class, ...]`; `main.js` registers
+each as an instance, so it is configured and started like a core module without core referencing it.
+`ctx.wizard` is true when the mode was entered as the first-use wizard. `tick()` runs once per
+`modes.tickMs` (1 s) while the mode is current and the panel is ours, followed by a render.
 
-Gesture rules for the touchpad: jetd forwards, for one swipe, the driver's summed motion
-(`r dx dy`) and then the swipe key as a down/up pair, and a long swipe can make the driver emit
-two keys. Only the key down counts as a move; the key up and the motion never do (the motion is
-still logged at debug and emitted as `motion`); and a second swipe key within
-`input.swipeDebounceMs` (250 ms) of the previous one is dropped, so one swipe is one step.
-Raw `key` and `motion` events are logged at debug level with their timestamps
-(`JET_LOG_LEVEL=debug`), so the next pad complaint can be read off `/tmp/jet-app.log`.
-While jetd is in one of its own modes (log, shell, setup) raw keys are off, jetd handles the
-buttons itself (front hold = its chooser, rear = back) and jet-app draws nothing and sends
-nothing; jetd's `m remote` plus the hello that follows it trigger the repaint.
+Start mode (`modes.begin()`): a mode whose `firstUse()` resolves true (System, when a calibration
+file is missing), else the mode in the state file `/android-data/mainline/jet-app-state.json`
+(`{"mode": "demo"}`, written atomically on every switch), else `ui.defaultMode` (`demo` in the
+default config), else the first registered. Until `begin()` has run, `modes.bootMode` (`log`) is
+drawn, so the panel continues jetd's boot log without a gap.
+
+Gestures: **front hold** opens the switcher (`MODE` list of every registered mode, current one
+selected) and closes it again; in the switcher swipe up/down moves, front press or pad tap picks,
+rear press cancels. Everything else goes to the mode's `onGesture`; **rear press** is "back"
+inside a mode and does nothing at its root; jetd is never asked to change mode.
+
+| mode | id | what it does |
+|---|---|---|
+| **Log** | `log` | the kernel log: `J` on connect and on enter (the whole ring; the 60 lines jetd sends by itself are deduplicated by taking the last `n` of the replay once `J n` arrives), live `j` lines always buffered (`lines`, 2000); small font, newest at the bottom, auto-follow unless scrolled; swipe up/down scroll by a page, left/right pan by 10 columns, rear returns to following; also the boot view |
+| **Demo** | `demo` | the readable example: clock, glance / last new view / battery readouts, the camera live in a 160x120 rectangle (surface viewfinder), front press = describe: `S 640 480` (the next streamed frame), UYVY → RGBA at 320x240 (`uyvy.js`), jpeg-js at `jpegQuality` (60), `voice.look()` with `question`; the answer streams onto the glass, rear clears it |
+| **System** | `system` | a `SYSTEM` chooser of screens: **Status** (clock, link and geometry, battery strip and smoothed readout, charger/limit registers, gadget state, WiFi and USB IPv4 addresses, last glance and new view), **Pad calibration** (3 swipes per direction RIGHT/LEFT/DOWN/UP from the pad's summed motion, swipe keys swallowed meanwhile; thresholds = half the weaker direction's median per axis, clamped 8..60; written live to `/sys/module/jet_ofm/parameters/thr_x|thr_y` and to `mainline/ofm-args` as `thr_x=N thr_y=M`), **Glance calibration** (at / forward / at / away, front takes each reading as the average of 8 reads of the `tmd2771` IIO `in_proximity0_raw` 20 ms apart; on = away + 60 % of the span, off = away + 40 %, either polarity, span under 40 rejected; `mainline/glance` as `on off`, then `U`), **Brightness** (16..1023 by 48, swipe up/right and down/left, live on `/sys/class/backlight/kopin-a230/brightness`, front saves `mainline/backlight`, rear reverts), **Power** (`Q` at 1 Hz: battery mV/mA, VSYS, VBUS, ctrl1/stat1/linsts, cinlimit/vichrg, UDC state, gadget MaxPower), **Network** (interfaces from `/sys/class/net` with IPv4 from `ip -4 -j addr`, WiFi SSID/freq/signal from `iw dev wlan0 link`, refreshed every 5 s), **About** (jet-app, Node, kernel, jetd hello, panel, registered modes, uptime/RSS). Rear in a screen returns to the menu. First use (no `ofm-args` or `glance` on userdata): `firstUse()` is true and the mode is entered as the wizard: Pad calibration → Glance calibration → Brightness with "n of 3" in each title, then the menu and a "setup complete" notice |
+| **Assistant** | `assistant` | push-to-talk: front press = `voice.startTurn()` (again while listening ends the capture, while thinking/speaking barges in); the answer wrapped in the big font (small when long), the transcript along the bottom, the strip saying listening/thinking/speaking; rear cancels a running turn or clears the answer; leaving the mode cancels. The only place a front press starts a voice turn |
+
+Files written on userdata (`/android-data/mainline/`): `jet-app-state.json` (last mode),
+`ofm-args`, `glance`, `backlight` (the files jetd and the init script already read at boot),
+`voice/filler.pcm` (the filler cache). All paths are configuration (`modes.stateFile`,
+`systemMode.*File`, `.ofmSysfs`, `.backlightSysfs`, `.iioDir`, `.netDir`), so tests point them at
+temp files.
 
 ### Surface API (`src/modules/surface/`)
 
@@ -93,12 +100,31 @@ parsing, 565 packing, rectangle algebra, `diffRect`, text layout and alignment, 
 round trip), the surface flush against a file standing in for `/dev/fb0` (changed rows only,
 viewfinder rectangle untouched), press/hold/swipe detection from timestamped `k` events (`K 1`/`K 0`
 too; a key pair plus its motion is one move, two key downs 100 ms apart are one move and 400 ms
-apart two), the median/rounding smoother and remote-only polling, menu nesting against a stub
-ui (`test/menu.test.js`: enter/back/close, per-level selection), and the menu state machine
-through the real input/surface/ui stack against a stub link (open/close/move/pick, rear up one
-level vs close at the top, `M log`/`M setup` hand-over with no renders or commands until
-`m remote` + hello, camera toggle, power updates repainting only on a changed readout). the voice state machine against a fake link, input, ui and session (`test/voice.test.js`: press → earcon + `V` + `start`, chunks forwarded, `end` at `A`, partial/final/tokens/audio/done, the answer kept on screen, stale frames from an ended turn ignored; barge-in during speaking = `Y` + `cancel` + a new turn, press while listening = `v`; the filler fires when audio is late and not when it is early, a soft beep plus a cache render over a second session when there is no cache yet; triggers ignored under a menu or outside remote mode; a host dial failure or link drop ends the turn), the earcon generator and word wrap. `test/fake-jetd.js` is a protocol stand-in (hello,
-`P/Q/G/M/E/Z` replies, event injection) used by the tests and runnable standalone.
+apart two), the median/rounding smoother and remote-only polling; the mode registry and switcher
+through the real input/surface/ui stack against a stub link (`test/modes.test.js`: boot mode drawn
+until `begin()`, first-use wizard > persisted > `ui.defaultMode` > first registered, an unknown
+persisted mode falls back, state file written on a switch and restored by a second stack, front
+hold opens/closes the switcher, swipes move and wrap with the debounce, front or tap picks with
+enter/leave, rear cancels, every other gesture reaches the mode and nothing fires on a key down,
+jetd never asked to change mode; and, with the real Assistant/Demo/System modes over a stub voice,
+that a front press starts a voice turn in Assistant only, is a look in Demo and navigation in
+System); the Log buffer and mode (`test/log-mode.test.js`: scroll clamping, pan, follow, a scrolled
+view holding still under new lines, the `J` backlog replacing the automatic 60 lines, `J` on
+connect and on enter, repaint only while current); the calibration arithmetic and the network
+parsers (`test/calibration.test.js`); the System mode against temp files (`test/system-mode.test.js`:
+`firstUse()`, the wizard with "n of 3" titles, pad thresholds from motion sums into sysfs and
+`ofm-args`, glance from scripted sensor values into `glance` plus `U`, a flat run rejected, a
+missing sensor reported, brightness live/saved/reverted, every menu screen, Status repainting only
+on a changed readout and showing the address rows); the Demo picture path (`test/demo.test.js`:
+UYVY → RGBA, the snapshot → 320x240 JPEG → `look` flow, a second press swallowed, rear clearing,
+a late answer after leaving dropped, a failing snapshot shown); the voice state machine against
+a fake link, ui and session (`test/voice.test.js`: `startTurn` → earcon + `V` + `start`, chunks
+forwarded, `end` at `A`, partial/final/tokens/audio/done, stale frames ignored; barge-in = `Y` +
+`cancel` + a new turn, press while listening = `v`; `cancel()` while listening or speaking;
+`look()` over its own session; the filler timing and cache; not-configured refused; a host dial
+failure or link drop ends the turn), the earcon generator and word wrap. `test/fake-jetd.js` is a
+protocol stand-in (hello, `P/Q/G/M/E/Z/J/U` replies, a kernel-log ring, event injection) used by
+the tests and runnable standalone; `test/helpers.js` builds the real input/surface/ui/modes stack.
 
 ## Configuration
 
@@ -125,11 +151,16 @@ registers additively (future providers) without editing core.
 | `input.holdMs` / `.swipeDebounceMs` / `.tapCode` | `1000` / `250` / `28` | hold threshold; minimum gap between two swipes; pad tap code |
 | `input.rawKeys` | `true` | send `K 1` on connect (false: jetd's chooser and press pairs, so holds never arrive) |
 | `power.pollMs` / `.samples` / `.roundStep` | `2000` / `8` / `10` | `Q` interval (0 disables); median window; display rounding (mV, mA) |
-| `ui.menuGestures` / `.clockMs` | `["hold:front"]` / `1000` | menu trigger; status refresh |
+| `ui.defaultMode` | `demo` | start mode when nothing is persisted |
+| `modes.stateFile` / `.tickMs` / `.bootMode` | `/android-data/mainline/jet-app-state.json` / `1000` / `log` | persisted state; mode tick (clock); what shows until the start mode is entered |
+| `logMode.lines` | `2000` | scrollback kept |
+| `demoMode.question` / `.jpegQuality` | (a describe prompt) / `60` | the look request |
+| `systemMode.ofmArgsFile` / `.glanceFile` / `.backlightFile` | `/android-data/mainline/ofm-args` / `glance` / `backlight` | what the calibration screens write |
+| `systemMode.ofmSysfs` / `.backlightSysfs` / `.iioDir` / `.netDir` | `/sys/module/jet_ofm/parameters` / `/sys/class/backlight/kopin-a230/brightness` / `/sys/bus/iio/devices` / `/sys/class/net` | live hardware paths |
 | `voice.hostUrl` | (none) | `ws://<mac>:7779`, the `host/voice-session.js` address; set it in the device or personal layer (the Mac's USB address is leased: see `/tmp/jetd.log` or the udhcpd leases); empty = voice off |
-| `voice.enabled` / `.triggers` / `.maxSeconds` | `true` / `["press:front"]` / `8` | front press starts a turn; longest capture |
+| `voice.enabled` / `.maxSeconds` | `true` / `8` | turns allowed; longest capture |
 | `voice.fillerMs` / `.fillerText` / `.fillerPath` | `700` / `hmm` / `/android-data/mainline/voice/filler.pcm` | filler delay after the transcript; the phrase (rendered once by the host, cached on the device); the cache |
-| `voice.debugPort` | `0` | `JET_VOICE_DEBUG_PORT`: debug HTTP (`POST /talk`, `/say`, `/filler`; `GET /state`) |
+| `voice.debugPort` | `0` | `JET_VOICE_DEBUG_PORT`: debug HTTP (`POST /talk`, `/cancel`, `/say`, `/filler`; `GET /state`) |
 | `jet.logLevel` / `jet.deviceConfig` | `info` / `/android-data/mainline/jet-app.json` | logging; device layer path |
 
 Secrets (none yet) belong in `/android-data/mainline/jet-app.env`, sourced by `deploy/jet-app.sh`.
@@ -137,11 +168,12 @@ Secrets (none yet) belong in `/android-data/mainline/jet-app.env`, sourced by `d
 ## Running
 
 On the Mac against the stand-in: `node test/fake-jetd.js 7790` in one terminal,
-`JET_DEVICE_LINK_PORT=7790 JET_SURFACE_DEVICE=/tmp/fb0 npm start` in another (the surface writes a
-file instead of the panel). Against a real jetd the app must run on the Jet: it writes that
+`JET_DEVICE_LINK_PORT=7790 JET_SURFACE_DEVICE=/tmp/fb0 JET_MODES_STATE_FILE=/tmp/state.json npm start`
+in another (the surface writes a file instead of the panel; point `JET_SYSTEM_MODE_*` at temp files
+too, or the missing calibration files start the wizard). Against a real jetd the app must run on the Jet: it writes that
 machine's `/dev/fb0`.
 
-On the device (`/opt/jet-app` inside the chroot = `/android-data/alpine/opt/jet-app`):
+On the device (`/opt/jet-app` inside the chroot):
 
 ```sh
 sh device/jet-app/deploy/bundle.sh        # npm ci --omit=dev + tar -> work/jet-app.tgz (pure JS, arch-agnostic)
@@ -154,6 +186,22 @@ the one runtime dependency beyond the `@versionzero/*` packages).
 Startup is ~2 s to the first dial, RSS ~55 MB on the Jet (the Node baseline is most of it).
 
 ## Status (2026-10-22)
+
+### Phase 3: one UI (2026-10-22)
+
+The two-menu experience (jet-app's menu next to jetd's chooser, Status triggering the voice turn)
+is gone: after it connects jet-app owns every screen, jetd stays in remote mode, and the front
+hold always opens the same `MODE` switcher. Checked on the Jet against `jetd-new16`: a clean start
+enters the persisted mode, the Log mode receives the full ring with `J` (no duplicate of the
+automatic 60 lines), the switcher reaches Log / Demo / System / Assistant, the System screens read
+the real sysfs/IIO/`ip`/`iw`, and a front press in System or Demo never starts a voice turn.
+Deviations from `docs/interaction-design.md`: the state file is `mainline/jet-app-state.json`
+(not `mainline/jet-app.json`, which is the per-device configuration layer); the first-use wizard
+has three steps (pad, glance, brightness), not five: there is no network setup on the glass yet
+(WiFi is configured in the chroot's wpa_supplicant.conf) and no "done" screen beyond the notice;
+and the "client present" flag jetd owes the app is `K 1` for now (jetd's chooser returns with
+`K 0`, which goes out when the app stops; a crash leaves jetd in remote mode with raw keys until
+it notices the socket close).
 
 Phase 2b: jetd's raw keys (`K 1`) make the front hold reach the app, so the menu works like jetd's
 chooser (hold front, swipe, front picks, rear backs out one level) and `Kernel log` / `System >
@@ -186,7 +234,7 @@ plays in every real turn. Cold starts add ~10 s for the chat model and ~2.3 s fo
 
 ## Deferred (later phases)
 
-`modes` (log/shell/setup rendered by the app itself rather than handed to jetd), `sensors`
-policies, `vision`, `providers/*`, `hub` HTTP API on the device, init supervision line,
-the `--config` file option (available but unused; layering is done in `src/lib/config.js`), ESLint
-config, decoding camera `S` frames (UYVY) into the surface.
+a shell mode (jetd's pty shell has no app equivalent), `sensors` policies, `providers/*`, a `hub`
+HTTP API on the device, init supervision line, the `--config` file option (available but unused;
+layering is done in `src/lib/config.js`), ESLint config, a network setup screen (WiFi credentials
+on the glass), the wake word (interaction-design open question), status-strip link/charge icons.
