@@ -5,6 +5,11 @@ chroot (Node 20.15, armv7), connects to `jetd` over its TCP line protocol (`docs
 the hub, and draws only while jetd's remote mode is showing. jetd's own modes (log, shell, setup,
 the front-hold chooser) are untouched; jet-app is just the hub that happens to live on the device.
 
+
+Runtime: Node 22 (Alpine 3.22 `nodejs` package) in the Jet's Alpine chroot; Node 22 has the iterator
+helpers that `@versionzero/module-manager` 1.0.0 uses, so `src/lib/compat.js` can go once that
+package's `engines` field says so.
+
 ## What exists
 
 | module (`src/modules/`) | job | events / API |
