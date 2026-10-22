@@ -1,7 +1,7 @@
 {
   "deviceLink": { "host": "127.0.0.1", "port": 7777, "listen": false, "bind": "0.0.0.0", "reconnectMs": 2000 },
   "surface": { "device": "/dev/fb0", "minFlushMs": 30, "viewfinderFps": 10 },
-  "input": { "holdMs": 1000, "swipeThreshold": 20, "swipeDedupeMs": 300 },
+  "input": { "holdMs": 1000, "swipeDebounceMs": 250 },
   "power": { "pollMs": 2000, "samples": 8, "roundStep": 10 },
   "ui": { "menuGestures": ["hold:front"], "clockMs": 1000 }
 }

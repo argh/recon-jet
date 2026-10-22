@@ -1,5 +1,6 @@
 // input: raw jetd key/motion events -> gestures. Emits 'press' {button}, 'hold' {button},
-// 'swipe' {dir} and a catch-all 'gesture' with the name ('press:front', 'hold:front', 'swipe:up'...).
+// 'swipe' {dir}, a catch-all 'gesture' with the name ('press:front', 'hold:front', 'swipe:up'...)
+// and 'motion' {dx, dy, t} for the touchpad's raw REL sums (no gesture is derived from those).
 //
 // Raw keys: on connect this sends `K 1`, so jetd forwards every down/up as it happens (remote
 // mode only) and leaves its own front-hold chooser off; `K 0` goes out when the run is aborted.
@@ -9,6 +10,11 @@
 // `t_up - t_down`, so a late timer (or a replayed stream) still classifies correctly.
 // Outside remote mode jetd keeps the keys, so a stray up (the release of the press that chose
 // "remote" in jetd's chooser) arrives without its down and is ignored.
+//
+// Swipes come from the touchpad driver's swipe keys only, on the key DOWN (value 1): jetd also
+// forwards the summed motion (`r dx dy`) for the same gesture, and the driver can emit two keys
+// from one long swipe, so motion is logged and re-emitted but never navigates, and a second
+// swipe within `swipeDebounceMs` of the previous one is dropped.
 import { EventEmitter } from 'node:events';
 import { Schema } from '@versionzero/module-manager';
 
@@ -21,19 +27,18 @@ export class Input extends EventEmitter {
     name: 'input',
     schema: s()
       .property('holdMs', s('number').default(1000).meta('description', 'button hold threshold'))
-      .property('swipeThreshold', s('number').default(20).meta('description', 'summed REL counts for a swipe from raw motion'))
-      .property('swipeDedupeMs', s('number').default(300).meta('description', 'ignore a swipe key this soon after the same swipe from motion'))
+      .property('swipeDebounceMs', s('number').default(250).meta('description', 'ignore a swipe this soon after the previous one'))
       .property('tapCode', s('number').default(28).meta('description', 'evdev code the touchpad reports for a tap'))
       .property('rawKeys', s('boolean').default(true).meta('description', 'ask jetd for raw key events (K 1) on connect'))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  holdMs; swipeThreshold; swipeDedupeMs; tapCode; rawKeys; deviceLink; logger;
+  holdMs; swipeDebounceMs; tapCode; rawKeys; deviceLink; logger;
 
   /** Clock for events without their own `t` (overridable in tests). */
   now = () => Date.now();
   #down = new Map();     // button -> { t, timer, held }
-  #lastSwipe = { dir: null, t: 0 };
+  #lastSwipeT = -Infinity;
 
   /** @param {AbortController} [abort] the app's run controller: aborted before any module stops */
   async start(abort) {
@@ -51,7 +56,11 @@ export class Input extends EventEmitter {
     if (!this.rawKeys || !this.deviceLink.connected) return;
     if (this.deviceLink.send(`K ${on ? 1 : 0}`)) this.logger?.info({ on }, 'raw keys');
   }
-  #reset() { for (const d of this.#down.values()) clearTimeout(d.timer); this.#down.clear(); }
+  #reset() {
+    for (const d of this.#down.values()) clearTimeout(d.timer);
+    this.#down.clear();
+    this.#lastSwipeT = -Infinity;
+  }
 
   #gesture(kind, detail) {
     const name = `${kind}:${detail}`;
@@ -69,6 +78,7 @@ export class Input extends EventEmitter {
 
   /** @param {{code: number, value: number, t?: number}} k */
   #onKey({ code, value, t = this.now() }) {
+    this.logger?.debug({ code, value, at: t }, 'key');
     const button = BUTTONS[code];
     if (button) {
       if (value === 1 && !this.#down.has(button)) {
@@ -85,24 +95,22 @@ export class Input extends EventEmitter {
     }
     if (value !== 1) return;
     const dir = SWIPES[code];
-    if (dir) {
-      const dup = this.#lastSwipe.dir === dir && t - this.#lastSwipe.t < this.swipeDedupeMs;
-      if (!dup) this.#gesture('swipe', dir);
-      return;
-    }
+    if (dir) return this.#swipe(dir, t);
     if (code === this.tapCode) return this.#gesture('press', 'tap');
     this.logger?.debug({ code }, 'unmapped key');
   }
 
-  // jet-ofm: x<0 left, y<0 down; the driver sends REL before its own swipe key, so remember it.
-  #onRel({ dx, dy, t = this.now() }) {
-    const ax = Math.abs(dx), ay = Math.abs(dy), thr = this.swipeThreshold;
-    let dir = null;
-    if (ax > ay && ax >= thr) dir = dx < 0 ? 'left' : 'right';
-    else if (ay > ax && ay >= thr) dir = dy < 0 ? 'down' : 'up';
-    this.logger?.debug({ dx, dy, dir }, 'motion');
-    if (!dir) return;
-    this.#lastSwipe = { dir, t };
+  #swipe(dir, t) {
+    const sinceMs = t - this.#lastSwipeT;
+    if (sinceMs < this.swipeDebounceMs) { this.logger?.debug({ dir, sinceMs }, 'swipe debounced'); return; }
+    this.#lastSwipeT = t;
     this.#gesture('swipe', dir);
+  }
+
+  // jet-ofm: x<0 left, y<0 down. Logged and re-emitted for diagnosis and future uses; the
+  // driver's swipe key for the same gesture is what navigates.
+  #onRel({ dx, dy, t = this.now() }) {
+    this.logger?.debug({ dx, dy, at: t }, 'motion');
+    this.emit('motion', { dx, dy, t });
   }
 }

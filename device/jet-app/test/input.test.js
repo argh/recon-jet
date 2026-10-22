@@ -6,7 +6,7 @@ import { Input } from '../src/modules/input/index.js';
 
 async function make(overrides = {}, abort) {
   const link = Object.assign(new EventEmitter(), { connected: true, sent: [], send(l) { this.sent.push(l); return true; } });
-  const input = Object.assign(new Input(), { holdMs: 40, swipeThreshold: 20, swipeDedupeMs: 300, tapCode: 28, rawKeys: true, deviceLink: link, ...overrides });
+  const input = Object.assign(new Input(), { holdMs: 40, swipeDebounceMs: 250, tapCode: 28, rawKeys: true, deviceLink: link, ...overrides });
   const gestures = [];
   input.on('gesture', (g) => gestures.push(g));
   await input.start(abort);
@@ -64,16 +64,33 @@ test('disconnect forgets a held button', async () => {
   await input.stop();
 });
 
-test('swipes from keys, from motion, and deduped', async () => {
+test('swipes: key downs only; motion never navigates; one move per gesture', async () => {
   const { link, gestures, key, input } = await make();
-  key(103, 1); key(103, 0);
-  link.emit('rel', { dx: -30, dy: 2 });
-  key(105, 1);                                    // the driver's key for the same swipe
-  link.emit('rel', { dx: 3, dy: -4 });            // below threshold: nothing
-  key(108, 1); key(106, 1); key(28, 1);
-  assert.deepEqual(gestures, ['swipe:up', 'swipe:left', 'swipe:down', 'swipe:right', 'press:tap']);
-  link.emit('rel', { dx: 0, dy: -25, t: 10000 });
-  key(108, 1, 10400);                             // same direction but past the dedupe window: a second swipe
-  assert.deepEqual(gestures.slice(5), ['swipe:down', 'swipe:down']);
+  const motion = [];
+  input.on('motion', (m) => motion.push(m));
+  // one swipe as jetd forwards it: the driver's summed motion plus the key pair, within 100 ms
+  link.emit('rel', { dx: 0, dy: -30, t: 1000 });
+  key(108, 1, 1050); key(108, 0, 1080);
+  assert.deepEqual(gestures, ['swipe:down'], 'key pair + matching motion: exactly one move');
+  assert.deepEqual(motion, [{ dx: 0, dy: -30, t: 1000 }], 'motion is re-emitted, not navigated');
+  key(103, 0, 2000);                              // a lone key up: nothing
+  link.emit('rel', { dx: -40, dy: 0, t: 2100 });  // motion on its own: nothing
+  assert.deepEqual(gestures, ['swipe:down']);
+  key(105, 1, 3000); key(28, 1, 3010);
+  assert.deepEqual(gestures, ['swipe:down', 'swipe:left', 'press:tap'], 'a tap is not debounced');
+  await input.stop();
+});
+
+test('swipe debounce: two key downs 100 ms apart move once, 400 ms apart move twice', async () => {
+  const { gestures, key, input } = await make();
+  key(108, 1, 1000); key(108, 0, 1020);
+  key(108, 1, 1100); key(108, 0, 1120);           // the driver's second key from one long swipe
+  assert.deepEqual(gestures, ['swipe:down']);
+  key(108, 1, 1500); key(108, 0, 1520);
+  assert.deepEqual(gestures, ['swipe:down', 'swipe:down']);
+  key(103, 1, 1600);                              // a different direction inside the window is dropped too
+  assert.deepEqual(gestures, ['swipe:down', 'swipe:down']);
+  key(103, 1, 1900);
+  assert.deepEqual(gestures, ['swipe:down', 'swipe:down', 'swipe:up']);
   await input.stop();
 });

@@ -5,7 +5,8 @@
 // announces with `m remote` and a fresh hello; that hello triggers the repaint.
 //
 // Button semantics (raw keys, see input): front hold opens the menu and closes it again; swipe
-// up/down moves the selection; front press (or a pad tap) picks; rear press closes the menu.
+// up/down moves the selection; front press (or a pad tap) picks; rear press goes up one level
+// and closes the menu at the top. Menu tree: Camera, Kernel log, System > (Status, Setup, Back).
 import { Schema } from '@versionzero/module-manager';
 import { Menu } from './menu.js';
 import { StatusScreen } from './status.js';
@@ -64,10 +65,13 @@ export class Ui {
     if (this.menu) return;
     this.screen?.onHide();
     this.menu = new Menu(this, { title: 'MENU', items: [
-      { label: 'Status', action: () => { this.closeMenu(); this.show(this.status); } },
       { label: 'Camera', live: true },
       { label: 'Kernel log', action: () => this.leaveTo('log') },
-      { label: 'Setup', action: () => this.leaveTo('setup') },
+      { label: 'System', children: [
+        { label: 'Status', action: () => { this.closeMenu(); this.show(this.status); } },
+        { label: 'Setup', action: () => this.leaveTo('setup') },
+        { label: 'Back', back: true },
+      ] },
     ] });
     this.menu.onShow();
     this.logger?.info('menu open');

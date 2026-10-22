@@ -16,9 +16,9 @@ helpers that `@versionzero/module-manager` 1.0.0 uses (no shim).
 |---|---|---|
 | `device-link` | TCP client to jetd (or acceptor when `listen=true`), line + binary framing (`f` frames, `a` audio chunks), reconnect with dial timeout, request/reply helpers | emits `connected`, `disconnected`, `hello`, `key`, `rel`, `mode`, `log`, `glance`, `view`, `captureChunk`, `captureEnd`, `playDone`, `pong`, `power`, `surface`, `frame`, `jetError`; methods `send`, `clear`, `text`, `rect`, `colour`, `flush`, `flushRect`, `surface`, `viewfinder`, `viewfinderStop`, `backlight`, `setMode`, `captureStart/Stop`, `play`/`playEnd`, `ping`, `power`, `glance`, `snapshot` |
 | `surface` | jetd's external pixel surface: `E 1` on connect, an RGB565 back buffer sized from the reply, canvas-style drawing, PSF fonts, dirty tracking, `flush()` writes the changed rectangle to `/dev/fb0` and sends `F x y w h`; `viewfinder()` hands a rectangle to jetd's camera stream; `E 0` at shutdown | emits `ready`; API below |
-| `input` | sends `K 1` on connect (jetd forwards every key down/up at once and keeps its chooser off while in remote mode) and `K 0` when the run aborts; gestures from the raw stream: `press:front|rear|tap`, `hold:front|rear` (`holdMs`, 1 s: the hold fires while the button is still down; a release before that is the press; events may carry a timestamp `t`, and the release classifies from `t_up - t_down`), `swipe:up|down|left|right` from the driver's swipe keys (103/108/105/106) and from raw `r dx dy` (threshold, deduped against the key that follows) | emits `press`, `hold`, `swipe` and `gesture` (name string) |
+| `input` | sends `K 1` on connect (jetd forwards every key down/up at once and keeps its chooser off while in remote mode) and `K 0` when the run aborts; gestures from the raw stream: `press:front|rear|tap`, `hold:front|rear` (`holdMs`, 1 s: the hold fires while the button is still down; a release before that is the press; events may carry a timestamp `t`, and the release classifies from `t_up - t_down`), `swipe:up|down|left|right` from the key DOWN of the driver's swipe keys (103/108/105/106) only, debounced (`swipeDebounceMs`, 250 ms: a second swipe inside the window is dropped); the summed motion `r dx dy` is logged and re-emitted as `motion` but never navigates; raw keys and motion are logged at debug with timestamps | emits `press`, `hold`, `swipe`, `gesture` (name string) and `motion` |
 | `power` | polls `Q` every `pollMs` (2 s) while connected and jetd is in remote mode, parses the `q` line; `smoothed` = median of the last `samples` (8) polls of battery mV and mA, every mV/mA rounded to `roundStep` (10) | `last`, `smoothed`, `ingest(reading)`, emits `update` |
-| `ui` | screen stack + menu overlay; routes gestures (only while jetd is in remote mode); renders at most once per tick (clear, `render(surface)`, `flush()`) and only while `surface.active` (connected, jetd mode `remote`, surface acquired); full repaint on every hello and on `ready`; `leaveTo(mode)` hands the panel to a jetd mode and goes silent until `m remote` + hello | `show(screen)`, `openMenu()`, `closeMenu()`, `toggleMenu()`, `leaveTo(mode)`, `requestRender()`; `Screen` base (`render(surface)`, `onGesture(name)`, `onShow/onHide`), `Menu`, `StatusScreen`; palette `C` in `screen.js` |
+| `ui` | screen stack + nested menu overlay; routes gestures (only while jetd is in remote mode); renders at most once per tick (clear, `render(surface)`, `flush()`) and only while `surface.active` (connected, jetd mode `remote`, surface acquired); full repaint on every hello and on `ready`; `leaveTo(mode)` hands the panel to a jetd mode and goes silent until `m remote` + hello | `show(screen)`, `openMenu()`, `closeMenu()`, `toggleMenu()`, `leaveTo(mode)`, `requestRender()`; `Screen` base (`render(surface)`, `onGesture(name)`, `onShow/onHide`), `Menu` (items may have `children`, `back`, `live` or `action`; `enter(item)`, `back()`, `depth`, `title`, `items`, `selected` of the current level), `StatusScreen`; palette `C` in `screen.js` |
 | `jet` (`src/jet.js`) | main module (`AppModule`): references every subsystem, which is what instantiates them; heartbeat tick with link state and RSS | |
 
 Screens: **Status** (heading and clock in the big font; link state and geometry, a 60x8 battery
@@ -27,18 +27,30 @@ state and gadget MaxPower, last glance event, last new-view event in the small f
 clock timer runs only while it is showing and not covered by the menu, and a power poll
 re-renders only when the rounded readout changed) and the **menu**: a vertical list in a
 bordered box laid out like jetd's mode chooser, with the selection drawn as a filled bar and a
-`>` marker, next to the 160x120 camera thumbnail.
+`>` marker, next to the 160x120 camera thumbnail. A sub-menu replaces the list in the same box,
+titled by the item that opened it; the parent keeps its selection for when you come back.
 
 | menu item | effect |
 |---|---|
-| `Status` | closes the menu, shows the status screen |
 | `Camera: on/off` | toggles jetd's live viewfinder in the thumbnail; closing the menu stops it |
 | `Kernel log` | `M log`: jetd's own log viewer |
-| `Setup` | `M setup`: jetd's own setup menu (pad/glance calibration, brightness, power) |
+| `System` > | opens the sub-menu below |
+| &nbsp;&nbsp;`Status` | closes the menu, shows the status screen |
+| &nbsp;&nbsp;`Setup` | `M setup`: jetd's own setup menu (pad/glance calibration, brightness, power) |
+| &nbsp;&nbsp;`Back` | up to the top level |
 
 Button semantics (jetd raw keys, `K 1`): **hold front** (~1 s) opens the menu, and closes it
-again; **swipe up/down** moves the selection; **front press** (or a pad tap) picks; **rear
-press** closes the menu. Plain presses outside the menu do nothing (screens may consume them).
+again from any level; **swipe up/down** moves the selection; **front press** (or a pad tap)
+picks; **rear press** goes up one level, and closes the menu at the top level. Plain presses
+outside the menu do nothing (screens may consume them).
+
+Gesture rules for the touchpad: jetd forwards, for one swipe, the driver's summed motion
+(`r dx dy`) and then the swipe key as a down/up pair, and a long swipe can make the driver emit
+two keys. Only the key down counts as a move; the key up and the motion never do (the motion is
+still logged at debug and emitted as `motion`); and a second swipe key within
+`input.swipeDebounceMs` (250 ms) of the previous one is dropped, so one swipe is one step.
+Raw `key` and `motion` events are logged at debug level with their timestamps
+(`JET_LOG_LEVEL=debug`), so the next pad complaint can be read off `/tmp/jet-app.log`.
 While jetd is in one of its own modes (log, shell, setup) raw keys are off, jetd handles the
 buttons itself (front hold = its chooser, rear = back) and jet-app draws nothing and sends
 nothing; jetd's `m remote` plus the hello that follows it trigger the repaint.
@@ -79,10 +91,12 @@ Tests (`npm test`, `node --test`, no device): protocol parser incl. split binary
 parsing, 565 packing, rectangle algebra, `diffRect`, text layout and alignment, blits (jpeg-js
 round trip), the surface flush against a file standing in for `/dev/fb0` (changed rows only,
 viewfinder rectangle untouched), press/hold/swipe detection from timestamped `k` events (`K 1`/`K 0`
-too), the median/rounding smoother and remote-only polling, and the menu state machine through
-the real input/surface/ui stack against a stub link (open/close/move/pick, `M log`/`M setup`
-hand-over with no renders or commands until `m remote` + hello, camera toggle, power updates
-repainting only on a changed readout). `test/fake-jetd.js` is a protocol stand-in (hello,
+too; a key pair plus its motion is one move, two key downs 100 ms apart are one move and 400 ms
+apart two), the median/rounding smoother and remote-only polling, menu nesting against a stub
+ui (`test/menu.test.js`: enter/back/close, per-level selection), and the menu state machine
+through the real input/surface/ui stack against a stub link (open/close/move/pick, rear up one
+level vs close at the top, `M log`/`M setup` hand-over with no renders or commands until
+`m remote` + hello, camera toggle, power updates repainting only on a changed readout). `test/fake-jetd.js` is a protocol stand-in (hello,
 `P/Q/G/M/E/Z` replies, event injection) used by the tests and runnable standalone.
 
 ## Configuration
@@ -107,7 +121,7 @@ registers additively (future providers) without editing core.
 | `deviceLink.reconnectMs` / `.dialTimeoutMs` / `.replyTimeoutMs` | `2000` / `5000` / `5000` | link timing |
 | `surface.device` / `.minFlushMs` / `.viewfinderFps` | `/dev/fb0` / `30` / `10` | framebuffer to write; flush rate limit; default camera rate |
 | `surface.fontDir` / `.mainFont` / `.smallFont` | `assets/fonts` / `ter-u20b.psf` / `Lat2-Terminus12x6.psf` | PSF fonts |
-| `input.holdMs` / `.swipeThreshold` / `.swipeDedupeMs` / `.tapCode` | `1000` / `20` / `300` / `28` | gesture detection |
+| `input.holdMs` / `.swipeDebounceMs` / `.tapCode` | `1000` / `250` / `28` | hold threshold; minimum gap between two swipes; pad tap code |
 | `input.rawKeys` | `true` | send `K 1` on connect (false: jetd's chooser and press pairs, so holds never arrive) |
 | `power.pollMs` / `.samples` / `.roundStep` | `2000` / `8` / `10` | `Q` interval (0 disables); median window; display rounding (mV, mA) |
 | `ui.menuGestures` / `.clockMs` | `["hold:front"]` / `1000` | menu trigger; status refresh |
@@ -137,8 +151,10 @@ Startup is ~2 s to the first dial, RSS ~55 MB on the Jet (the Node baseline is m
 ## Status (2026-10-22)
 
 Phase 2b: jetd's raw keys (`K 1`) make the front hold reach the app, so the menu works like jetd's
-chooser (hold front, swipe, front picks, rear backs out) and `Kernel log` / `Setup` hand the panel
-to jetd's own screens and take it back on the next hello. The battery readout is a median over the
+chooser (hold front, swipe, front picks, rear backs out one level) and `Kernel log` / `System >
+Setup` hand the panel to jetd's own screens and take it back on the next hello. Hands-on testing
+found the pad "jumpy": one swipe arrived as motion plus a key pair and moved twice; swipes now
+come from swipe-key downs only, debounced. The battery readout is a median over the
 last 8 polls, rounded to 10 mV / 10 mA, on a 60x8 strip.
 
 Phase 2 runs on the Jet against the real jetd (loopback is up, jetd listens on 7777): `E 1` is

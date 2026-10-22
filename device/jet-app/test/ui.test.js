@@ -26,7 +26,7 @@ async function stack() {
   });
   const device = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'jet-ui-')), 'fb0');
   const surface = Object.assign(new Surface(), { device, minFlushMs: 0, fontDir, mainFont: 'ter-u20b.psf', smallFont: 'Lat2-Terminus12x6.psf', viewfinderFps: 10, deviceLink: link });
-  const input = Object.assign(new Input(), { holdMs: 1000, swipeThreshold: 20, swipeDedupeMs: 300, tapCode: 28, rawKeys: true, deviceLink: link });
+  const input = Object.assign(new Input(), { holdMs: 1000, swipeDebounceMs: 250, tapCode: 28, rawKeys: true, deviceLink: link });
   input.now = () => 0;
   const power = Object.assign(new Power(), { pollMs: 0, samples: 8, roundStep: 10, deviceLink: link });
   const ui = Object.assign(new Ui(), { menuGestures: ['hold:front'], clockMs: 1000, surface, input, power, deviceLink: link });
@@ -55,13 +55,14 @@ test('ui: front hold opens/closes the menu, swipes move, rear closes, status clo
   k.frontHold(now); now += 2000;
   assert.ok(ui.menu, 'menu open on hold');
   assert.equal(ui.status.paused, true, 'status clock paused under the menu');
-  assert.deepEqual(ui.menu.items.map((i) => i.label), ['Status', 'Camera', 'Kernel log', 'Setup']);
+  assert.deepEqual(ui.menu.items.map((i) => i.label), ['Camera', 'Kernel log', 'System']);
   assert.equal(ui.menu.selected, 0);
   k.down(now); now += 500; assert.equal(ui.menu.selected, 1);
   k.down(now); now += 500; assert.equal(ui.menu.selected, 2);
   k.up(now); now += 500; assert.equal(ui.menu.selected, 1);
   k.up(now); now += 500; k.up(now); now += 500;
-  assert.equal(ui.menu.selected, 3, 'wraps');
+  assert.equal(ui.menu.selected, 2, 'wraps');
+  k.down(now - 400); assert.equal(ui.menu.selected, 2, 'a second swipe 100 ms after the last is dropped');
   const before = ui.renders; await settle();
   assert.ok(ui.renders > before, 'menu moves repaint');
   k.rearPress(now); now += 500;
@@ -76,11 +77,35 @@ test('ui: front hold opens/closes the menu, swipes move, rear closes, status clo
   await stop();
 });
 
+test('ui: rear goes up one level in a sub-menu and closes at the top; Back does the same', async (t) => {
+  const { link, ui, k, stop } = await stack(); t.after(stop);
+  let now = 1000;
+  k.frontHold(now); now += 2000; k.up(now); now += 500;              // System
+  k.frontPress(now); now += 500;
+  assert.equal(ui.menu.depth, 2); assert.equal(ui.menu.title, 'SYSTEM');
+  k.rearPress(now); now += 500;
+  assert.ok(ui.menu, 'rear in a sub-menu keeps the menu open');
+  assert.equal(ui.menu.depth, 1); assert.equal(ui.menu.items[ui.menu.selected].label, 'System', 'selection kept on the parent');
+  k.frontPress(now); now += 500; k.up(now); now += 500;             // Back (wraps up from Status)
+  assert.equal(ui.menu.items[ui.menu.selected].label, 'Back');
+  k.frontPress(now); now += 500;
+  assert.equal(ui.menu.depth, 1);
+  k.rearPress(now); now += 500;
+  assert.equal(ui.menu, null, 'rear at the top closes');
+  k.frontHold(now); now += 2000; k.up(now); now += 500; k.frontPress(now); now += 500;
+  assert.equal(ui.menu.depth, 2);
+  k.frontHold(now); now += 2000;
+  assert.equal(ui.menu, null, 'front hold closes from any level');
+  await settle();
+  assert.ok(!link.sent.some((l) => l[0] === 'M'), 'no mode change sent');
+  await stop();
+});
+
 test('ui: Kernel log / Setup hand over to jetd; silent until m remote + hello', async (t) => {
   const { link, surface, ui, k, key, stop } = await stack(); t.after(stop);
   let now = 1000;
   k.frontHold(now); now += 2000;
-  k.down(now); now += 500; k.down(now); now += 500;
+  k.down(now); now += 500;
   assert.equal(ui.menu.items[ui.menu.selected].label, 'Kernel log');
   link.sent.length = 0;
   k.frontPress(now); now += 500;
@@ -100,7 +125,13 @@ test('ui: Kernel log / Setup hand over to jetd; silent until m remote + hello', 
   assert.equal(surface.active, true);
   assert.equal(ui.renders, renders + 1, 'hello repaints');
   assert.ok(link.sent.some((l) => l === 'F 0 0 428 240'), 'full repaint after jetd drew over us');
-  k.frontHold(now); now += 2000; k.down(now); now += 500; k.down(now); now += 500; k.down(now); now += 500;
+  k.frontHold(now); now += 2000; k.down(now); now += 500; k.down(now); now += 500;
+  assert.equal(ui.menu.items[ui.menu.selected].label, 'System');
+  k.frontPress(now); now += 500;
+  assert.equal(ui.menu.depth, 2, 'System opens a sub-menu');
+  assert.deepEqual(ui.menu.items.map((i) => i.label), ['Status', 'Setup', 'Back']);
+  k.down(now); now += 500;
+  assert.equal(ui.menu.items[ui.menu.selected].label, 'Setup');
   link.sent.length = 0;
   k.frontPress(now); now += 500;
   assert.deepEqual(link.sent, ['M setup']);
@@ -110,7 +141,7 @@ test('ui: Kernel log / Setup hand over to jetd; silent until m remote + hello', 
 test('ui: Camera toggles the viewfinder; closing the menu stops it; Status returns', async (t) => {
   const { link, surface, ui, k, stop } = await stack(); t.after(stop);
   let now = 1000;
-  k.frontHold(now); now += 2000; k.down(now); now += 500;
+  k.frontHold(now); now += 2000;
   assert.equal(ui.menu.items[ui.menu.selected].label, 'Camera');
   k.frontPress(now); now += 500; await settle();
   assert.ok(surface.viewfinderRect, 'viewfinder on');
@@ -123,7 +154,9 @@ test('ui: Camera toggles the viewfinder; closing the menu stops it; Status retur
   k.rearPress(now); now += 500;
   assert.equal(surface.viewfinderRect, null, 'closing the menu stops the camera');
   assert.equal(link.sent[0], 'z');
-  k.frontHold(now); now += 2000; k.frontPress(now); now += 500;   // Status
+  k.frontHold(now); now += 2000; k.up(now); now += 500; k.frontPress(now); now += 500;   // System (wraps up from Camera)
+  assert.equal(ui.menu.depth, 2);
+  k.frontPress(now); now += 500;   // Status
   assert.equal(ui.menu, null); assert.equal(ui.screen, ui.status); assert.equal(ui.status.paused, false);
   await stop();
 });
