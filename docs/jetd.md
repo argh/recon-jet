@@ -131,3 +131,16 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
 3. Paths: userdata is `/android-data` inside the chroot and `/mnt/data` in the initramfs; jetd
    tries both for every flag file. The next boot runs the baked-in `/bin/jetd` again; rebuild
    `boot-emmc.img` and flash to make a change permanent.
+
+## External surface and viewfinder
+
+- `E 1` hands the framebuffer pixels to the client (reply `E <w> <h> <bpp> <line_length>`; the panel
+  is 428x240, 16 bpp RGB565, stride 856). jetd stops drawing in remote mode; the client writes
+  `/dev/fb0` directly (plain `write` at row offsets works, no mmap needed) and sends `F` to push
+  the whole screen or `F x y w h` to push one rectangle (OMAPFB_UPDATE_WINDOW). `E 0` returns
+  drawing to jetd. Other modes (log, shell, setup) still draw over the surface; redraw after the
+  next hello/mode event.
+- `Z x y w h [fps]` streams the camera (640x480 UYVY, one open V4L2 stream) scaled
+  nearest-neighbour into that rectangle at up to `fps` (default 10) and pushes only that rectangle;
+  reply `Z <srcw> <srch>`. `z` stops it. `S` while the viewfinder runs returns the next streamed
+  frame instead of reopening the device. Drawn only in remote mode.

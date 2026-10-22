@@ -38,6 +38,11 @@
  *    gets a fresh "h" hello whenever remote comes back and should redraw)
  *   V [max_s]         start voice capture (see the voice section), v stops it
  *   W <len> + bytes   queue 48 kHz stereo S16 PCM for the speaker; w = end of clip
+ *   E <0|1>           external surface: the client writes /dev/fb0 itself (reply "E w h bpp
+ *                     line_length"); jetd draws nothing in remote mode, F pushes to the panel
+ *   F [x y w h]       flush (whole screen, or just a rectangle in external-surface mode)
+ *   Z x y w h [fps]   live camera scaled into that rectangle (default 10 fps); z stops it;
+ *                     reply "Z srcw srch"; S during a viewfinder returns the next streamed frame
  *   Q                 power snapshot -> "q vbat vsys vbus mA ctrl1 stat1 linsts cinlimit vichrg udc maxpower"
  * jet -> host:
  *   h <w> <h> <cols> <rows>     hello (also sent when remote mode is re-entered)
@@ -133,6 +138,17 @@ static void fb_flush(void) {
         }
     }
     struct omapfb_update_window uw = { 0, 0, W, H, 0, 0, 0, W, H, {0} };
+    ioctl(fbfd, OMAPFB_UPDATE_WINDOW, &uw);
+}
+/* External surface: a client owns the framebuffer pixels (writes /dev/fb0 itself) and asks jetd
+ * only to push rectangles to the panel. jetd then draws nothing in remote mode except the live
+ * viewfinder rectangle (Z). */
+static int ext_surface;
+static void fb_update(int x, int y, int w, int h) {
+    if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)W) w = W - x; if (y + h > (int)H) h = H - y;
+    if (w <= 0 || h <= 0) return;
+    struct omapfb_update_window uw = { x, y, w, h, 0, 0, 0, w, h, {0} };
     ioctl(fbfd, OMAPFB_UPDATE_WINDOW, &uw);
 }
 
@@ -742,6 +758,7 @@ static void render_chooser(void) {
 
 static void render(void) {
     if (!dirty) return;
+    if (ext_surface && mode == M_REMOTE) { dirty = 0; return; }   /* a client owns the pixels */
     dirty = 0;
     if (chooser || mode != M_REMOTE) {
         font_select((mode == M_LOG || mode == M_CONSOLE) ? log_font : 1);
@@ -912,6 +929,71 @@ out:
     for (unsigned i = 0; i < 3; i++) if (map[i]) munmap(map[i], maplen[i]);
     close(fd);
     if (got == 0) fprintf(stderr, "jetd: snapshot %ux%u sent\n", f.fmt.pix.width, f.fmt.pix.height);
+}
+
+/* ---- viewfinder: live camera scaled into a framebuffer rectangle (Z x y w h [fps], z) --------
+ * One V4L2 stream stays open; frames are nearest-neighbour scaled from UYVY straight into the
+ * panel rectangle at most `fps` times a second and only that rectangle is pushed. An S snapshot
+ * while the viewfinder runs is served from the next streamed frame. Drawn only in remote mode. */
+static int vf_fd = -1; static void *vf_map[3]; static size_t vf_len[3]; static unsigned vf_w, vf_h;
+static int vf_x, vf_y, vf_rw, vf_rh, vf_interval = 100, vf_snap; static int64_t vf_next;
+static void vf_stop(void) {
+    if (vf_fd < 0) return;
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE; ioctl(vf_fd, VIDIOC_STREAMOFF, &type);
+    for (int i = 0; i < 3; i++) if (vf_map[i]) { munmap(vf_map[i], vf_len[i]); vf_map[i] = NULL; }
+    close(vf_fd); vf_fd = -1;
+}
+static void vf_start(int x, int y, int w, int h, int fps) {
+    vf_stop();
+    struct v4l2_format f = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
+    struct v4l2_requestbuffers rb = { .count = 3, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP };
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE; const char *err = NULL;
+    vf_fd = open("/dev/video0", O_RDWR | O_NONBLOCK);
+    if (vf_fd < 0) { sendf("e viewfinder: open: %s\n", strerror(errno)); return; }
+    f.fmt.pix.width = 640; f.fmt.pix.height = 480; f.fmt.pix.pixelformat = V4L2_PIX_FMT_UYVY; f.fmt.pix.field = V4L2_FIELD_NONE;
+    if (ioctl(vf_fd, VIDIOC_S_FMT, &f) < 0) { err = "S_FMT"; goto fail; }
+    vf_w = f.fmt.pix.width; vf_h = f.fmt.pix.height;
+    if (ioctl(vf_fd, VIDIOC_REQBUFS, &rb) < 0 || rb.count < 2) { err = "REQBUFS"; goto fail; }
+    for (unsigned i = 0; i < rb.count && i < 3; i++) {
+        struct v4l2_buffer b = { .type = type, .memory = V4L2_MEMORY_MMAP, .index = i };
+        if (ioctl(vf_fd, VIDIOC_QUERYBUF, &b) < 0) { err = "QUERYBUF"; goto fail; }
+        vf_map[i] = mmap(NULL, b.length, PROT_READ, MAP_SHARED, vf_fd, b.m.offset);
+        if (vf_map[i] == MAP_FAILED) { vf_map[i] = NULL; err = "mmap"; goto fail; }
+        vf_len[i] = b.length;
+        if (ioctl(vf_fd, VIDIOC_QBUF, &b) < 0) { err = "QBUF"; goto fail; }
+    }
+    if (ioctl(vf_fd, VIDIOC_STREAMON, &type) < 0) { err = "STREAMON"; goto fail; }
+    vf_x = x; vf_y = y; vf_rw = w; vf_rh = h; vf_interval = fps > 0 ? 1000 / fps : 100; vf_next = 0; vf_snap = 0;
+    sendf("Z %u %u\n", vf_w, vf_h);
+    return;
+fail:
+    sendf("e viewfinder: %s: %s\n", err, strerror(errno)); vf_stop();
+}
+static void vf_draw(const uint8_t *src) {
+    int rw = vf_rw, rh = vf_rh;
+    if (vf_x + rw > (int)W) rw = W - vf_x; if (vf_y + rh > (int)H) rh = H - vf_y;
+    for (int dy = 0; dy < rh; dy++) {
+        const uint8_t *row = src + (size_t)(dy * vf_h / vf_rh) * vf_w * 2;
+        uint16_t *d16 = (uint16_t *)(fbmem + (vf_y + dy) * finfo.line_length) + vf_x;
+        uint32_t *d32 = (uint32_t *)(fbmem + (vf_y + dy) * finfo.line_length) + vf_x;
+        for (int dx = 0; dx < rw; dx++) {
+            unsigned sx = dx * vf_w / vf_rw, pair = (sx & ~1u) * 2;
+            int yv = row[sx * 2 + 1], u = row[pair] - 128, v = row[pair + 2] - 128;
+            int c = (yv - 16) * 298;
+            int r = (c + 409 * v + 128) >> 8, g = (c - 100 * u - 208 * v + 128) >> 8, b = (c + 516 * u + 128) >> 8;
+            r = r < 0 ? 0 : r > 255 ? 255 : r; g = g < 0 ? 0 : g > 255 ? 255 : g; b = b < 0 ? 0 : b > 255 ? 255 : b;
+            if (vinfo.bits_per_pixel == 16) d16[dx] = (uint16_t)(((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3));
+            else d32[dx] = fbpack(px(r, g, b));
+        }
+    }
+    fb_update(vf_x, vf_y, rw, rh);
+}
+static void vf_frame(void) {
+    struct v4l2_buffer b = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP };
+    if (ioctl(vf_fd, VIDIOC_DQBUF, &b) < 0) { if (errno != EAGAIN) { sendf("e viewfinder: DQBUF: %s\n", strerror(errno)); vf_stop(); } return; }
+    if (vf_snap) { char hdr[64]; int hl = snprintf(hdr, sizeof hdr, "f %u %u UYVY %u\n", vf_w, vf_h, b.bytesused); send_all(hdr, hl); send_all(vf_map[b.index], b.bytesused); vf_snap = 0; }
+    if (mode == M_REMOTE && now_ms() >= vf_next) { vf_draw(vf_map[b.index]); vf_next = now_ms() + vf_interval; }
+    ioctl(vf_fd, VIDIOC_QBUF, &b);
 }
 
 /* ---- hub commands --------------------------------------------------------------- */
@@ -1101,7 +1183,14 @@ static void handle_line(char *l) {
     case 'X': if (drawing_ok && sscanf(l + 1, "%d %d %n", &x, &y, &w) >= 2) draw_text(x, y, l + 1 + w); break;
     case 'R': if (sscanf(l + 1, "%d %d %d", &r, &g, &b) == 3) fg = px(r & 255, g & 255, b & 255); break;
     case 'B': if (drawing_ok && sscanf(l + 1, "%d %d %d %d %d %d %d", &x, &y, &w, &h, &r, &g, &b) == 7) fill_rect(x, y, w, h, px(r & 255, g & 255, b & 255)); break;
-    case 'F': if (drawing_ok) fb_flush(); break;
+    case 'F':
+        if (!drawing_ok) break;
+        if (ext_surface) { if (sscanf(l + 1, "%d %d %d %d", &x, &y, &w, &h) == 4) fb_update(x, y, w, h); else fb_update(0, 0, W, H); }
+        else fb_flush();
+        break;
+    case 'E': ext_surface = atoi(l + 1) != 0; sendf("E %u %u %u %u\n", W, H, vinfo.bits_per_pixel, finfo.line_length); if (!ext_surface) dirty = 1; break;
+    case 'Z': { int fps = 10; if (sscanf(l + 1, "%d %d %d %d %d", &x, &y, &w, &h, &fps) >= 4) vf_start(x, y, w, h, fps); } break;
+    case 'z': vf_stop(); break;
     case 'L': set_backlight(atoi(l + 1)); break;
     case 'P': sendf("p\n"); break;
     case 'G': sendf("g %d %d\n", glance_worn, glance_raw); break;
@@ -1112,7 +1201,7 @@ static void handle_line(char *l) {
     case 'w': if (play_pid > 0) { play_end = 1; play_drain(); } else sendf("w idle\n"); break;
     case 'M': { char name[16]; if (sscanf(l + 1, "%15s", name) == 1) for (int i = 0; i < M_COUNT; i++) if (!strcmp(name, mode_names[i])) { chooser = 0; set_mode(i); } } break;
     case 'I': console_write(l + 2); dirty = 1; break;
-    case 'S': { unsigned sw = 640, sh = 480, sk = 6; sscanf(l + 1, "%u %u %u", &sw, &sh, &sk); if (sk > 30) sk = 30; cam_snapshot(sw, sh, sk); } break;
+    case 'S': { unsigned sw = 640, sh = 480, sk = 6; sscanf(l + 1, "%u %u %u", &sw, &sh, &sk); if (sk > 30) sk = 30; if (vf_fd >= 0) vf_snap = 1; else cam_snapshot(sw, sh, sk); } break;
     default: break;
     }
 }
@@ -1137,13 +1226,15 @@ int main(int argc, char **argv) {
 
     for (;;) {
         if (!nhubs && connecting_fd < 0 && now_ms() >= next_connect) try_connect();
-        struct pollfd pf[7 + MAXIN + MAXHUB]; int n = 0, ipty = -1, ikmsg = -1, ilisten = -1;
+        struct pollfd pf[8 + MAXIN + MAXHUB]; int n = 0, ipty = -1, ikmsg = -1, ilisten = -1;
         int ihub = n; for (int i = 0; i < nhubs; i++) pf[n++] = (struct pollfd){ hubs[i].fd, POLLIN, 0 };
         if (kmsg_fd >= 0) { ikmsg = n; pf[n++] = (struct pollfd){ kmsg_fd, POLLIN, 0 }; }
         if (listen_fd >= 0) { ilisten = n; pf[n++] = (struct pollfd){ listen_fd, POLLIN, 0 }; }
         if (pty_fd >= 0) { ipty = n; pf[n++] = (struct pollfd){ pty_fd, POLLIN, 0 }; }
         int iconn = -1;
         if (connecting_fd >= 0) { iconn = n; pf[n++] = (struct pollfd){ connecting_fd, POLLOUT, 0 }; }
+        int ivf = -1;
+        if (vf_fd >= 0) { ivf = n; pf[n++] = (struct pollfd){ vf_fd, POLLIN, 0 }; }
         int icap = -1, iplay = -1;
         if (cap_fd >= 0) { icap = n; pf[n++] = (struct pollfd){ cap_fd, POLLIN, 0 }; }
         if (play_fd >= 0 && play_off < play_len) { iplay = n; pf[n++] = (struct pollfd){ play_fd, POLLOUT, 0 }; }
@@ -1188,6 +1279,7 @@ int main(int argc, char **argv) {
         PROF(0);
         if (ipty >= 0 && pf[ipty].revents) console_read();
         PROF(1);
+        if (ivf >= 0 && pf[ivf].revents) vf_frame();
         if (icap >= 0 && pf[icap].revents) cap_read();
         PROF(3);
         if (iplay >= 0 && pf[iplay].revents) play_drain();
