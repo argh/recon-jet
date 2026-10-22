@@ -112,7 +112,9 @@ static void omap_dmic_dai_shutdown(struct snd_pcm_substream *substream,
 
 	mutex_lock(&dmic->mutex);
 
-	cpu_latency_qos_remove_request(&dmic->pm_qos_req);
+	/* nothing in this driver adds the request any more; removing an inactive one warns */
+	if (cpu_latency_qos_request_active(&dmic->pm_qos_req))
+		cpu_latency_qos_remove_request(&dmic->pm_qos_req);
 
 	if (!snd_soc_dai_active(dai))
 		dmic->active = 0;
