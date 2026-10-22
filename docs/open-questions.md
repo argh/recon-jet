@@ -131,3 +131,13 @@ for working around a problem are in the other docs; this is the list of what is 
   are fine, busybox tar works. Cause unknown (loader vs this binary's relocations).
 - qwen3-asr on a quiet room returned empty partials; hallucination on real background noise is
   untested.
+
+## USB link drops (updated 2026-10-22 afternoon)
+- The USB link to the host still drops with the controller in peripheral-only mode (two drops in
+  one boot: 5 min and 45 min after boot; gadget logs "reset config / gether_disconnect", VBUS stays
+  present, controller then sits in `b_idle` "not attached"). So the OTG/ID theory is not the
+  whole story. From the Jet nothing recovers it: gadget UDC rebind, controller `mode` write and a
+  driver unbind/bind all leave it in b_idle; the host never re-enumerates until a physical replug.
+  The host's own USB log could not be read without privileges. Next: try another host port or a
+  powered hub, read the host log right after a drop, and a Jet-side VBUS session restart via the
+  PMIC USB PHY if the musb driver exposes one.
