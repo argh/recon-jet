@@ -38,6 +38,7 @@
  *    gets a fresh "h" hello whenever remote comes back and should redraw)
  *   V [max_s]         start voice capture (see the voice section), v stops it
  *   W <len> + bytes   queue 48 kHz stereo S16 PCM for the speaker; w = end of clip
+ *   Y                 stop playback immediately and drop queued audio (barge-in) -> "w flushed"
  *   K <0|1>           raw keys: in remote mode forward every key down/up as it happens and
  *                     disable jetd's front-hold chooser (the app owns button semantics)
  *   E <0|1>           external surface: the client writes /dev/fb0 itself (reply "E w h bpp
@@ -1207,6 +1208,7 @@ static void handle_line(char *l) {
     case 'v': cap_stop("stop"); break;
     case 'W': if (cur_hub) cur_hub->bin_need = strtoul(l + 1, NULL, 10); break;   /* payload bytes follow the line */
     case 'w': if (play_pid > 0) { play_end = 1; play_drain(); } else sendf("w idle\n"); break;
+    case 'Y': if (play_pid > 0) { kill(play_pid, SIGKILL); play_close("flushed"); } else sendf("w idle\n"); break;   /* barge-in: drop queued audio now */
     case 'M': { char name[16]; if (sscanf(l + 1, "%15s", name) == 1) for (int i = 0; i < M_COUNT; i++) if (!strcmp(name, mode_names[i])) { chooser = 0; set_mode(i); } } break;
     case 'I': console_write(l + 2); dirty = 1; break;
     case 'S': { unsigned sw = 640, sh = 480, sk = 6; sscanf(l + 1, "%u %u %u", &sw, &sh, &sk); if (sk > 30) sk = 30; if (vf_fd >= 0) vf_snap = 1; else cam_snapshot(sw, sh, sk); } break;

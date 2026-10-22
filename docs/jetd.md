@@ -151,3 +151,5 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
 immediately while in remote mode and disables its own front-hold chooser, so the application
 layer owns button semantics (hold detection, menus). jetd's other modes keep their own handling.
 `K 0` restores the chooser and press-pair reporting.
+
+`Y` stops playback immediately and drops queued audio (barge-in); jetd answers `w flushed`.
