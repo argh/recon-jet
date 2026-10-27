@@ -199,10 +199,13 @@ elif [ -f /lib/modules/panel-kopin-a230.ko ]; then
   # up live (Ctrl+Alt+Enter = shell).
   if [ -x $A/usr/sbin/bluetoothd ]; then
     modprobe uhid 2>/dev/null; modprobe hid-generic 2>/dev/null; modprobe hidp 2>/dev/null
-    BTPOWER=off; [ -e /mnt/data/mainline/bt ] && BTPOWER=on
-    chroot $A /bin/sh -c "mkdir -p /run/dbus; dbus-uuidgen --ensure; pidof dbus-daemon >/dev/null || dbus-daemon --system --fork;
-      (setsid /usr/sbin/bluetoothd -n >/tmp/bluetoothd.log 2>&1 &); sleep 2; bluetoothctl power $BTPOWER >/dev/null" \
-      && log "bluetooth: bluetoothd up, radio $BTPOWER" || log "bluetooth FAILED"
+    chroot $A /bin/sh -c 'mkdir -p /run/dbus; dbus-uuidgen --ensure; pidof dbus-daemon >/dev/null || dbus-daemon --system --fork;
+      (setsid /usr/sbin/bluetoothd -n >/tmp/bluetoothd.log 2>&1 &)' && log "bluetooth: dbus + bluetoothd started" || log "bluetooth: dbus/bluetoothd FAILED"
+    # bluetoothd takes ~5 s here before it owns the controller: power the radio once it shows up, off the boot path
+    if [ -e /mnt/data/mainline/bt ]; then
+      ( for i in $(seq 1 30); do chroot $A /usr/bin/bluetoothctl list 2>/dev/null | grep -q Controller && break; sleep 1; done
+        chroot $A /usr/bin/bluetoothctl power on >/dev/null 2>&1 && log "bluetooth: radio on (${i}s wait)" || log "bluetooth: radio power on FAILED" ) &
+    fi
   fi
   # power-button LED (TWL6032 PWM2): u-boot leaves it on, leds-pwm resets it off; a modest "running" level
   [ -e /sys/class/leds/jet:white:power/brightness ] && echo 16 > /sys/class/leds/jet:white:power/brightness
