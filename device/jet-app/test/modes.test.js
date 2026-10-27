@@ -99,7 +99,7 @@ test('modes: inside a mode every gesture but front hold goes to onGesture; rear 
   await s.modes.begin();
   let now = 1000;
   s.k.frontPress(now); now += 500; s.k.rearPress(now); now += 500; s.k.up(now); now += 500; s.k.left(now); now += 500; s.k.tap(now); now += 500;
-  assert.deepEqual(log.gestures, ['press:front', 'press:rear', 'swipe:up', 'swipe:left', 'press:tap']);
+  assert.deepEqual(log.gestures, ['press:front', 'press:rear', 'swipe:up', 'swipe:left', 'press:front']);   // the tap code is also keyboard Enter: a front press
   assert.equal(s.modes.switcher, null, 'plain presses never open the switcher');
   s.key(86, 1, now); now += 300;
   assert.deepEqual(log.gestures.length, 5, 'nothing fires on a key down');

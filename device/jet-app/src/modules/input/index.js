@@ -15,12 +15,19 @@
 // forwards the summed motion (`r dx dy`) for the same gesture, and the driver can emit two keys
 // from one long swipe, so motion is logged and re-emitted but never navigates, and a second
 // swipe within `swipeDebounceMs` of the previous one is dropped.
+//
+// A keyboard (jetd forwards its keys in remote mode like any other) navigates without the pod:
+// Enter = front (held = front hold, the switcher), Esc/Backspace = rear, arrows = the swipe keys
+// already (same evdev codes). Enter wins over a pad tap configured with the same code (28): the
+// two mean the same thing everywhere.
 import { EventEmitter } from 'node:events';
 import { Schema } from '@versionzero/module-manager';
 
 const s = Schema.create;
 export const BUTTONS = { 86: 'front', 107: 'rear' };
 export const SWIPES = { 103: 'up', 108: 'down', 105: 'left', 106: 'right' };
+/** keyboard aliases for the pod buttons: KEY_ENTER, KEY_KPENTER -> front; KEY_ESC, KEY_BACKSPACE -> rear */
+export const KEYBOARD = { 28: 'front', 96: 'front', 1: 'rear', 14: 'rear' };
 
 export class Input extends EventEmitter {
   static moduleInfo = {
@@ -79,7 +86,7 @@ export class Input extends EventEmitter {
   /** @param {{code: number, value: number, t?: number}} k */
   #onKey({ code, value, t = this.now() }) {
     this.logger?.debug({ code, value, at: t }, 'key');
-    const button = BUTTONS[code];
+    const button = BUTTONS[code] ?? KEYBOARD[code];
     if (button) {
       if (value === 1 && !this.#down.has(button)) {
         const timer = setTimeout(() => this.#hold(button), Math.max(0, this.holdMs - (this.now() - t)));
@@ -96,7 +103,7 @@ export class Input extends EventEmitter {
     if (value !== 1) return;
     const dir = SWIPES[code];
     if (dir) return this.#swipe(dir, t);
-    if (code === this.tapCode) return this.#gesture('press', 'tap');
+    if (code === this.tapCode) return this.#gesture('press', 'tap');   // only when tapCode is not a keyboard alias (28 is Enter: a front press)
     this.logger?.debug({ code }, 'unmapped key');
   }
 

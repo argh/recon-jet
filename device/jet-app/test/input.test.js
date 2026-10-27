@@ -76,8 +76,8 @@ test('swipes: key downs only; motion never navigates; one move per gesture', asy
   key(103, 0, 2000);                              // a lone key up: nothing
   link.emit('rel', { dx: -40, dy: 0, t: 2100 });  // motion on its own: nothing
   assert.deepEqual(gestures, ['swipe:down']);
-  key(105, 1, 3000); key(28, 1, 3010);
-  assert.deepEqual(gestures, ['swipe:down', 'swipe:left', 'press:tap'], 'a tap is not debounced');
+  key(105, 1, 3000); key(28, 1, 3010); key(28, 0, 3020);
+  assert.deepEqual(gestures, ['swipe:down', 'swipe:left', 'press:front'], 'a tap (code 28, also keyboard Enter) is a front press and is not debounced');
   await input.stop();
 });
 
@@ -92,5 +92,17 @@ test('swipe debounce: two key downs 100 ms apart move once, 400 ms apart move tw
   assert.deepEqual(gestures, ['swipe:down', 'swipe:down']);
   key(103, 1, 1900);
   assert.deepEqual(gestures, ['swipe:down', 'swipe:down', 'swipe:up']);
+  await input.stop();
+});
+
+test('keyboard aliases: Enter is the front button (held = hold), Esc and Backspace are rear; repeats are ignored', async () => {
+  const { gestures, input, key } = await make();
+  key(28, 1, 0); key(28, 0, 10);                 // Enter tap
+  key(1, 1, 100); key(1, 0, 110);                // Esc
+  key(14, 1, 200); key(14, 0, 210);              // Backspace
+  key(96, 1, 300); key(96, 2, 320); key(96, 2, 340); key(96, 0, 1400);   // keypad Enter held, with key repeats
+  assert.deepEqual(gestures, ['press:front', 'press:rear', 'press:rear', 'hold:front']);
+  key(103, 1, 2000); key(103, 2, 2020); key(103, 0, 2030);   // a keyboard arrow is the same code as the pad's swipe key
+  assert.deepEqual(gestures.slice(-1), ['swipe:up']);
   await input.stop();
 });

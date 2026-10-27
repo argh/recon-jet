@@ -29,6 +29,7 @@ const s = Schema.create;
  * @property {(s: import('../surface/index.js').Surface) => void} render
  * @property {() => void} [tick]  once per `tickMs` while current
  * @property {() => Promise<boolean>|boolean} [firstUse]  true: start here, as a wizard
+ * @property {boolean} [transient]  never persisted as the start mode (e.g. jetd's shell)
  */
 
 export class Modes extends EventEmitter {
@@ -96,7 +97,7 @@ export class Modes extends EventEmitter {
       this.logger?.info({ mode: id, wizard }, 'mode');
       mode.enter?.({ wizard });
       this.emit('mode', mode);
-      if (persist) this.saving = writeState(this.stateFile, { mode: id }).then(() => {}, (error) => this.logger?.warn({ error: error.message, file: this.stateFile }, 'state not saved'));
+      if (persist && !mode.transient) this.saving = writeState(this.stateFile, { mode: id }).then(() => {}, (error) => this.logger?.warn({ error: error.message, file: this.stateFile }, 'state not saved'));
     }
     this.ui.requestRender();
     return true;
