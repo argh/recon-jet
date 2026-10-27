@@ -1,5 +1,5 @@
 // System mode: a chooser-style menu of the device's own screens: Status, Pad calibration,
-// Glance calibration, Brightness, Power, Network, About. Front press opens the selected screen,
+// Glance calibration, Brightness, Power, Network, Bluetooth, About. Front press opens the selected screen,
 // rear press returns to the menu (and does nothing at the menu: that is the mode's root).
 //
 // First use: when the pad or glance calibration file is missing on userdata, `firstUse()` tells
@@ -21,6 +21,7 @@ import { GlanceCalScreen } from './glance-cal.js';
 import { BrightnessScreen } from './brightness.js';
 import { PowerScreen } from './power.js';
 import { NetworkScreen } from './network.js';
+import { BluetoothScreen } from './bluetooth.js';
 import { AboutScreen } from './about.js';
 
 const s = Schema.create;
@@ -37,6 +38,7 @@ export class SystemMode {
       .property('backlightFile', s('string').default('/android-data/mainline/backlight').meta('description', 'saved backlight level'))
       .property('backlightSysfs', s('string').default('/sys/class/backlight/kopin-a230/brightness').meta('description', 'backlight control'))
       .property('netDir', s('string').default('/sys/class/net').meta('description', 'interfaces listed on the Network screen'))
+      .property('btMarker', s('string').default('/android-data/mainline/bt').meta('description', 'exists = init powers the Bluetooth radio on at boot'))
       .property('modes', s('Modes').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
       .property('input', s('Input').meta('internal', true))
@@ -45,7 +47,7 @@ export class SystemMode {
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; modes; ui; input; power; sensors; deviceLink; logger;
+  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; modes; ui; input; power; sensors; deviceLink; logger;
 
   id = 'system'; label = 'System';
   /** @type {Chooser} */ menu;
@@ -60,11 +62,11 @@ export class SystemMode {
     const version = await fs.readFile(path.join(appRoot, 'package.json'), 'utf8').then((t) => JSON.parse(t).version, () => '?');
     this.screens = {
       status: new StatusScreen(this), pad: new PadCalScreen(this), glance: new GlanceCalScreen(this), brightness: new BrightnessScreen(this),
-      power: new PowerScreen(this), network: new NetworkScreen(this), about: new AboutScreen(this, version),
+      power: new PowerScreen(this), network: new NetworkScreen(this), bluetooth: new BluetoothScreen(this), about: new AboutScreen(this, version),
     };
     this.menu = new Chooser({ title: 'SYSTEM', items: [
       { id: 'status', label: 'Status' }, { id: 'pad', label: 'Pad calibration' }, { id: 'glance', label: 'Glance calibration' },
-      { id: 'brightness', label: 'Brightness' }, { id: 'power', label: 'Power' }, { id: 'network', label: 'Network' }, { id: 'about', label: 'About' },
+      { id: 'brightness', label: 'Brightness' }, { id: 'power', label: 'Power' }, { id: 'network', label: 'Network' }, { id: 'bluetooth', label: 'Bluetooth' }, { id: 'about', label: 'About' },
     ], hint: 'swipe: move   front: open' });
     this.input.on('motion', (m) => { if (this.#current && this.screen === this.screens.pad) this.screens.pad.onMotion(m); });
     this.power.on('update', () => { if (this.#current && this.screen === this.screens.status && this.screens.status.onPower()) this.ui.requestRender(); });

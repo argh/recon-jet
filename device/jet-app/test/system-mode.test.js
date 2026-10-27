@@ -111,7 +111,7 @@ test('system: the menu opens every screen; brightness rear reverts; Status repai
   const { sys, power, ui, read } = await make({ calibrated: true });
   sys.enter();
   const ids = sys.menu.items.map((i) => i.id);
-  assert.deepEqual(ids, ['status', 'pad', 'glance', 'brightness', 'power', 'network', 'about']);
+  assert.deepEqual(ids, ['status', 'pad', 'glance', 'brightness', 'power', 'network', 'bluetooth', 'about']);
   for (const id of ids) { sys.open(id); assert.equal(sys.screen, sys.screens[id]); assert.equal(sys.onGesture('press:rear'), true); assert.equal(sys.screen, null); }
   sys.onGesture('swipe:up'); assert.equal(sys.menu.item.id, 'about', 'wraps');
   sys.open('brightness');

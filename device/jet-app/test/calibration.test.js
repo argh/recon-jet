@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { padThresholds, ofmArgs, glanceThresholds, glanceFile, backlightStep, PAD_STEPS, GLANCE_STEPS } from '../src/modes/system/calibration.js';
 import { parseIpAddr, parseIwLink } from '../src/modes/system/network.js';
+import { parseShow, parseDevices } from '../src/modes/system/bluetooth.js';
 
 test('pad thresholds: median magnitude per direction, half the weaker direction per axis, clamped 8..60', () => {
   assert.deepEqual(PAD_STEPS.map((s) => s.dir), ['RIGHT', 'LEFT', 'DOWN', 'UP']);
@@ -40,4 +41,14 @@ test('network parsers', () => {
   assert.deepEqual(parseIwLink('Connected to e2:63:da:22:3a:15 (on wlan0)\n\tSSID: fire swamp\n\tfreq: 2412\n\tsignal: -48 dBm\n'), { ssid: 'fire swamp', freq: '2412', signal: '-48 dBm' });
   assert.equal(parseIwLink('Not connected.\n'), null);
   assert.equal(parseIwLink(''), null);
+});
+
+test('bluetooth parsers', () => {
+  assert.deepEqual(parseShow('Controller 84:7E:40:45:C5:C2 (public)\n\tName: BlueZ 5.66\n\tPowered: yes\n\tDiscoverable: no\n'), { address: '84:7E:40:45:C5:C2', powered: true });
+  assert.deepEqual(parseShow('Controller 84:7E:40:45:C5:C2 (public)\n\tPowered: no\n'), { address: '84:7E:40:45:C5:C2', powered: false });
+  assert.equal(parseShow('No default controller available\n'), null);
+  assert.equal(parseShow(''), null);
+  assert.deepEqual(parseDevices('Device D1:00:77:34:9F:55 K06 BLE Keyboard\nDevice C1:9A:1B:6E:42:97 Govee_H6093_4297\n'),
+    [{ address: 'D1:00:77:34:9F:55', name: 'K06 BLE Keyboard' }, { address: 'C1:9A:1B:6E:42:97', name: 'Govee_H6093_4297' }]);
+  assert.deepEqual(parseDevices(''), []);
 });
