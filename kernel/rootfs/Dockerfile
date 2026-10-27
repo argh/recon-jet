@@ -23,4 +23,6 @@ RUN curl -fsSL "https://nodejs.org/dist/latest-v22.x/${NODE_TAR}" -o /tmp/node.t
 RUN sed -i 's/^#host-name=.*/host-name=jet/; s/^#allow-interfaces=.*/allow-interfaces=wlan0,usb0/; s/^use-ipv6=yes/use-ipv6=no/; s/^#enable-dbus=.*/enable-dbus=no/; s/^enable-dbus=.*/enable-dbus=no/' /etc/avahi/avahi-daemon.conf \
     && mkdir -p /etc/wpa_supplicant /root/.ssh /etc/dropbear /android-data /opt && chmod 700 /root/.ssh \
     && echo jet > /etc/hostname && echo '127.0.1.1 jet' >> /etc/hosts
+# the Bluetooth radio stays down until asked (coex: hci0 up degrades WiFi rx); init / jet-app power it
+RUN sed -i 's/^#\?AutoEnable=.*/AutoEnable=false/' /etc/bluetooth/main.conf && grep -q '^AutoEnable=false' /etc/bluetooth/main.conf
 # the init mounts /proc /sys /dev /tmp /run and binds userdata at /android-data; nothing else runs at boot

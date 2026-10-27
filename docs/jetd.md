@@ -16,7 +16,7 @@ its host list only while no hub is connected. Loopback must be up (init does `ip
 |---|---|
 | `remote` | the hub draws; every key/motion event is forwarded. Default once a hub connects |
 | `log` | live `/dev/kmsg` (600-line ring, timestamps) or the previous boot's pstore record (rear toggles). Boot mode: the kernel backlog is replayed at ~80 lines/s and held for `boot-log-seconds` (default 20) before auto-switching to remote |
-| `shell` | `/bin/sh -i` on a pty rendered as a dumb terminal, 400-line scrollback; rear = Ctrl-C; the hub can type into it |
+| `shell` | `/bin/sh -i` on a pty rendered as a dumb terminal, 400-line scrollback; rear = Ctrl-C; the hub can type into it (`I`), and so can a Bluetooth/USB keyboard: **Ctrl+Alt+Enter** toggles the shell from any mode, even while a client owns the UI (`K 1`); arrows/PgUp/PgDn scroll, Ctrl+letter sends control codes, US layout. Keyboards that appear after boot are picked up live (inotify on `/dev/input`); a keyboard's own trackpad (pointer without letter keys) is ignored |
 | `setup` | menu: Pad calibration, Glance calibration, Brightness, Power, WiFi via QR code (placeholder), Back to remote |
 
 - Hold FRONT ~1 s: mode chooser overlay (swipe up/down, front or tap picks, rear cancels).

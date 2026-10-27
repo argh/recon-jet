@@ -12,7 +12,9 @@
  * Modes (owned by jetd, so they work with the hub gone):
  *   remote   the hub draws the screen and receives every input event (default)
  *   log      kernel log (/dev/kmsg, live) or the previous boot's pstore record
- *   shell    a local shell on a pty rendered as a dumb terminal with scrollback
+ *   shell    a local shell on a pty rendered as a dumb terminal with scrollback; a Bluetooth (or
+ *            USB) keyboard types into it, Ctrl+Alt+Enter toggles it from any mode, even while a
+ *            client owns the UI (K 1); input devices that appear after boot are picked up live
  *   setup    pad calibration, glance calibration, brightness, power (live PMIC readout)
  * Hold the FRONT button ~1 s to open the mode chooser (swipe up/down, front or
  * tap to pick, rear to cancel). Short presses and swipes belong to the mode.
@@ -84,6 +86,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
@@ -226,19 +229,44 @@ static void backlight_save(void) {
 }
 
 /* ---- input ------------------------------------------------------------------- */
-#define MAXIN 8
-static int infd[MAXIN]; static int nin;
+#define MAXIN 12
+static int infd[MAXIN]; static char inkbd[MAXIN]; static int nin;   /* inkbd: the device has letter keys */
+static int inotify_fd = -1;
+
+/* A device with letter keys is a keyboard (its keys type into the shell). A pointer without them
+ * (a BT keyboard's trackpad: BTN_LEFT + REL_X/Y) is ignored so it cannot pose as the Jet's touchpad. */
+static int input_add(const char *name) {
+    if (nin >= MAXIN) return -1;
+    char p[64]; snprintf(p, sizeof p, "/dev/input/%s", name);
+    int fd = open(p, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return -1;
+    unsigned long keys[(KEY_MAX + 8 * sizeof(long)) / (8 * sizeof(long))] = { 0 };
+    ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keys), keys);
+#define HASKEY(k) ((keys[(k) / (8 * sizeof(long))] >> ((k) % (8 * sizeof(long)))) & 1)
+    int kbd = HASKEY(KEY_A) && HASKEY(KEY_Z);
+    if (!kbd && HASKEY(BTN_LEFT)) { close(fd); return -1; }
+#undef HASKEY
+    infd[nin] = fd; inkbd[nin] = kbd; nin++;
+    return 0;
+}
+static void input_remove(int i) { close(infd[i]); nin--; infd[i] = infd[nin]; inkbd[i] = inkbd[nin]; }
 
 static void input_open(void) {
     DIR *d = opendir("/dev/input"); struct dirent *e;
-    if (!d) return;
-    while ((e = readdir(d)) && nin < MAXIN) {
-        if (strncmp(e->d_name, "event", 5)) continue;
-        char p[64]; snprintf(p, sizeof p, "/dev/input/%s", e->d_name);
-        int fd = open(p, O_RDONLY | O_NONBLOCK);
-        if (fd >= 0) infd[nin++] = fd;
-    }
-    closedir(d);
+    if (d) { while ((e = readdir(d))) if (!strncmp(e->d_name, "event", 5)) input_add(e->d_name); closedir(d); }
+    inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (inotify_fd >= 0 && inotify_add_watch(inotify_fd, "/dev/input", IN_CREATE) < 0) { close(inotify_fd); inotify_fd = -1; }
+}
+
+/* a device node appeared (a Bluetooth keyboard connected): open it, retrying once if it is not ready */
+static void input_hotplug(void) {
+    char buf[512]; ssize_t r;
+    while ((r = read(inotify_fd, buf, sizeof buf)) > 0)
+        for (char *p = buf; p < buf + r; ) {
+            struct inotify_event *ev = (struct inotify_event *)p;
+            if (ev->len && !strncmp(ev->name, "event", 5) && input_add(ev->name) < 0) { usleep(100000); input_add(ev->name); }
+            p += sizeof *ev + ev->len;
+        }
 }
 
 /* ---- mode state ------------------------------------------------------------------ */
@@ -855,6 +883,49 @@ static void dispatch_rel(int dx, int dy) {
     else if (mode == M_SETUP) setup_rel(dx, dy);
 }
 
+/* ---- keyboard (BT/USB HID): types into the shell -------------------------------- */
+static int kbd_mods;   /* 1 shift, 2 ctrl, 4 alt */
+static const char *kmap[128] = {   /* US layout: [code] = "plain shifted" */
+    [KEY_1] = "1!", [KEY_2] = "2@", [KEY_3] = "3#", [KEY_4] = "4$", [KEY_5] = "5%", [KEY_6] = "6^", [KEY_7] = "7&", [KEY_8] = "8*", [KEY_9] = "9(", [KEY_0] = "0)",
+    [KEY_MINUS] = "-_", [KEY_EQUAL] = "=+", [KEY_LEFTBRACE] = "[{", [KEY_RIGHTBRACE] = "]}", [KEY_SEMICOLON] = ";:", [KEY_APOSTROPHE] = "'\"", [KEY_GRAVE] = "`~",
+    [KEY_BACKSLASH] = "\\|", [KEY_COMMA] = ",<", [KEY_DOT] = ".>", [KEY_SLASH] = "/?", [KEY_SPACE] = "  ",
+    [KEY_Q] = "qQ", [KEY_W] = "wW", [KEY_E] = "eE", [KEY_R] = "rR", [KEY_T] = "tT", [KEY_Y] = "yY", [KEY_U] = "uU", [KEY_I] = "iI", [KEY_O] = "oO", [KEY_P] = "pP",
+    [KEY_A] = "aA", [KEY_S] = "sS", [KEY_D] = "dD", [KEY_F] = "fF", [KEY_G] = "gG", [KEY_H] = "hH", [KEY_J] = "jJ", [KEY_K] = "kK", [KEY_L] = "lL",
+    [KEY_Z] = "zZ", [KEY_X] = "xX", [KEY_C] = "cC", [KEY_V] = "vV", [KEY_B] = "bB", [KEY_N] = "nN", [KEY_M] = "mM",
+};
+
+/* A key from a keyboard-class device. Returns 1 when consumed here (modifiers, the shell toggle,
+ * and every key while the shell is showing); 0 hands it to the ordinary key path, so in remote
+ * mode a client that asked for raw keys sees keyboard keys as `k <code> <value>` like any other. */
+static int kbd_key(unsigned code, int value) {
+    int mbit = code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT ? 1 : code == KEY_LEFTCTRL || code == KEY_RIGHTCTRL ? 2 : code == KEY_LEFTALT || code == KEY_RIGHTALT ? 4 : 0;
+    if (mbit) { if (value) kbd_mods |= mbit; else kbd_mods &= ~mbit; return 1; }
+    if (code == KEY_ENTER && (kbd_mods & 6) == 6) {                  /* Ctrl+Alt+Enter: shell on/off */
+        if (value == 1) { chooser = 0; auto_remote = 0; set_mode(mode == M_CONSOLE ? M_REMOTE : M_CONSOLE); }
+        return 1;
+    }
+    if (mode != M_CONSOLE) return 0;
+    if (value == 0) return 1;                                          /* presses and repeats type; releases do not */
+    char c;
+    switch (code) {
+    case KEY_ENTER: case KEY_KPENTER: c = '\n'; break;
+    case KEY_BACKSPACE: c = 0x7f; break;
+    case KEY_TAB: c = '\t'; break;
+    case KEY_ESC: c = 27; break;
+    case KEY_UP: case KEY_DOWN: case KEY_LEFT: case KEY_RIGHT: dispatch_key(code); return 1;          /* scroll, like the pad */
+    case KEY_PAGEUP: dispatch_key(KEY_UP); return 1;
+    case KEY_PAGEDOWN: dispatch_key(KEY_DOWN); return 1;
+    default:
+        if (code >= 128 || !kmap[code]) return 1;
+        c = kmap[code][kbd_mods & 1];
+        if ((kbd_mods & 2) && ((c | 0x20) >= 'a' && (c | 0x20) <= 'z')) c = (c | 0x20) - 'a' + 1;   /* Ctrl+C = 3 ... */
+    }
+    if (pty_fd < 0) console_spawn();
+    if (pty_fd >= 0) write(pty_fd, &c, 1);
+    term_scroll = 0; dirty = 1;
+    return 1;
+}
+
 /* raw evdev: buttons get hold detection, everything else goes straight through */
 static struct { int down; int64_t t; int consumed; } btn[2];   /* 0 front, 1 rear */
 
@@ -862,7 +933,7 @@ static struct { int down; int64_t t; int consumed; } btn[2];   /* 0 front, 1 rea
  * swipe keys) is forwarded as it happens and jetd's own hold-to-open chooser is off, so the
  * application layer owns the button semantics. Other modes keep jetd's handling. */
 static void raw_key(unsigned code, int value) {
-    if (raw_keys && nhubs) { if (mode != M_REMOTE) set_mode(M_REMOTE); chooser = 0; sendf("k %u %d\n", code, value); return; }
+    if (raw_keys && nhubs && mode != M_CONSOLE) { if (mode != M_REMOTE) set_mode(M_REMOTE); chooser = 0; sendf("k %u %d\n", code, value); return; }
     int b = code == BTN_FRONT_CODE ? 0 : code == BTN_REAR_CODE ? 1 : -1;
     if (b < 0) { if (value == 1) dispatch_key(code); return; }
     if (value == 1) { btn[b].down = 1; btn[b].t = now_ms(); btn[b].consumed = 0; }
@@ -1247,7 +1318,7 @@ int main(int argc, char **argv) {
 
     for (;;) {
         if (!nhubs && connecting_fd < 0 && now_ms() >= next_connect) try_connect();
-        struct pollfd pf[8 + MAXIN + MAXHUB]; int n = 0, ipty = -1, ikmsg = -1, ilisten = -1;
+        struct pollfd pf[9 + MAXIN + MAXHUB]; int n = 0, ipty = -1, ikmsg = -1, ilisten = -1, inot = -1;
         int ihub = n; for (int i = 0; i < nhubs; i++) pf[n++] = (struct pollfd){ hubs[i].fd, POLLIN, 0 };
         if (kmsg_fd >= 0) { ikmsg = n; pf[n++] = (struct pollfd){ kmsg_fd, POLLIN, 0 }; }
         if (listen_fd >= 0) { ilisten = n; pf[n++] = (struct pollfd){ listen_fd, POLLIN, 0 }; }
@@ -1259,6 +1330,7 @@ int main(int argc, char **argv) {
         int icap = -1, iplay = -1;
         if (cap_fd >= 0) { icap = n; pf[n++] = (struct pollfd){ cap_fd, POLLIN, 0 }; }
         if (play_fd >= 0 && play_off < play_len) { iplay = n; pf[n++] = (struct pollfd){ play_fd, POLLOUT, 0 }; }
+        if (inotify_fd >= 0) { inot = n; pf[n++] = (struct pollfd){ inotify_fd, POLLIN, 0 }; }
         int iin = n;
         for (int i = 0; i < nin; i++) pf[n++] = (struct pollfd){ infd[i], POLLIN, 0 };
         int timeout = !nhubs ? 500 : 5000;
@@ -1310,13 +1382,15 @@ int main(int argc, char **argv) {
         if (ikmsg >= 0 && pf[ikmsg].revents) kmsg_read();
         PROF(2);
         if (ilisten >= 0 && pf[ilisten].revents) accept_hub();
+        if (inot >= 0 && pf[inot].revents) input_hotplug();
         for (int i = 0; i < nin; i++) if (pf[iin + i].revents) {
             struct input_event ev[16];
             ssize_t r = read(infd[i], ev, sizeof ev);
+            if (r < 0 && errno != EAGAIN && errno != EINTR) { input_remove(i); break; }   /* device gone (BT keyboard off): table changed, re-poll */
             /* keys go through hold detection; the touchpad driver sends one REL_X, REL_Y, SYN group per gesture */
             int dx = 0, dy = 0, any = 0;
             for (ssize_t k = 0; k < (ssize_t)(r / sizeof ev[0]); k++) {
-                if (ev[k].type == EV_KEY) raw_key(ev[k].code, ev[k].value);
+                if (ev[k].type == EV_KEY) { if (inkbd[i] && kbd_key(ev[k].code, ev[k].value)) continue; raw_key(ev[k].code, ev[k].value); }
                 else if (ev[k].type == EV_REL) { any = 1; if (ev[k].code == REL_X) dx = ev[k].value; else if (ev[k].code == REL_Y) dy = ev[k].value; }
             }
             if (any) dispatch_rel(dx, dy);

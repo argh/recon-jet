@@ -90,6 +90,17 @@ shared transport; BT_EN gpio 46 (gpio2 14). Firmware: `wl128x-fw-5-sr/mr.bin`, N
 (`wl1271-nvs.bin` on the stock system, carries the MAC), `TIInit_*.bts` for BT. GPS fixes are
 computed on the chip and spoken over a closed "AI2" protocol by stock user space (not ported).
 
+Bluetooth on mainline: `hci_uart` (HCI-LL over serdev on uart2) loads at init; the stack itself
+(dbus + bluetoothd in the rootfs, `uhid`/`hid-generic` for LE HID-over-GATT keyboards, `hidp` for
+classic ones) starts at init with the radio down (`AutoEnable=false`); the marker
+`/android-data/mainline/bt` powers it at boot and jet-app's System > Bluetooth screen toggles it
+live and keeps the marker in step, because an up hci0 pins the WiFi rx rate at 1 Mbit/s (coex
+untuned): radio on for the keyboard on the USB link, off for WiFi unplugged. Pairing: `bluetoothctl` over ssh
+(`agent KeyboardDisplay`, `pair`, `trust`); the Rii K06 ("K06 BLE Keyboard", LE, Just Works, no
+passkey) paired 2026-10-27 and reconnects by itself. Pairings live in the rootfs
+`/var/lib/bluetooth`. Kernel: `CONFIG_UHID=m` added to `jet.config` 2026-10-27 (omap2plus leaves it
+out), module in the userdata module tree.
+
 ## Buttons and LEDs
 
 | Control | Fact |
