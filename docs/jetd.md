@@ -125,8 +125,10 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
 ## Live testing (without a reboot or reflash)
 
 1. Copy the new binary **first**: `scp agent/jetd root@jet.local:/android-data/jetd-new`
-   (`killall jetd` blanks the display daemon, so never kill before the copy is in place).
-2. `killall jetd`, then start the new one from the chroot over ssh with `setsid nohup ... &`
+   (`pkill jetd` blanks the display daemon, so never kill before the copy is in place; the chroot has
+   no `killall`). A second jetd started while the first still lives comes up without the port: kill
+   the old one first and check `pgrep -a jetd` shows one.
+2. `pkill jetd`, then start the new one from the chroot over ssh with `setsid nohup ... &`
    (a plain background job dies with the dropbear session).
 3. Paths: userdata is `/android-data` inside the chroot and `/mnt/data` in the initramfs; jetd
    tries both for every flag file. The next boot runs the baked-in `/bin/jetd` again; rebuild
@@ -147,9 +149,10 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
 
 ## Raw keys
 
-`K 1` makes jetd forward every key event (down and up, both buttons and the touchpad swipe keys)
-immediately while in remote mode and disables its own front-hold chooser, so the application
-layer owns button semantics (hold detection, menus). jetd's other modes keep their own handling.
+`K 1` makes jetd forward every key event (down and up, both buttons, the touchpad swipe keys and a
+keyboard's keys, Shift/Ctrl/Alt included) immediately while in remote mode and disables its own
+front-hold chooser, so the application layer owns button semantics (hold detection, menus). jetd
+still tracks the modifiers for Ctrl+Alt+Enter. jetd's other modes keep their own handling.
 `K 0` restores the chooser and press-pair reporting.
 
 `Y` stops playback immediately and drops queued audio (barge-in); jetd answers `w flushed`.

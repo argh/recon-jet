@@ -40,7 +40,7 @@ Run it from the switcher (**Doom**, a jet-app mode) or over ssh for debugging:
 | front button | Enter (menus) and Fire |
 | rear button | Escape (menu / back) |
 | touchpad swipes | arrow keys (a swipe is one short press) |
-| keyboard | arrows move/turn, Space or Ctrl fire, E use, Shift run, Alt strafe, Esc menu, Enter, 1-7 weapons, F-keys, Tab map |
+| keyboard | arrows move/turn, Ctrl fire, Space use (doors, switches), Z/X or , . strafe, Alt+arrows strafe, Shift run, Esc menu, Enter, 1-7 weapons, F-keys, Tab map |
 | front hold | jet-app's switcher: Doom pauses and stops drawing until it closes; picking another mode quits it |
 
 Esc > Quit Game returns to the mode that was showing before.

@@ -50,6 +50,8 @@ extern boolean palette_changed;   /* i_video.c, CMAP256 build */
 #define DK_UP 0xad
 #define DK_RIGHT 0xae
 #define DK_DOWN 0xaf
+#define DK_STRAFE_L 0xa0
+#define DK_STRAFE_R 0xa1
 #define DK_USE 0xa2
 #define DK_FIRE 0xa3
 #define DK_RSHIFT (0x80 + 0x36)
@@ -144,11 +146,14 @@ static int shift_down;
 static const char *unshifted = "1234567890-=" "qwertyuiop[]" "asdfghjkl;'`" "\\zxcvbnm,./";
 static const char *shifted   = "!@#$%^&*()_+" "QWERTYUIOP{}" "ASDFGHJKL:\"~" "|ZXCVBNM<>?";
 
-/* evdev code -> Doom key (0 = ignored). KEY_1..KEY_EQUAL, KEY_Q..KEY_RIGHTBRACE, KEY_A..KEY_GRAVE,
+/* evdev code -> Doom key (0 = ignored). The engine's bindings are its own codes (doomkeys.h), not
+ * ASCII: strafing is KEY_STRAFE_L/R, which vanilla put on , and . and we put on Z and X as well,
+ * next to Ctrl (fire) and Space (use). KEY_1..KEY_EQUAL, KEY_Q..KEY_RIGHTBRACE, KEY_A..KEY_GRAVE,
  * KEY_BACKSLASH..KEY_SLASH are contiguous runs in input-event-codes.h. */
 static unsigned char doom_key(unsigned code) {
     const char *t = shift_down ? shifted : unshifted;
-    if (code == KEY_E) return DK_USE;               /* use lives on E so Space can fire */
+    if (code == KEY_Z || code == KEY_COMMA) return DK_STRAFE_L;
+    if (code == KEY_X || code == KEY_DOT) return DK_STRAFE_R;
     if (code >= KEY_1 && code <= KEY_EQUAL) return t[code - KEY_1];
     if (code >= KEY_Q && code <= KEY_RIGHTBRACE) return t[12 + code - KEY_Q];
     if (code >= KEY_A && code <= KEY_GRAVE) return t[24 + code - KEY_A];
@@ -159,7 +164,7 @@ static unsigned char doom_key(unsigned code) {
     case KEY_ESC: return DK_ESCAPE;
     case KEY_TAB: return DK_TAB;
     case KEY_BACKSPACE: return DK_BACKSPACE;
-    case KEY_SPACE: return DK_FIRE;
+    case KEY_SPACE: return DK_USE;
     case KEY_LEFT: return DK_LEFT;
     case KEY_RIGHT: return DK_RIGHT;
     case KEY_UP: return DK_UP;
@@ -168,7 +173,6 @@ static unsigned char doom_key(unsigned code) {
     case KEY_LEFTALT: case KEY_RIGHTALT: return DK_LALT;
     case KEY_LEFTSHIFT: case KEY_RIGHTSHIFT: return DK_RSHIFT;
     case KEY_PAUSE: return DK_PAUSE;
-    case KEY_COMMA: return ','; case KEY_DOT: return '.'; case KEY_SLASH: return '/';
     }
     return 0;
 }

@@ -1119,14 +1119,16 @@ static const char *kseq(unsigned code) {
     }
 }
 
-/* A key from a keyboard-class device. Returns 1 when consumed here (modifiers, the shell toggle,
- * and every key while the shell is showing); 0 hands it to the ordinary key path, so in remote
- * mode a client that asked for raw keys sees keyboard keys as `k <code> <value>` like any other.
+/* A key from a keyboard-class device. Returns 1 when consumed here (the shell toggle, every key
+ * while the shell is showing, and the modifiers unless a raw-keys client owns the keyboard); 0 hands
+ * it to the ordinary key path, so in remote mode a client that asked for raw keys sees keyboard keys
+ * as `k <code> <value>` like any other, Shift/Ctrl/Alt included (Doom fires with Ctrl). The
+ * modifier state is tracked either way, so Ctrl+Alt+Enter keeps working.
  * In the shell: Alt prefixes ESC (Meta), Ctrl makes control codes (Ctrl+Space = NUL, Ctrl+/ = ^_),
  * Shift+PgUp/PgDn page the scrollback, Enter is CR, Backspace is DEL. */
 static int kbd_key(unsigned code, int value) {
     int mbit = code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT ? 1 : code == KEY_LEFTCTRL || code == KEY_RIGHTCTRL ? 2 : code == KEY_LEFTALT || code == KEY_RIGHTALT ? 4 : 0;
-    if (mbit) { if (value) kbd_mods |= mbit; else kbd_mods &= ~mbit; return 1; }
+    if (mbit) { if (value) kbd_mods |= mbit; else kbd_mods &= ~mbit; return !(raw_keys && nhubs && mode != M_CONSOLE); }
     if (code == KEY_ENTER && (kbd_mods & 6) == 6) {                  /* Ctrl+Alt+Enter: shell on/off */
         if (value == 1) { chooser = 0; auto_remote = 0; set_mode(mode == M_CONSOLE ? M_REMOTE : M_CONSOLE); }
         return 1;
