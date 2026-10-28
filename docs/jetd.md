@@ -16,7 +16,7 @@ its host list only while no hub is connected. Loopback must be up (init does `ip
 |---|---|
 | `remote` | the hub draws; every key/motion event is forwarded. Default once a hub connects |
 | `log` | live `/dev/kmsg` (600-line ring, timestamps) or the previous boot's pstore record (rear toggles). Boot mode: the kernel backlog is replayed at ~80 lines/s and held for `boot-log-seconds` (default 20) before auto-switching to remote |
-| `shell` | `/bin/sh -i` on a pty rendered as a dumb terminal, 400-line scrollback; rear = Ctrl-C; the hub can type into it (`I`), and so can a Bluetooth/USB keyboard: **Ctrl+Alt+Enter** toggles the shell from any mode, even while a client owns the UI (`K 1`); arrows/PgUp/PgDn scroll, Ctrl+letter sends control codes, US layout. Keyboards that appear after boot are picked up live (inotify on `/dev/input`); a keyboard's own trackpad (pointer without letter keys) is ignored |
+| `shell` | bash (login shell) inside the Debian rootfs on a pty, `TERM=linux`, rendered by a terminal emulator covering the Linux-console subset: cursor motion, erase/insert/delete line and char, scroll regions, SGR with 16/256/true colour, bold/dim/underline/reverse, autowrap, insert mode, alternate screen (1049), DSR/DA replies (`CSI ? n c` is the console cursor shape, not a request), UTF-8 to one cell. Grid = the font's cells (71x20 small, 42x12 normal; front toggles and resizes the pty), 400-line scrollback (pad swipes or Shift+PgUp/PgDn), rear = Ctrl-C. The hub types with `I` (`\n`/`\r` both send CR: bash's readline ignores a bare LF), a Bluetooth/USB keyboard types directly: **Ctrl+Alt+Enter** toggles the shell from any mode, even while a client owns the UI (`K 1`); arrows/Home/End/Ins/Del/PgUp/PgDn/F1-F12 send the linux terminfo sequences, Alt = Meta (ESC prefix), Ctrl makes control codes (Ctrl+Space NUL, Ctrl+/ ^_), Backspace = DEL, Shift+Tab = CSI Z, US layout; autorepeat is set to 600 ms / 16 per s on keyboard devices. Keyboards that appear after boot are picked up live (inotify on `/dev/input`); a keyboard's own trackpad (pointer without letter keys) is ignored. `JETD_PTYLOG=<file>` dumps the pty traffic; vi/vim, mg, less, nano verified |
 | `setup` | menu: Pad calibration, Glance calibration, Brightness, Power, WiFi via QR code (placeholder), Back to remote |
 
 - Hold FRONT ~1 s: mode chooser overlay (swipe up/down, front or tap picks, rear cancels).
@@ -44,7 +44,7 @@ host -> jet:
 | `L <0-1023>` | backlight |
 | `P` | ping -> `p` |
 | `M <remote\|log\|shell\|setup>` | switch mode |
-| `I <text>` | type into the shell pty (`\n \t \\` escapes) |
+| `I <text>` | type into the shell pty (`\n`/`\r` = Enter (CR), `\t`, `\e` = ESC, `\\`) |
 | `S [w h [skip]]` | camera snapshot (default 640x480, skip 6 frames for exposure/AWB) -> `f <w> <h> UYVY <len>\n` + bytes, or `e <msg>` |
 | `V [max_s]` / `v` | start / stop voice capture |
 | `W <len>` + bytes / `w` | queue 48 kHz stereo S16 PCM; `w` ends the clip |

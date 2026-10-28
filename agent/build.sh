@@ -10,4 +10,5 @@ FONT=${1:-ter-u20b}; SMALL=${2:-Lat2-Terminus12x6}
   xxd -i -n font_small "font/$SMALL.psf" | sed 's/^unsigned char/const unsigned char/; s/^unsigned int/const unsigned/'; } > font_psf.h
 ZIG=${ZIG:-/opt/homebrew/bin/zig}
 $ZIG cc -target arm-linux-musleabihf -mcpu=cortex_a9 -static -O2 -Wall -s -o jetd jetd.c
+$ZIG cc -target arm-linux-musleabihf -mcpu=cortex_a9 -static -O2 -Wall -g -o jetd.dbg jetd.c   # same code with symbols: addr2line for "fatal signal" log lines
 ls -la jetd

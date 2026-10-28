@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       busybox dropbear-bin wpasupplicant iw wireless-tools iproute2 ethtool i2c-tools alsa-utils \
       bluez avahi-daemon libnss-mdns v4l-utils evtest curl ca-certificates xz-utils procps \
-      kmod file less nano libatomic1 libstdc++6 openssh-client \
+      kmod file less nano vim-tiny mg libatomic1 libstdc++6 openssh-client \
     && rm -rf /var/lib/apt/lists/*
 # busybox applets the initramfs init calls inside the chroot (Debian's busybox has no telnetd), and
 # the udhcpc lease hook Debian does not ship

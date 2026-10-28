@@ -12,9 +12,11 @@
  * Modes (owned by jetd, so they work with the hub gone):
  *   remote   the hub draws the screen and receives every input event (default)
  *   log      kernel log (/dev/kmsg, live) or the previous boot's pstore record
- *   shell    a local shell on a pty rendered as a dumb terminal with scrollback; a Bluetooth (or
- *            USB) keyboard types into it, Ctrl+Alt+Enter toggles it from any mode, even while a
- *            client owns the UI (K 1); input devices that appear after boot are picked up live
+ *   shell    bash in the Debian rootfs on a pty, a small terminal emulator (Linux-console subset,
+ *            TERM=linux: colours, scroll regions, insert/delete: vi, emacs/mg, less work) with
+ *            scrollback; a Bluetooth (or USB) keyboard types into it, Ctrl+Alt+Enter toggles it from
+ *            any mode, even while a client owns the UI (K 1); input devices appearing after boot are
+ *            picked up live
  *   setup    pad calibration, glance calibration, brightness, power (live PMIC readout)
  * Hold the FRONT button ~1 s to open the mode chooser (swipe up/down, front or
  * tap to pick, rear to cancel). Short presses and swipes belong to the mode.
@@ -81,6 +83,7 @@
 #include <poll.h>
 #include <pty.h>
 #include <signal.h>
+#include <ucontext.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -246,6 +249,7 @@ static int input_add(const char *name) {
     int kbd = HASKEY(KEY_A) && HASKEY(KEY_Z);
     if (!kbd && HASKEY(BTN_LEFT)) { close(fd); return -1; }
 #undef HASKEY
+    if (kbd) { unsigned rep[2] = { 600, 60 }; ioctl(fd, EVIOCSREP, rep); }   /* autorepeat after 600 ms at ~16/s (kernel default 250/33 doubles slow presses) */
     infd[nin] = fd; inkbd[nin] = kbd; nin++;
     return 0;
 }
@@ -451,57 +455,255 @@ static void render_log(void) {
     draw_row(nrows - 1, st);
 }
 
-/* ---- shell: a dumb terminal on a pty ------------------------------------------ */
-#define TCOLS 42
-#define TROWS 400
-static char term[TROWS][TCOLS + 1];
-static int term_row, term_col, term_total;   /* cursor row within ring, cursor col, lines ever written */
-static int term_scroll;                       /* 0 = follow tail, n = n lines back */
-static int term_esc;                          /* escape parser state */
+/* ---- shell: a terminal emulator on a pty (Linux-console subset, TERM=linux) -------------------
+ * A grid of cells (glyph, colours, attributes) sized to the current font (71x20 small, 42x12
+ * normal; the front button toggles and the pty is resized). Lines pushed off the top of a
+ * full-screen scroll go to a scrollback ring (pad swipes or Shift+PgUp/PgDn view it). Covered:
+ * cursor motion, ED/EL/ECH, IL/DL/ICH/DCH, scroll regions (DECSTBM), SU/SD, save/restore cursor,
+ * SGR (bold/dim/underline/reverse, 16/256/true colour), autowrap, insert mode, the alternate
+ * screen (1047/1049) as save+clear/restore, DSR/DA replies, tabs, UTF-8 decoded to one cell
+ * (non-ASCII drawn as '?'), DEC line drawing approximated. Enough for bash, vi/vim, mg/emacs,
+ * less and nano. The shell runs in the Debian rootfs (chroot) when jetd runs from the initramfs. */
+#define VT_COLS 71
+#define VT_ROWS 20
+#define SB_ROWS 400
+#define A_BOLD 1
+#define A_DIM 2
+#define A_UL 4
+#define A_REV 8
+#define DEF_FG 0xdcdcdc
+#define DEF_BG 0x000000
+struct cell { uint32_t fg, bg; unsigned char ch, attr; };
+static struct cell vt[VT_ROWS][VT_COLS];
+static struct cell vt_alt[VT_ROWS][VT_COLS];                 /* the main screen, kept while the alternate screen shows */
+static struct cell sb[SB_ROWS][VT_COLS]; static int sb_head, sb_n;   /* scrollback ring (head = next slot) */
+static int vt_cols = 71, vt_rows = 20;
+static int cx, cy, wrap_pending, cur_vis = 1, autowrap = 1, insert_mode, alt_screen, origin_mode, dec_gfx;
+static uint32_t cur_fg = DEF_FG, cur_bg = DEF_BG; static int cur_attr;
+static int st_top, st_bot = 19;                              /* scroll region (inclusive rows) */
+static int s_cx, s_cy, s_attr, alt_cx, alt_cy; static uint32_t s_fg = DEF_FG, s_bg = DEF_BG;
+static int term_scroll;                                      /* 0 = live screen, n = scrollback lines back */
 static int pty_fd = -1; static pid_t pty_pid;
+static int esc_state;                                        /* 0 ground, 1 ESC, 2 CSI, 3 OSC/DCS (skip to ST/BEL), 4 ESC + intermediate */
+static int csi_par[16], csi_n, csi_priv, csi_has;
+static unsigned utf_cp; static int utf_rem;
 
-static void term_newline(void) {
-    term_row = (term_row + 1) % TROWS; term_col = 0; term_total++;
-    memset(term[term_row], 0, sizeof term[term_row]);
+static const uint32_t ansi_pal[16] = { 0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x2040ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
+                                       0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff };
+static uint32_t pal256(int n) {
+    if (n < 16) return ansi_pal[n & 15];
+    if (n < 232) { n -= 16; int r = n / 36, g = (n / 6) % 6, b = n % 6; return px(r ? 55 + r * 40 : 0, g ? 55 + g * 40 : 0, b ? 55 + b * 40 : 0); }
+    int v = 8 + (n - 232) * 10; return px(v, v, v);
 }
 
-static void term_put(unsigned char c) {
-    if (term_esc) {                     /* skip CSI/OSC sequences */
-        if (term_esc == 1) { term_esc = (c == '[' || c == ']') ? (c == '[' ? 2 : 3) : 0; return; }
-        if (term_esc == 2) { if (c >= 0x40 && c <= 0x7e) term_esc = 0; return; }
-        if (term_esc == 3) { if (c == 7) term_esc = 0; return; }
+static struct cell vt_blank(void) { return (struct cell){ cur_fg, cur_bg, ' ', 0 }; }
+static void vt_fill(int row, int c0, int c1) { struct cell b = vt_blank(); for (int c = c0; c <= c1 && c < vt_cols; c++) if (c >= 0) vt[row][c] = b; }
+static void vt_clear_all(void) { for (int r = 0; r < vt_rows; r++) vt_fill(r, 0, vt_cols - 1); }
+
+/* lines leaving the top of a full-height scroll by a line feed are history (not on the alternate
+ * screen, and not for delete-line / scroll-up commands, which editors use for redraws) */
+static void vt_scroll_up(int top, int bot, int n, int hist) {
+    for (int k = 0; k < n && top <= bot; k++) {
+        if (hist && top == 0 && bot == vt_rows - 1 && !alt_screen) { memcpy(sb[sb_head], vt[0], sizeof vt[0]); sb_head = (sb_head + 1) % SB_ROWS; if (sb_n < SB_ROWS) sb_n++; }
+        memmove(vt[top], vt[top + 1], (bot - top) * sizeof vt[0]);
+        vt_fill(bot, 0, vt_cols - 1);
     }
-    switch (c) {
-    case 27: term_esc = 1; return;
-    case '\n': term_newline(); return;
-    case '\r': term_col = 0; return;
-    case '\b': if (term_col) term_col--; return;
-    case '\t': term_col = (term_col + 8) & ~7; if (term_col >= TCOLS) term_newline(); return;
-    case 7: return;
-    default:
-        if (c < 32 || c > 126) return;
-        if (term_col >= TCOLS) term_newline();
-        term[term_row][term_col++] = c;
+}
+static void vt_scroll_down(int top, int bot, int n) {
+    for (int k = 0; k < n && top <= bot; k++) { memmove(vt[top + 1], vt[top], (bot - top) * sizeof vt[0]); vt_fill(top, 0, vt_cols - 1); }
+}
+static void vt_linefeed(void) { if (cy == st_bot) vt_scroll_up(st_top, st_bot, 1, 1); else if (cy < vt_rows - 1) cy++; }
+static void vt_reverse_lf(void) { if (cy == st_top) vt_scroll_down(st_top, st_bot, 1); else if (cy > 0) cy--; }
+
+static void vt_reset(void) {
+    cx = cy = wrap_pending = insert_mode = alt_screen = origin_mode = dec_gfx = 0; cur_vis = autowrap = 1;
+    cur_fg = DEF_FG; cur_bg = DEF_BG; cur_attr = 0; st_top = 0; st_bot = vt_rows - 1; esc_state = 0; utf_rem = 0;
+    vt_clear_all();
+}
+/* a new grid size (font toggle): keep the top-left, clamp the cursor, tell the shell */
+static void vt_resize(int c, int r) {
+    if (c > VT_COLS) c = VT_COLS; if (r > VT_ROWS) r = VT_ROWS; if (c < 1 || r < 1) return;
+    if (c == vt_cols && r == vt_rows) return;
+    struct cell b = { DEF_FG, DEF_BG, ' ', 0 };
+    for (int y = 0; y < VT_ROWS; y++) for (int x = 0; x < VT_COLS; x++) if (y >= vt_rows || x >= vt_cols) vt[y][x] = b;
+    vt_cols = c; vt_rows = r; st_top = 0; st_bot = r - 1;
+    if (cx >= c) cx = c - 1; if (cy >= r) cy = r - 1; wrap_pending = 0; term_scroll = 0;
+    if (pty_fd >= 0) { struct winsize ws = { .ws_row = r, .ws_col = c }; ioctl(pty_fd, TIOCSWINSZ, &ws); }
+}
+static void vt_geometry_for_font(int f) { vt_resize(W / fonts[f].gw, H / fonts[f].gh); }
+
+static void vt_putc(unsigned c) {
+    if (c >= 0x80) c = '?';
+    if (dec_gfx) {               /* DEC special graphics: box drawing as ASCII */
+        if (c == 'q') c = '-'; else if (c == 'x') c = '|'; else if (c >= 'j' && c <= 'n') c = '+'; else if (c >= 't' && c <= 'w') c = '+'; else if (c == '`' || c == 'a' || c == 'f' || c == 'g' || c == '~') c = '#';
+    }
+    if (wrap_pending) { wrap_pending = 0; if (autowrap) { cx = 0; vt_linefeed(); } }
+    if (insert_mode && cx < vt_cols - 1) memmove(&vt[cy][cx + 1], &vt[cy][cx], (vt_cols - 1 - cx) * sizeof vt[0][0]);
+    vt[cy][cx] = (struct cell){ cur_fg, cur_bg, (unsigned char)c, (unsigned char)cur_attr };
+    if (cx == vt_cols - 1) wrap_pending = 1; else cx++;
+}
+
+static FILE *ptylog;   /* JETD_PTYLOG=<file>: every byte the shell writes (>) and receives (<), for terminal debugging */
+static void ptylog_write(char dir, const char *b, size_t n) {
+    if (!ptylog) return;
+    fprintf(ptylog, "%c ", dir); for (size_t i = 0; i < n; i++) { unsigned char c = b[i]; if (c >= 32 && c < 127) fputc(c, ptylog); else fprintf(ptylog, "\\x%02x", c); } fputc('\n', ptylog); fflush(ptylog);
+}
+static void vt_reply(const char *s) { fprintf(stderr, "jetd: terminal reply %s\n", s + 1); if (pty_fd >= 0) { write(pty_fd, s, strlen(s)); ptylog_write('<', s, strlen(s)); } }
+
+static void vt_sgr(void) {
+    if (csi_n == 0) { csi_par[0] = 0; csi_n = 1; }
+    for (int i = 0; i < csi_n; i++) {
+        int p = csi_par[i];
+        if (p == 0) { cur_attr = 0; cur_fg = DEF_FG; cur_bg = DEF_BG; }
+        else if (p == 1) cur_attr |= A_BOLD; else if (p == 2) cur_attr |= A_DIM; else if (p == 4) cur_attr |= A_UL; else if (p == 7) cur_attr |= A_REV;
+        else if (p == 5) cur_attr |= A_BOLD;
+        else if (p == 22) cur_attr &= ~(A_BOLD | A_DIM); else if (p == 24) cur_attr &= ~A_UL; else if (p == 25) ; else if (p == 27) cur_attr &= ~A_REV;
+        else if (p >= 30 && p <= 37) cur_fg = ansi_pal[p - 30]; else if (p >= 90 && p <= 97) cur_fg = ansi_pal[p - 90 + 8];
+        else if (p >= 40 && p <= 47) cur_bg = ansi_pal[p - 40]; else if (p >= 100 && p <= 107) cur_bg = ansi_pal[p - 100 + 8];
+        else if (p == 39) cur_fg = DEF_FG; else if (p == 49) cur_bg = DEF_BG;
+        else if ((p == 38 || p == 48) && i + 1 < csi_n) {
+            uint32_t col = p == 38 ? cur_fg : cur_bg;
+            if (csi_par[i + 1] == 5 && i + 2 < csi_n) { col = pal256(csi_par[i + 2]); i += 2; }
+            else if (csi_par[i + 1] == 2 && i + 4 < csi_n) { col = px(csi_par[i + 2] & 255, csi_par[i + 3] & 255, csi_par[i + 4] & 255); i += 4; }
+            else break;
+            if (p == 38) cur_fg = col; else cur_bg = col;
+        }
     }
 }
 
+static void vt_mode(int set) {
+    for (int i = 0; i < csi_n; i++) {
+        int p = csi_par[i];
+        if (csi_priv) {
+            if (p == 7) autowrap = set;
+            else if (p == 25) cur_vis = set;
+            else if (p == 6) { origin_mode = set; cx = 0; cy = set ? st_top : 0; }
+            else if (p == 47 || p == 1047 || p == 1049) {
+                if (set && !alt_screen) { memcpy(vt_alt, vt, sizeof vt); alt_cx = cx; alt_cy = cy; alt_screen = 1; if (p == 1049) { s_cx = cx; s_cy = cy; s_fg = cur_fg; s_bg = cur_bg; s_attr = cur_attr; } vt_clear_all(); }
+                else if (!set && alt_screen) { memcpy(vt, vt_alt, sizeof vt); cx = alt_cx; cy = alt_cy; alt_screen = 0; if (p == 1049) { cur_fg = s_fg; cur_bg = s_bg; cur_attr = s_attr; } }
+            }
+            /* 1 (cursor keys), 12 (blink), 1000+ (mouse), 2004 (bracketed paste): ignored */
+        } else if (p == 4) insert_mode = set;
+    }
+}
+
+static void vt_csi(unsigned char f) {
+    int p0 = csi_n > 0 && csi_par[0] > 0 ? csi_par[0] : 1, p1 = csi_n > 1 && csi_par[1] > 0 ? csi_par[1] : 1;
+    int top = origin_mode ? st_top : 0, bot = origin_mode ? st_bot : vt_rows - 1;
+    wrap_pending = 0;
+    switch (f) {
+    case 'A': cy -= p0; if (cy < top) cy = top; break;
+    case 'B': cy += p0; if (cy > bot) cy = bot; break;
+    case 'C': case 'a': cx += p0; if (cx > vt_cols - 1) cx = vt_cols - 1; break;
+    case 'D': cx -= p0; if (cx < 0) cx = 0; break;
+    case 'E': cx = 0; cy += p0; if (cy > bot) cy = bot; break;
+    case 'F': cx = 0; cy -= p0; if (cy < top) cy = top; break;
+    case 'G': case '`': cx = p0 - 1; if (cx > vt_cols - 1) cx = vt_cols - 1; if (cx < 0) cx = 0; break;
+    case 'd': cy = top + p0 - 1; if (cy > bot) cy = bot; if (cy < top) cy = top; break;
+    case 'H': case 'f': cy = top + p0 - 1; cx = p1 - 1; if (cy > bot) cy = bot; if (cy < top) cy = top; if (cx > vt_cols - 1) cx = vt_cols - 1; break;
+    case 'J': {
+        int m = csi_n ? csi_par[0] : 0;
+        if (m == 0) { vt_fill(cy, cx, vt_cols - 1); for (int r = cy + 1; r < vt_rows; r++) vt_fill(r, 0, vt_cols - 1); }
+        else if (m == 1) { for (int r = 0; r < cy; r++) vt_fill(r, 0, vt_cols - 1); vt_fill(cy, 0, cx); }
+        else if (m == 2 || m == 3) { vt_clear_all(); if (m == 3) sb_n = 0; }
+        break; }
+    case 'K': { int m = csi_n ? csi_par[0] : 0; if (m == 0) vt_fill(cy, cx, vt_cols - 1); else if (m == 1) vt_fill(cy, 0, cx); else vt_fill(cy, 0, vt_cols - 1); break; }
+    case 'L': if (cy >= st_top && cy <= st_bot) vt_scroll_down(cy, st_bot, p0); break;
+    case 'M': if (cy >= st_top && cy <= st_bot) vt_scroll_up(cy, st_bot, p0, 0); break;
+    case 'P': { int n = p0 > vt_cols - cx ? vt_cols - cx : p0; memmove(&vt[cy][cx], &vt[cy][cx + n], (vt_cols - cx - n) * sizeof vt[0][0]); vt_fill(cy, vt_cols - n, vt_cols - 1); break; }
+    case '@': { int n = p0 > vt_cols - cx ? vt_cols - cx : p0; memmove(&vt[cy][cx + n], &vt[cy][cx], (vt_cols - cx - n) * sizeof vt[0][0]); vt_fill(cy, cx, cx + n - 1); break; }
+    case 'X': vt_fill(cy, cx, cx + p0 - 1); break;
+    case 'S': vt_scroll_up(st_top, st_bot, p0, 0); break;
+    case 'T': vt_scroll_down(st_top, st_bot, p0); break;
+    case 'Z': cx = ((cx - 1) / 8) * 8; if (cx < 0) cx = 0; break;
+    case 'r': { int t = csi_n > 0 && csi_par[0] > 0 ? csi_par[0] : 1, b = csi_n > 1 && csi_par[1] > 0 ? csi_par[1] : vt_rows;
+        if (b > vt_rows) b = vt_rows; if (t < b) { st_top = t - 1; st_bot = b - 1; cx = 0; cy = origin_mode ? st_top : 0; } break; }
+    case 's': s_cx = cx; s_cy = cy; s_fg = cur_fg; s_bg = cur_bg; s_attr = cur_attr; break;
+    case 'u': cx = s_cx; cy = s_cy; cur_fg = s_fg; cur_bg = s_bg; cur_attr = s_attr; break;
+    case 'm': vt_sgr(); break;
+    case 'h': vt_mode(1); break;
+    case 'l': vt_mode(0); break;
+    case 'n': if (csi_priv) break; if (csi_n && csi_par[0] == 6) { char r[32]; snprintf(r, sizeof r, "\033[%d;%dR", cy + 1, cx + 1); vt_reply(r); } else if (csi_n && csi_par[0] == 5) vt_reply("\033[0n"); break;
+    case 'c': if (!csi_priv && (!csi_n || csi_par[0] == 0)) vt_reply("\033[?6c"); break;   /* DA: "VT102" (linux u8); CSI ? n c is the console cursor shape, not a request */
+    default: break;                             /* g (tabs), q, t, > ... ignored */
+    }
+}
+
+static void vt_feed(unsigned char c) {
+    if (esc_state == 3) { if (c == 7 || c == 0x9c) esc_state = 0; else if (c == 27) esc_state = 5; return; }
+    if (esc_state == 5) { esc_state = c == '\\' ? 0 : 3; return; }   /* ESC \ ends an OSC/DCS */
+    if (c < 0x20 || c == 0x7f) {                                     /* controls act in every state */
+        switch (c) {
+        case 27: esc_state = 1; return;
+        case '\n': case 11: case 12: vt_linefeed(); wrap_pending = 0; return;
+        case '\r': cx = 0; wrap_pending = 0; return;
+        case '\b': if (cx) cx--; wrap_pending = 0; return;
+        case '\t': { int n = (cx + 8) & ~7; cx = n < vt_cols ? n : vt_cols - 1; return; }
+        case 14: dec_gfx = 1; return;    /* SO: G1 (line drawing) */
+        case 15: dec_gfx = 0; return;    /* SI: G0 */
+        case 24: case 26: esc_state = 0; return;
+        default: return;                 /* BEL, NUL, DEL ... */
+        }
+    }
+    switch (esc_state) {
+    case 1:
+        esc_state = 0;
+        switch (c) {
+        case '[': esc_state = 2; csi_n = 0; csi_priv = 0; csi_has = 0; memset(csi_par, 0, sizeof csi_par); break;
+        case ']': case 'P': case '^': case '_': esc_state = 3; break;
+        case '(': case ')': case '#': case '%': esc_state = 4; break;
+        case '7': s_cx = cx; s_cy = cy; s_fg = cur_fg; s_bg = cur_bg; s_attr = cur_attr; break;
+        case '8': cx = s_cx; cy = s_cy; cur_fg = s_fg; cur_bg = s_bg; cur_attr = s_attr; wrap_pending = 0; break;
+        case 'D': vt_linefeed(); break;
+        case 'E': cx = 0; vt_linefeed(); break;
+        case 'M': vt_reverse_lf(); break;
+        case 'c': vt_reset(); break;
+        case 'Z': vt_reply("\033[?6c"); break;
+        default: break;                  /* = > H N O ... ignored */
+        }
+        return;
+    case 4: esc_state = 0; return;       /* charset designation: the final byte */
+    case 2:
+        if (c >= '0' && c <= '9') { if (csi_n < 16) { csi_par[csi_n] = csi_par[csi_n] * 10 + (c - '0'); csi_has = 1; } return; }
+        if (c == ';') { if (csi_n < 15) csi_n++; csi_has = 1; return; }
+        if (c == '?') { csi_priv = 1; return; }
+        if (c >= 0x20 && c <= 0x3f) return;                        /* other parameter/intermediate bytes */
+        if (csi_has) csi_n++;
+        esc_state = 0; vt_csi(c); return;
+    default: break;
+    }
+    /* ground: UTF-8 -> one cell */
+    if (utf_rem) { if ((c & 0xc0) == 0x80) { utf_cp = (utf_cp << 6) | (c & 0x3f); if (--utf_rem == 0) vt_putc(utf_cp); return; } utf_rem = 0; }
+    if (c < 0x80) vt_putc(c);
+    else if ((c & 0xe0) == 0xc0) { utf_cp = c & 0x1f; utf_rem = 1; }
+    else if ((c & 0xf0) == 0xe0) { utf_cp = c & 0x0f; utf_rem = 2; }
+    else if ((c & 0xf8) == 0xf0) { utf_cp = c & 0x07; utf_rem = 3; }
+}
+
+/* the shell: bash (or sh) inside the Debian rootfs when jetd runs from the initramfs, TERM=linux */
 static void console_spawn(void) {
     if (pty_fd >= 0) return;
-    struct winsize ws = { .ws_row = rows(), .ws_col = TCOLS };
+    vt_geometry_for_font(log_font);
+    struct winsize ws = { .ws_row = vt_rows, .ws_col = vt_cols };
     pty_pid = forkpty(&pty_fd, NULL, NULL, &ws);
     if (pty_pid < 0 && errno == ENOENT) {   /* no devpts in this root: mount it and retry once */
         mount("devpts", "/dev/pts", "devpts", 0, "mode=620,ptmxmode=666");
         pty_pid = forkpty(&pty_fd, NULL, NULL, &ws);
     }
     if (pty_pid == 0) {
-        setenv("TERM", "dumb", 1); setenv("PS1", "jet$ ", 1); setenv("HOME", "/root", 0);
-        chdir("/");
+        const char *root = access("/mnt/data/rootfs/bin/sh", X_OK) == 0 ? "/mnt/data/rootfs" : NULL;
+        if (root && chroot(root) == 0) chdir("/");
+        setenv("TERM", "linux", 1); setenv("HOME", "/root", 1); setenv("LANG", "C.UTF-8", 1); setenv("PS1", "jet$ ", 0);
+        setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
+        chdir("/root");
+        execl("/bin/bash", "bash", "-l", (char *)0);
         execl("/bin/sh", "sh", "-i", (char *)0);
         _exit(127);
     }
     if (pty_pid < 0) { pty_fd = -1; return; }
     fcntl(pty_fd, F_SETFL, O_NONBLOCK);
-    memset(term, 0, sizeof term); term_row = term_col = term_total = term_scroll = 0;
+    if (!ptylog && getenv("JETD_PTYLOG")) ptylog = fopen(getenv("JETD_PTYLOG"), "a");
+    vt_reset(); sb_n = 0; sb_head = 0; term_scroll = 0;
 }
 
 static void console_write(const char *text) {
@@ -509,35 +711,46 @@ static void console_write(const char *text) {
     if (pty_fd < 0) return;
     char out[512]; int n = 0;
     for (; *text && n < (int)sizeof out - 1; text++) {
-        if (*text == '\\' && text[1]) { text++; out[n++] = *text == 'n' ? '\n' : *text == 't' ? '\t' : *text == 'r' ? '\r' : *text; }
-        else out[n++] = *text;
+        if (*text == '\\' && text[1]) { text++; out[n++] = *text == 'n' || *text == 'r' ? '\r' : *text == 't' ? '\t' : *text == 'e' ? 27 : *text; }   /* Enter is CR on a terminal */
+        else out[n++] = *text == '\n' ? '\r' : *text;
     }
-    write(pty_fd, out, n);
+    write(pty_fd, out, n); ptylog_write('<', out, n);
 }
 
 static void console_read(void) {
-    char buf[1024]; ssize_t r;
-    while ((r = read(pty_fd, buf, sizeof buf)) > 0) for (ssize_t i = 0; i < r; i++) term_put((unsigned char)buf[i]);
+    char buf[2048]; ssize_t r;
+    while ((r = read(pty_fd, buf, sizeof buf)) > 0) { ptylog_write('>', buf, r); for (ssize_t i = 0; i < r; i++) vt_feed((unsigned char)buf[i]); }
     if (r == 0 || (r < 0 && errno != EAGAIN && errno != EINTR)) {    /* shell exited */
         close(pty_fd); pty_fd = -1; waitpid(pty_pid, NULL, WNOHANG);
-        term_put('\n'); for (const char *s = "[shell exited]"; *s; s++) term_put(*s);
+        const char *m = "\r\n[shell exited: front hold > remote, or any key restarts]"; while (*m) vt_feed((unsigned char)*m++);
     }
     dirty = 1;
 }
 
+static uint32_t shade(uint32_t c, int attr) {
+    if (attr & A_BOLD) { unsigned r = (c >> 16) + 60, g = ((c >> 8) & 255) + 60, b = (c & 255) + 60; return px(r > 255 ? 255 : r, g > 255 ? 255 : g, b > 255 ? 255 : b); }
+    if (attr & A_DIM) return px((c >> 16) * 2 / 3, ((c >> 8) & 255) * 2 / 3, (c & 255) * 2 / 3);
+    return c;
+}
+static void draw_cell(int x, int y, const struct cell *c, int cursor) {
+    uint32_t f = shade(c->fg, c->attr), b = c->bg;
+    if ((c->attr & A_REV) ^ cursor) { uint32_t t = f; f = b; b = t; if (cursor && f == b) f = DEF_FG; }
+    if (b != DEF_BG) fill_rect(x, y, gw, gh, b);
+    if (c->ch != ' ') { fg = f; draw_glyph(x, y, c->ch); }
+    if (c->attr & A_UL) fill_rect(x, y + gh - 1, gw, 1, f);
+}
+
 static void render_console(void) {
-    clear_screen(); fg = px(220, 220, 220);
-    if (pty_fd < 0 && term_total == 0) { fg = px(255, 80, 80); draw_row_centred(3, "no shell: pty unavailable"); draw_row_centred(4, "(is devpts mounted?)"); return; }
-    int nrows = rows(), avail = term_total + 1; if (avail > TROWS) avail = TROWS;
-    if (term_scroll > avail - nrows) term_scroll = avail - nrows; if (term_scroll < 0) term_scroll = 0;
-    int last = term_row - term_scroll;                 /* ring index of the bottom row shown */
-    for (int i = nrows - 1; i >= 0; i--, last--) {
-        if (nrows - 1 - i >= avail) break;
-        const char *l = term[(last % TROWS + TROWS) % TROWS];
-        if ((int)strlen(l) <= hoff) continue;
-        char line[TCOLS + 1]; snprintf(line, sizeof line, "%.*s", (int)cols(), l + hoff); draw_row(i, line);
+    clear_screen();
+    vt_geometry_for_font(fsel);                       /* the font the render selected */
+    if (pty_fd < 0 && sb_n == 0 && cx == 0 && cy == 0) { fg = px(255, 80, 80); draw_row_centred(3, "no shell: pty unavailable"); draw_row_centred(4, "(is devpts mounted?)"); return; }
+    if (term_scroll > sb_n) term_scroll = sb_n; if (term_scroll < 0) term_scroll = 0;
+    for (int r = 0; r < vt_rows; r++) {
+        int src = r - term_scroll;                      /* < 0: a scrollback line */
+        const struct cell *line = src >= 0 ? vt[src] : sb[((sb_head + src) % SB_ROWS + SB_ROWS) % SB_ROWS];
+        for (int c = 0; c < vt_cols; c++) draw_cell(c * gw, r * gh, &line[c], src >= 0 && cur_vis && pty_fd >= 0 && src == cy && c == (wrap_pending ? cx : cx));
     }
-    if (term_scroll) { fg = px(255, 200, 0); char s[32]; snprintf(s, sizeof s, "^%d", term_scroll); draw_text(W - text_width(s) - 2, 0, s); }
+    if (term_scroll) { fg = px(255, 200, 0); char s[32]; snprintf(s, sizeof s, "^%d", term_scroll); fill_rect(W - text_width(s) - 4, 0, text_width(s) + 4, gh, DEF_BG); draw_text(W - text_width(s) - 2, 0, s); }
 }
 
 enum { S_MENU, S_CAL, S_CAL_DONE, S_INFO, S_GLANCE, S_GLANCE_DONE, S_BRIGHT, S_POWER };   /* setup screens (used by glance_poll too) */
@@ -832,12 +1045,10 @@ static void dispatch_key(unsigned code) {
         else if (code == BTN_REAR_CODE) { if (log_prev || pstore_lines) log_prev = !log_prev; log_scroll = 0; }
         dirty = 1;
         break;
-    case M_CONSOLE:
+    case M_CONSOLE:                        /* pad swipes page the scrollback; the keyboard talks to the shell */
         if (code == KEY_UP) term_scroll += 3;
         else if (code == KEY_DOWN) term_scroll -= 3;
-        else if (code == KEY_LEFT) hoff = hoff > 10 ? hoff - 10 : 0;
-        else if (code == KEY_RIGHT) { hoff += 10; if (hoff > TCOLS - (int)cols()) hoff = TCOLS - (int)cols(); if (hoff < 0) hoff = 0; }
-        else if (code == BTN_FRONT_CODE) log_font = !log_font;
+        else if (code == BTN_FRONT_CODE) { log_font = !log_font; vt_geometry_for_font(log_font); }
         else if (code == BTN_REAR_CODE && pty_fd >= 0) write(pty_fd, "\003", 1);
         dirty = 1;
         break;
@@ -892,11 +1103,27 @@ static const char *kmap[128] = {   /* US layout: [code] = "plain shifted" */
     [KEY_Q] = "qQ", [KEY_W] = "wW", [KEY_E] = "eE", [KEY_R] = "rR", [KEY_T] = "tT", [KEY_Y] = "yY", [KEY_U] = "uU", [KEY_I] = "iI", [KEY_O] = "oO", [KEY_P] = "pP",
     [KEY_A] = "aA", [KEY_S] = "sS", [KEY_D] = "dD", [KEY_F] = "fF", [KEY_G] = "gG", [KEY_H] = "hH", [KEY_J] = "jJ", [KEY_K] = "kK", [KEY_L] = "lL",
     [KEY_Z] = "zZ", [KEY_X] = "xX", [KEY_C] = "cC", [KEY_V] = "vV", [KEY_B] = "bB", [KEY_N] = "nN", [KEY_M] = "mM",
+    [KEY_KPASTERISK] = "**", [KEY_KPMINUS] = "--", [KEY_KPPLUS] = "++", [KEY_KPDOT] = "..", [KEY_KPSLASH] = "//",
+    [KEY_KP0] = "00", [KEY_KP1] = "11", [KEY_KP2] = "22", [KEY_KP3] = "33", [KEY_KP4] = "44", [KEY_KP5] = "55", [KEY_KP6] = "66", [KEY_KP7] = "77", [KEY_KP8] = "88", [KEY_KP9] = "99",
 };
+/* keys that are escape sequences (what the Linux console sends: TERM=linux's terminfo) */
+static const char *kseq(unsigned code) {
+    switch (code) {
+    case KEY_UP: return "\033[A"; case KEY_DOWN: return "\033[B"; case KEY_RIGHT: return "\033[C"; case KEY_LEFT: return "\033[D";
+    case KEY_HOME: return "\033[1~"; case KEY_INSERT: return "\033[2~"; case KEY_DELETE: return "\033[3~"; case KEY_END: return "\033[4~";
+    case KEY_PAGEUP: return "\033[5~"; case KEY_PAGEDOWN: return "\033[6~";
+    case KEY_F1: return "\033[[A"; case KEY_F2: return "\033[[B"; case KEY_F3: return "\033[[C"; case KEY_F4: return "\033[[D"; case KEY_F5: return "\033[[E";
+    case KEY_F6: return "\033[17~"; case KEY_F7: return "\033[18~"; case KEY_F8: return "\033[19~"; case KEY_F9: return "\033[20~"; case KEY_F10: return "\033[21~";
+    case KEY_F11: return "\033[23~"; case KEY_F12: return "\033[24~";
+    default: return NULL;
+    }
+}
 
 /* A key from a keyboard-class device. Returns 1 when consumed here (modifiers, the shell toggle,
  * and every key while the shell is showing); 0 hands it to the ordinary key path, so in remote
- * mode a client that asked for raw keys sees keyboard keys as `k <code> <value>` like any other. */
+ * mode a client that asked for raw keys sees keyboard keys as `k <code> <value>` like any other.
+ * In the shell: Alt prefixes ESC (Meta), Ctrl makes control codes (Ctrl+Space = NUL, Ctrl+/ = ^_),
+ * Shift+PgUp/PgDn page the scrollback, Enter is CR, Backspace is DEL. */
 static int kbd_key(unsigned code, int value) {
     int mbit = code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT ? 1 : code == KEY_LEFTCTRL || code == KEY_RIGHTCTRL ? 2 : code == KEY_LEFTALT || code == KEY_RIGHTALT ? 4 : 0;
     if (mbit) { if (value) kbd_mods |= mbit; else kbd_mods &= ~mbit; return 1; }
@@ -906,22 +1133,34 @@ static int kbd_key(unsigned code, int value) {
     }
     if (mode != M_CONSOLE) return 0;
     if (value == 0) return 1;                                          /* presses and repeats type; releases do not */
-    char c;
-    switch (code) {
-    case KEY_ENTER: case KEY_KPENTER: c = '\n'; break;
-    case KEY_BACKSPACE: c = 0x7f; break;
-    case KEY_TAB: c = '\t'; break;
-    case KEY_ESC: c = 27; break;
-    case KEY_UP: case KEY_DOWN: case KEY_LEFT: case KEY_RIGHT: dispatch_key(code); return 1;          /* scroll, like the pad */
-    case KEY_PAGEUP: dispatch_key(KEY_UP); return 1;
-    case KEY_PAGEDOWN: dispatch_key(KEY_DOWN); return 1;
-    default:
-        if (code >= 128 || !kmap[code]) return 1;
-        c = kmap[code][kbd_mods & 1];
-        if ((kbd_mods & 2) && ((c | 0x20) >= 'a' && (c | 0x20) <= 'z')) c = (c | 0x20) - 'a' + 1;   /* Ctrl+C = 3 ... */
+    if ((kbd_mods & 1) && (code == KEY_PAGEUP || code == KEY_PAGEDOWN)) {   /* scrollback paging */
+        term_scroll += code == KEY_PAGEUP ? vt_rows - 1 : -(vt_rows - 1); if (term_scroll < 0) term_scroll = 0; dirty = 1; return 1;
+    }
+    char out[12]; int n = 0;
+    if (kbd_mods & 4) out[n++] = 27;                                   /* Alt = Meta: ESC prefix */
+    const char *seq = kseq(code);
+    if (seq) { while (*seq) out[n++] = *seq++; }
+    else {
+        char c;
+        switch (code) {
+        case KEY_ENTER: case KEY_KPENTER: c = '\r'; break;
+        case KEY_BACKSPACE: c = 0x7f; break;
+        case KEY_TAB: if (kbd_mods & 1) { out[n++] = 27; out[n++] = '['; c = 'Z'; } else c = '\t'; break;
+        case KEY_ESC: c = 27; break;
+        default:
+            if (code >= 128 || !kmap[code]) return 1;
+            c = kmap[code][kbd_mods & 1];
+            if (kbd_mods & 2) {                                        /* control codes */
+                if ((c | 0x20) >= 'a' && (c | 0x20) <= 'z') c = (c | 0x20) - 'a' + 1;
+                else if (c == ' ' || c == '2' || c == '@') c = 0;
+                else if (c == '[' || c == '3') c = 27; else if (c == '\\' || c == '4') c = 28; else if (c == ']' || c == '5') c = 29;
+                else if (c == '^' || c == '6') c = 30; else if (c == '_' || c == '-' || c == '/' || c == '7') c = 31; else if (c == '?' || c == '8') c = 0x7f;
+            }
+        }
+        out[n++] = c;
     }
     if (pty_fd < 0) console_spawn();
-    if (pty_fd >= 0) write(pty_fd, &c, 1);
+    if (pty_fd >= 0) { write(pty_fd, out, n); ptylog_write('<', out, n); }
     term_scroll = 0; dirty = 1;
     return 1;
 }
@@ -1298,7 +1537,15 @@ static void handle_line(char *l) {
     }
 }
 
+/* a crash leaves its address in the log (map with addr2line on an unstripped build) */
+static void fatal_signal(int sig, siginfo_t *si, void *ctx) {
+    ucontext_t *uc = ctx; char m[160];
+    int n = snprintf(m, sizeof m, "jetd: fatal signal %d at addr %p pc %#lx lr %#lx\n", sig, si->si_addr, (unsigned long)uc->uc_mcontext.arm_pc, (unsigned long)uc->uc_mcontext.arm_lr);
+    write(2, m, n); signal(sig, SIG_DFL); raise(sig);
+}
+
 int main(int argc, char **argv) {
+    { struct sigaction sa = { .sa_sigaction = fatal_signal, .sa_flags = SA_SIGINFO | SA_RESETHAND }; sigaction(SIGSEGV, &sa, NULL); sigaction(SIGBUS, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGABRT, &sa, NULL); sigaction(SIGFPE, &sa, NULL); }
     if (argc < 3) { fprintf(stderr, "usage: jetd <host> <port> [scale]\n"); return 1; }
     snprintf(hub_hosts, sizeof hub_hosts, "%s", argv[1]); hub_port = argv[2];
     if (argc > 3) boot_hold_s = atoi(argv[3]);           /* seconds of boot log before remote takes over */
@@ -1382,8 +1629,8 @@ int main(int argc, char **argv) {
         if (ikmsg >= 0 && pf[ikmsg].revents) kmsg_read();
         PROF(2);
         if (ilisten >= 0 && pf[ilisten].revents) accept_hub();
-        if (inot >= 0 && pf[inot].revents) input_hotplug();
-        for (int i = 0; i < nin; i++) if (pf[iin + i].revents) {
+        int nin_polled = nin;
+        for (int i = 0; i < nin_polled; i++) if (pf[iin + i].revents) {
             struct input_event ev[16];
             ssize_t r = read(infd[i], ev, sizeof ev);
             if (r < 0 && errno != EAGAIN && errno != EINTR) { input_remove(i); break; }   /* device gone (BT keyboard off): table changed, re-poll */
@@ -1395,6 +1642,7 @@ int main(int argc, char **argv) {
             }
             if (any) dispatch_rel(dx, dy);
         }
+        if (inot >= 0 && pf[inot].revents) input_hotplug();   /* after the reads: new devices join the next poll */
         PROF(5);
         check_holds(); glance_poll(); imu_poll(); power_poll();
         PROF(6);
