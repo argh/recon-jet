@@ -5,7 +5,9 @@
  * `aplay -D hw:0,0` child over a pipe kept one page deep, so the blocking write paces the mixer
  * and little audio sits ahead of the speaker (~20 ms pipe + aplay's 40 ms buffer). Volume and
  * separation follow i_sdlsound.c's arithmetic. aplay dying (hw:0,0 busy with jet-app's TTS, say)
- * silences Doom until the next retry, two seconds later. No music: the stub module is silent. */
+ * silences Doom until the next retry, two seconds later. Music is Chocolate Doom's OPL player
+ * (i_oplmusic.c on the emulated chip in opl3.c, opl_jet.c as its driver), rendered into the same
+ * slices here, so the mixer thread is the music clock: it keeps mixing even with aplay gone. */
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -23,6 +25,7 @@
 #include "m_misc.h"
 #include "w_wad.h"
 #include "z_zone.h"
+#include "opl_jet.h"
 
 #define RATE 48000
 #define SLICE 480                       /* frames per mix: 10 ms */
@@ -39,7 +42,7 @@ static volatile int running;
 static int play_fd = -1;
 static pid_t play_pid = -1;
 static boolean use_sfx_prefix;
-static int16_t out[SLICE * 2];
+static int16_t out[SLICE * 2], music[SLICE * 2];
 static int32_t acc[SLICE * 2];
 
 /* config.cfg knobs i_sound.c binds for the SDL module; unused here */
@@ -92,19 +95,20 @@ static void mix_slice(void) {
         }
     }
     pthread_mutex_unlock(&mx);
+    if (OPL_Jet_Render(music, SLICE)) for (int i = 0; i < SLICE * 2; i++) acc[i] += music[i];
     for (int i = 0; i < SLICE * 2; i++) { int32_t v = acc[i]; out[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : v; }
 }
 
 static void *mixer_main(void *arg) {
     int64_t next_try = 0;
     while (running) {
-        if (play_fd < 0) {
-            if (now_ms() < next_try) { usleep(50000); continue; }
+        if (play_fd < 0 && now_ms() >= next_try) {
             next_try = now_ms() + RETRY_MS;
-            if (player_open() < 0) { perror("jet: aplay"); continue; }
-            fprintf(stderr, "jet: sound to aplay (pid %d)\n", (int)play_pid);
+            if (player_open() < 0) perror("jet: aplay");
+            else fprintf(stderr, "jet: sound to aplay (pid %d)\n", (int)play_pid);
         }
         mix_slice();
+        if (play_fd < 0) { usleep(SLICE * 1000000 / RATE); continue; }     /* no speaker: still keep time for the music */
         const char *p = (const char *)out; size_t left = sizeof out;
         while (left) {
             ssize_t n = write(play_fd, p, left);
@@ -203,16 +207,3 @@ sound_module_t DG_sound_module = {
     I_Jet_StartSound, I_Jet_StopSound, I_Jet_SoundIsPlaying, I_Jet_PrecacheSounds,
 };
 
-/* ---- music: none ---------------------------------------------------------------------- */
-static boolean M_Init(void) { return false; }
-static void M_Nop(void) {}
-static void M_Vol(int v) {}
-static void *M_Register(void *d, int n) { return NULL; }
-static void M_Unregister(void *h) {}
-static void M_Play(void *h, boolean loop) {}
-static boolean M_Playing(void) { return false; }
-
-static snddevice_t no_music_devices[] = { SNDDEVICE_NONE };
-music_module_t DG_music_module = {
-    no_music_devices, 1, M_Init, M_Nop, M_Vol, M_Nop, M_Nop, M_Register, M_Unregister, M_Play, M_Nop, M_Playing, NULL,
-};

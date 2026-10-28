@@ -4,16 +4,16 @@
 platform API) with `doomgeneric_jet.c` as the platform: Doom's 320x200 8-bit frame is palette-
 mapped straight into `/dev/fb0` and pushed to the Kopin panel with `OMAPFB_UPDATE_WINDOW`; keys
 come from jetd's socket (`k <evdev code> <1|0>`), so the pod buttons, the touchpad swipes and a
-Bluetooth keyboard all work; sound effects are mixed in software and played through `aplay`. One
-static musl binary (~490 KB), no SDL, no music.
+Bluetooth keyboard all work; sound effects and the OPL (Adlib) music are mixed in software and
+played through `aplay`. One static musl binary (~530 KB), no SDL.
 
 ## Getting it running
 
 The repo has the port, not the game data: Doom needs an IWAD, and none is checked in (`*.wad` is
 gitignored). Two steps on the Mac, with the Jet on the network as `jet.local`:
 
-1. Build: `device/doom/build.sh` (needs `zig` at `/opt/homebrew/bin/zig` and `git`; it clones a
-   pinned doomgeneric into `refs/` and leaves `device/doom/doom`).
+1. Build: `device/doom/build.sh` (needs `zig` at `/opt/homebrew/bin/zig` and `git`; it clones pinned
+   doomgeneric and Chocolate Doom checkouts into `refs/` and leaves `device/doom/doom`).
 2. Install: `device/doom/deploy.sh` copies the binary to `/usr/local/bin/doom` and the IWAD to
    `/usr/local/share/doom/` on the Jet. With no argument it uses the free shareware episode,
    `DOOM1.WAD`: from `~/Downloads` or `work/` when one is there, otherwise it fetches Debian's
@@ -27,7 +27,7 @@ own install (`device/jet-app/deploy/install.sh`) is independent of this. A rootf
 (`kernel/rootfs/install.sh`) carries the binary along when it is built, never the IWAD: run
 `deploy.sh` again.
 
-    device/doom/build.sh                 # fetches doomgeneric (pinned) into refs/, builds ./doom with zig cc
+    device/doom/build.sh                 # fetches doomgeneric + Chocolate Doom (pinned) into refs/, builds ./doom with zig cc
     device/doom/deploy.sh [DOOM1.WAD]    # -> /usr/local/bin/doom + /usr/local/share/doom/ on the Jet's rootfs
 
 Run it from the switcher (**Doom**, a jet-app mode) or over ssh for debugging:
@@ -52,10 +52,19 @@ mixer thread resamples the playing channels (8-bit mono lumps, mostly 11025 Hz; 
 point) into 10 ms slices of 48 kHz stereo S16, the only format the speaker amp takes (docs/audio.md),
 and writes them to an `aplay -D hw:0,0` child through a one-page pipe, so about 60 ms of audio sits
 ahead of the speaker (pipe + aplay's 40 ms buffer). Volume/separation arithmetic is i_sdlsound.c's.
-`sfx_volume` in Doom's own menu applies as usual; `-nosound` / `-nosfx` turn it off. If `hw:0,0` is
-busy (jet-app speaking) aplay dies and Doom is silent until the retry two seconds later; an
-`underrun!!!` line in the log means the mixer fell behind. No music: `DG_music_module` is a stub
-(Doom's MUS needs an OPL or GUS-patch synth; a job for later).
+If `hw:0,0` is busy (jet-app speaking) aplay dies and Doom is silent until the retry two seconds
+later; an `underrun!!!` line in the log means the mixer fell behind.
+
+Music is Chocolate Doom's OPL player, the sound of a 1993 Adlib / Sound Blaster: `i_oplmusic.c`
+plays the MUS lumps on an emulated OPL3 (`opl3.c`, Nuked) using the GENMIDI instrument lump that
+every Doom WAD carries, so nothing beyond the WAD is needed. Those files are compiled from a pinned
+Chocolate Doom checkout (`refs/chocolate-doom`, 2.3.0); `opl_jet.c` is the driver in place of
+`opl_sdl.c`: the mixer thread clocks the chip, rendering each slice up to the player's next timed
+callback. `compat/` holds the few SDL headers those files include (mutex/cond over pthreads,
+byte swaps). The chip emulation costs ~10 % of a core; Doom runs at ~24 % with music, ~12 % without.
+Doom's own menu sets `sfx_volume` and `music_volume`; `-nosound`, `-nosfx`, `-nomusic` turn
+things off. Doom's MIDI route (SDL_mixer plus a SoundFont or GUS patches) was not taken: no SDL in
+this build, and the instrument data would be another file to ship.
 
 ## Options
 
