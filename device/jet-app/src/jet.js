@@ -1,5 +1,6 @@
 // Jet: the main module. Referencing each subsystem here is what instantiates it; the public
-// modes are listed in the order the switcher shows them (Log first: it is also the boot view).
+// modes are listed in the order the switcher shows them, from the everyday ones down to the
+// plumbing (Assistant, Describe, Doom, Shell, Log, System); the boot view is looked up by id.
 // Once every module has started (and every mode has registered), `main()` enters the start mode.
 import { AppModule, Schema } from '@versionzero/module-manager';
 import { DeviceLink } from './modules/device-link/index.js';
@@ -44,7 +45,7 @@ export class Jet extends AppModule {
       .property('logLevel', s('string').default('info').values(['debug', 'info', 'warn', 'error']).meta('description', 'log threshold'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer (read before configuration)'))
       .property('tickRate', s('number').default(60000).meta('hidden', true)),
-    register: [DeviceLink, Surface, Input, Power, Sensors, Ui, Modes, Llm, Voice, LogMode, DemoMode, SystemMode, AssistantMode, ShellMode, DoomMode],
+    register: [DeviceLink, Surface, Input, Power, Sensors, Ui, Modes, Llm, Voice, AssistantMode, DemoMode, DoomMode, ShellMode, LogMode, SystemMode],
   };
   deviceLink; surface; input; power; sensors; ui; modes; llm; voice; logMode; demoMode; systemMode; assistantMode; shellMode; doomMode; logLevel; deviceConfig;
 

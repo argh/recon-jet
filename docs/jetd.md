@@ -124,7 +124,7 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
 
 ## Live testing (without a reboot or reflash)
 
-1. Copy the new binary **first**: `scp agent/jetd root@jet.local:/android-data/jetd-new`
+1. Copy the new binary **first**: `scp -O agent/jetd root@jet.local:/android-data/jetd-new`
    (`pkill jetd` blanks the display daemon, so never kill before the copy is in place; the chroot has
    no `killall`). A second jetd started while the first still lives comes up without the port: kill
    the old one first and check `pgrep -a jetd` shows one.

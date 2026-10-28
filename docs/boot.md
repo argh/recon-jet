@@ -90,13 +90,13 @@ counting. Killing jetd and rebooting before the 60 s mark counts as a failed boo
 ## Flashing procedure (from mainline)
 
 ```
-scp work/mainline/boot-emmc.img root@jet.local:/tmp/
+scp -O work/mainline/boot-emmc.img root@jet.local:/tmp/
 ssh root@jet.local 'dd if=/tmp/boot-emmc.img of=/dev/mmcblk1p8 bs=1M conv=fsync && sha256sum /tmp/boot-emmc.img && dd if=/dev/mmcblk1p8 bs=1M count=8 | head -c $(stat -c %s /tmp/boot-emmc.img) | sha256sum'
 ssh root@jet.local reboot2
 ```
 The two hashes must match. `mkboot.sh` warns if the image exceeds 8,388,608 bytes. Current
 images are ~7.45 MB with stripped tools and an xz initramfs (`--check=crc32`, required by
-CONFIG_RD_XZ). The chroot has no sftp server; push files with `scp` or `ssh 'cat > f' < f`.
+CONFIG_RD_XZ). The chroot has no sftp server, so a default `scp` fails with "sftp-server: No such file": use `scp -O` (legacy protocol) or `ssh 'cat > f' < f`.
 
 ## RAM boots (new drivers are developed this way)
 

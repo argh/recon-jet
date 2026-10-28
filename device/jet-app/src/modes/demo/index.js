@@ -28,7 +28,7 @@ export class DemoMode {
   };
   question; jpegQuality; modes; ui; surface; deviceLink; power; sensors; voice; logger;
 
-  id = 'demo'; label = 'Demo';
+  id = 'demo'; label = 'Describe';
   /** @type {'idle'|'looking'|'answering'} */ state = 'idle';
   answer = ''; error = null;
   #look = 0;   // the current look's id; a late answer from an older one is ignored
