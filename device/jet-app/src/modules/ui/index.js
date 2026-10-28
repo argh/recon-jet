@@ -23,6 +23,7 @@ export class Ui {
   /** @type {{text: string, colour: number}|null} the system strip along the top, over any screen */ strip = null;
   #pending = false;
   #stripTimer = null;
+  #suspended = false;
   renders = 0;   // flushed frames (diagnostics, tests)
 
   async start() {
@@ -35,8 +36,17 @@ export class Ui {
   }
   async stop() { clearTimeout(this.#stripTimer); }
 
-  /** jetd is in remote mode, connected, and we hold the pixels: the only time anything is drawn. */
+  /** jetd is in remote mode, connected, we hold the pixels and nothing else owns the panel: the only time anything is drawn. */
   get active() { return this.surface.active; }
+  /** A native program (a mode's child, e.g. doom) is drawing into fb0 itself: paint nothing until resumed. */
+  get suspended() { return this.#suspended; }
+  suspend(on) {
+    if (this.#suspended === !!on) return;
+    this.#suspended = !!on;
+    if (!on) this.surface.invalidate();   // its pixels are on the glass: the whole screen must be rewritten
+    this.#setActive();
+    this.requestRender();
+  }
 
   /**
    * The 10 px status strip along the top (listening/looking indicator, transient notices).
@@ -49,7 +59,7 @@ export class Ui {
     this.requestRender();
   }
 
-  #setActive() { this.surface.active = this.deviceLink.connected && this.deviceLink.mode === 'remote' && this.surface.ready; }
+  #setActive() { this.surface.active = !this.#suspended && this.deviceLink.connected && this.deviceLink.mode === 'remote' && this.surface.ready; }
 
   /** Coalesce renders to one per tick. */
   requestRender() {

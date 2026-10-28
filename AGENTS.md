@@ -21,6 +21,8 @@ is private and not in the repo. Keep docs to known truths and explicit open ques
 - `agent/`    `jetd.c`: the on-device daemon (framebuffer text UI, modes, touchpad/buttons,
               camera snapshots, glance sensor, log viewer, setup menu). Static musl build via
               zig (`build.sh`). Line protocol over TCP 7777, documented at the top of jetd.c.
+- `device/doom/` Doom: doomgeneric's engine (fetched to `refs/doomgeneric`, pinned) + `doomgeneric_jet.c`
+              (fb0 + panel update, keys from jetd); `build.sh`, `deploy.sh` (binary + IWAD into the rootfs).
 - `host/`     Mac-side: `jet-hub.js` (dial the Jet, HTTP control API, snapshots, look),
               `vision.js` (image -> local VLM), `look.sh`, `listen.sh`, `say.sh`, `converse.sh`
               (voice loop via llama-swap: qwen3-asr, an LLM, kokoro TTS).

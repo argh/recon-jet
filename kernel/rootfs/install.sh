@@ -11,7 +11,7 @@ SSH="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel
 [ -f work/rootfs-debian.tar ] || { echo "run kernel/rootfs/build.sh first"; exit 1; }
 [ -f work/jet-app.tgz ] || sh device/jet-app/deploy/bundle.sh
 echo "copying rootfs ($(du -h work/rootfs-debian.tar | cut -f1)) and jet-app bundle"
-TOOLS=""; for t in tools/reboot2/reboot2 tools/regdump/regdump; do [ -x $t ] && TOOLS="$TOOLS $t"; done
+TOOLS=""; for t in tools/reboot2/reboot2 tools/regdump/regdump device/doom/doom; do [ -x $t ] && TOOLS="$TOOLS $t"; done
 scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR work/rootfs-debian.tar work/jet-app.tgz $TOOLS "root@$HOST:/android-data/"
 $SSH 'set -e; D=/android-data/debian
   rm -rf $D; mkdir -p $D; tar -C $D -xf /android-data/rootfs-debian.tar; rm /android-data/rootfs-debian.tar
@@ -23,6 +23,7 @@ $SSH 'set -e; D=/android-data/debian
   # repo-built static tools that ssh sessions use (reboot2: reboot reasons; regdump: /dev/mem)
   [ -f /android-data/reboot2 ] && mv /android-data/reboot2 $D/usr/local/bin/reboot2 && chmod 755 $D/usr/local/bin/reboot2
   [ -f /android-data/regdump ] && mv /android-data/regdump $D/usr/local/bin/regdump && chmod 755 $D/usr/local/bin/regdump
+  [ -f /android-data/doom ] && mv /android-data/doom $D/usr/local/bin/doom && chmod 755 $D/usr/local/bin/doom   # the IWAD: device/doom/deploy.sh
   # the bundle already carries node_modules (pure JS, built on the host; the private registry is
   # not reachable from the Jet), so no npm on the device: just prove the runtime works
   chroot $D /usr/bin/node -e "console.log(\"node\", process.version, \"ok\")"

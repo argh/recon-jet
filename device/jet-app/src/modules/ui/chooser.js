@@ -4,19 +4,23 @@
 // plus a render; the owner routes gestures to `move()` and reads `item`.
 import { C, MARGIN, hint } from './style.js';
 
-/** @typedef {{label: string, id?: string, [k: string]: any}} ChooserItem */
+/** @typedef {{label: string, id?: string, disabled?: boolean, [k: string]: any}} ChooserItem  disabled: shown faint, never selected */
 
 export class Chooser {
   /** @param {{title: string, items: ChooserItem[], hint?: string, cols?: number}} spec cols: box width in big-font cells (22 = jetd's chooser) */
   constructor({ title, items, hint: hintText = 'swipe: move   front: pick   rear: back', cols = 22 }) {
     this.title = title; this.items = items; this.hint = hintText; this.cols = cols;
     this.selected = 0;
+    if (items[0]?.disabled) this.move(1);
   }
   get item() { return this.items[this.selected]; }
-  /** Move the selection by `d` rows, wrapping. */
-  move(d) { const n = this.items.length; if (n) this.selected = (this.selected + d + n) % n; }
-  /** Select the item with this id (no-op when absent). */
-  select(id) { const i = this.items.findIndex((it) => it.id === id); if (i >= 0) this.selected = i; }
+  /** Move the selection by `d` rows, wrapping and skipping disabled items. */
+  move(d) {
+    const n = this.items.length;
+    for (let i = this.selected, k = 0; n && k < n; k++) { i = (i + d + n) % n; if (!this.items[i].disabled) { this.selected = i; return; } }
+  }
+  /** Select the item with this id (no-op when absent or disabled). */
+  select(id) { const i = this.items.findIndex((it) => it.id === id); if (i >= 0 && !this.items[i].disabled) this.selected = i; }
 
   /** The box: left-aligned, vertically centred. */
   box(s) {
@@ -34,7 +38,7 @@ export class Chooser {
       const y = b.y + pad + (i + 1) * rowH, on = i === this.selected;
       if (on) s.fillRect(b.x, y, b.w, rowH, C.ok);
       const label = typeof item.label === 'function' ? item.label() : item.label;
-      s.text(b.x + main.width, y, `${on ? '> ' : '  '}${label}`, { font: main, colour: on ? C.black : C.dim, maxWidth: b.w - main.width });
+      s.text(b.x + main.width, y, `${on ? '> ' : '  '}${label}`, { font: main, colour: on ? C.black : item.disabled ? C.faint : C.dim, maxWidth: b.w - main.width });
     });
     if (this.hint) hint(s, this.hint);
   }

@@ -16,6 +16,7 @@ import { DemoMode } from './modes/demo/index.js';
 import { SystemMode } from './modes/system/index.js';
 import { AssistantMode } from './modes/assistant/index.js';
 import { ShellMode } from './modes/shell/index.js';
+import { DoomMode } from './modes/doom/index.js';
 
 const s = Schema.create;
 
@@ -39,12 +40,13 @@ export class Jet extends AppModule {
       .property('systemMode', s('SystemMode').meta('internal', true))
       .property('assistantMode', s('AssistantMode').meta('internal', true))
       .property('shellMode', s('ShellMode').meta('internal', true))
+      .property('doomMode', s('DoomMode').meta('internal', true))
       .property('logLevel', s('string').default('info').values(['debug', 'info', 'warn', 'error']).meta('description', 'log threshold'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer (read before configuration)'))
       .property('tickRate', s('number').default(60000).meta('hidden', true)),
-    register: [DeviceLink, Surface, Input, Power, Sensors, Ui, Modes, Llm, Voice, LogMode, DemoMode, SystemMode, AssistantMode, ShellMode],
+    register: [DeviceLink, Surface, Input, Power, Sensors, Ui, Modes, Llm, Voice, LogMode, DemoMode, SystemMode, AssistantMode, ShellMode, DoomMode],
   };
-  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; logMode; demoMode; systemMode; assistantMode; shellMode; logLevel; deviceConfig;
+  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; logMode; demoMode; systemMode; assistantMode; shellMode; doomMode; logLevel; deviceConfig;
 
   async init() {
     await super.init();

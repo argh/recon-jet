@@ -151,6 +151,10 @@ socket; new functionality is a Node module, not a change to the C daemon.
   order; the last used one is persisted unless the mode is `transient`. Private modes register
   from `device/jet-app/personal/` without touching the public tree. The gesture vocabulary and
   visual grammar are fixed by `interaction-design.md` so modes stay consistent.
+- **A native program can own the panel:** a mode spawns it, calls `ui.suspend(true)` and swallows
+  gestures; the program talks to jetd itself (`K 1`, `E 1`, keys as `k` lines, frames into fb0 plus
+  the update ioctl). Doom (`device/doom`) is the worked example, with freeze/resume signals so the
+  switcher can still be used over it.
 - **Configuration and personalisation:** per-device settings (inference server base URL, model
   names, hub hosts) live in `/android-data/mainline/jet-app.json` and flag files, never in the
   repo; the host tools take the same values from environment variables. The goal is that another

@@ -30,6 +30,7 @@ const s = Schema.create;
  * @property {() => void} [tick]  once per `tickMs` while current
  * @property {() => Promise<boolean>|boolean} [firstUse]  true: start here, as a wizard
  * @property {boolean} [transient]  never persisted as the start mode (e.g. jetd's shell)
+ * @property {() => string|null} [unavailable]  why the mode cannot be entered right now (e.g. its data is missing): listed disabled in the switcher with that reason, switchTo refuses
  */
 
 export class Modes extends EventEmitter {
@@ -86,11 +87,13 @@ export class Modes extends EventEmitter {
 
   /**
    * Make `id` the current mode: the old one leaves, the new one enters, the choice is persisted.
-   * @returns {boolean} false when no such mode
+   * @returns {boolean} false when no such mode, or it is unavailable
    */
   switchTo(id, { wizard = false, persist = true } = {}) {
     const mode = this.get(id);
     if (!mode) return false;
+    const why = mode.unavailable?.();
+    if (why) { this.logger?.info({ mode: id, why }, 'mode unavailable'); return false; }
     if (mode !== this.current) {
       this.current?.leave?.();
       this.current = mode;
@@ -105,15 +108,17 @@ export class Modes extends EventEmitter {
 
   openSwitcher() {
     if (this.switcher) return;
-    this.switcher = new Chooser({ title: 'MODE', items: this.list.map((m) => ({ id: m.id, label: m.label ?? m.id })), hint: 'swipe: move   front: pick   rear: cancel' });
+    this.switcher = new Chooser({ title: 'MODE', items: this.list.map((m) => { const why = m.unavailable?.() ?? null; return { id: m.id, label: why ? `${m.label ?? m.id}  ${why}` : m.label ?? m.id, disabled: !!why }; }), hint: 'swipe: move   front: pick   rear: cancel' });
     if (this.current) this.switcher.select(this.current.id);
     this.logger?.info('switcher open');
+    this.emit('switcher', true);
     this.ui.requestRender();
   }
   closeSwitcher() {
     if (!this.switcher) return;
     this.switcher = null;
     this.logger?.info('switcher closed');
+    this.emit('switcher', false);
     this.ui.requestRender();
   }
 
@@ -124,7 +129,7 @@ export class Modes extends EventEmitter {
       switch (gesture) {
         case 'swipe:up': this.switcher.move(-1); break;
         case 'swipe:down': this.switcher.move(1); break;
-        case 'press:front': case 'press:tap': { const id = this.switcher.item?.id; this.closeSwitcher(); if (id) this.switchTo(id); return; }
+        case 'press:front': case 'press:tap': { const it = this.switcher.item; if (it?.disabled) return; this.closeSwitcher(); if (it) this.switchTo(it.id); return; }
         case 'press:rear': this.closeSwitcher(); return;
         default: return;
       }
