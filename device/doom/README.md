@@ -4,7 +4,8 @@
 platform API) with `doomgeneric_jet.c` as the platform: Doom's 320x200 8-bit frame is palette-
 mapped straight into `/dev/fb0` and pushed to the Kopin panel with `OMAPFB_UPDATE_WINDOW`; keys
 come from jetd's socket (`k <evdev code> <1|0>`), so the pod buttons, the touchpad swipes and a
-Bluetooth keyboard all work. One static musl binary (~480 KB), no SDL, no sound yet.
+Bluetooth keyboard all work; sound effects are mixed in software and played through `aplay`. One
+static musl binary (~490 KB), no SDL, no music.
 
 ## Getting it running
 
@@ -43,6 +44,18 @@ Run it from the switcher (**Doom**, a jet-app mode) or over ssh for debugging:
 | front hold | jet-app's switcher: Doom pauses and stops drawing until it closes; picking another mode quits it |
 
 Esc > Quit Game returns to the mode that was showing before.
+
+## Sound
+
+`i_jetsound.c` is the sound module (the slot `i_sdlsound.c` fills in doomgeneric's SDL build): a
+mixer thread resamples the playing channels (8-bit mono lumps, mostly 11025 Hz; linear, 16.16 fixed
+point) into 10 ms slices of 48 kHz stereo S16, the only format the speaker amp takes (docs/audio.md),
+and writes them to an `aplay -D hw:0,0` child through a one-page pipe, so about 60 ms of audio sits
+ahead of the speaker (pipe + aplay's 40 ms buffer). Volume/separation arithmetic is i_sdlsound.c's.
+`sfx_volume` in Doom's own menu applies as usual; `-nosound` / `-nosfx` turn it off. If `hw:0,0` is
+busy (jet-app speaking) aplay dies and Doom is silent until the retry two seconds later; an
+`underrun!!!` line in the log means the mixer fell behind. No music: `DG_music_module` is a stub
+(Doom's MUS needs an OPL or GUS-patch synth; a job for later).
 
 ## Options
 
