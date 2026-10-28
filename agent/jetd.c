@@ -52,7 +52,8 @@
  *   Z x y w h [fps]   live camera scaled into that rectangle (default 10 fps); z stops it;
  *                     reply "Z srcw srch"; S during a viewfinder returns the next streamed frame
  *   J [n]             resend the last n kernel-log lines (default: the whole ring), then "J n"
- *   U                 re-read the calibration files (glance, view thresholds) -> "U on off deg still"
+ *   U                 re-read the calibration files (glance, wear, view thresholds) -> "U on off deg still"
+ *   G / O             current glance / wear state -> "g <at> <raw>" / "o <worn> <raw>"
  *   Q                 power snapshot -> "q vbat vsys vbus mA ctrl1 stat1 linsts cinlimit vichrg udc maxpower"
  * jet -> host:
  *   h <w> <h> <cols> <rows>     hello (also sent when remote mode is re-entered)
@@ -61,7 +62,8 @@
  *   m <mode>                    mode changed
  *   j <text>                    kernel log line (last 60 on connect, then live)
  *   p                           pong
- *   g <worn> <raw>              glance sensor state change
+ *   g <at> <raw>                glance changed: the eye is at the glass (1) or looking ahead (0)
+ *   o <worn> <raw>              wear changed: the glasses are on a head (1) or off (0)
  *   n <degrees>                 head turned that much and then held still (new view)
  *   a <len> + bytes             16 kHz mono S16 capture chunk; A <end|max|stop|error> ends it
  *   w <done|timeout|error|idle> playback finished
@@ -757,10 +759,16 @@ enum { S_MENU, S_CAL, S_CAL_DONE, S_INFO, S_GLANCE, S_GLANCE_DONE, S_BRIGHT, S_P
 static int setup_state, setup_sel;
 
 /* ---- glance sensor (APDS9900 via tsl2772 IIO, name tmd2771): polled 4 Hz, hysteresis ------
- * raw 0..1023: ~800-1000 worn, ~500-750 off the head (noisy). Event "g <worn> <raw>" on change;
- * thresholds "on off" overridable in /mnt/data/mainline/glance (e.g. "820 720"). */
+ * One reading, two classifications, each with 1 s of agreement before it changes:
+ * - glance "g <at> <raw>": the eye is at the glass (lower) vs looking ahead (higher), thresholds
+ *   "on off" from the user's calibration in /mnt/data/mainline/glance (either polarity).
+ * - wear "o <worn> <raw>": the glasses are on a head at all. Off the head the sensor sees nothing
+ *   (raw ~0, spikes to ~60); worn it reads 130-320 whichever way the eye looks, so fixed
+ *   thresholds (>= 100 worn, <= 60 off) hold without calibration; "on off" in mainline/wear
+ *   overrides them. */
 static char glance_path[128];
 static int glance_on_thr = 820, glance_off_thr = 720, glance_worn = -1, glance_raw = -1, glance_run = 0;
+static int wear_on_thr = 100, wear_off_thr = 60, wear_worn = -1, wear_run = 0;
 static int64_t glance_next;
 static void glance_open(void) {
     for (int i = 0; i < 16; i++) {
@@ -772,7 +780,9 @@ static void glance_open(void) {
     }
     const char *paths[] = { "/android-data/mainline/glance", "/mnt/data/mainline/glance" };   /* chroot vs initramfs view */
     for (int i = 0; i < 2; i++) { FILE *f = fopen(paths[i], "r"); if (!f) continue; if (fscanf(f, "%d %d", &glance_on_thr, &glance_off_thr) != 2) { glance_on_thr = 820; glance_off_thr = 720; } fclose(f); break; }
-    if (glance_path[0]) fprintf(stderr, "jetd: glance sensor %s (on>=%d off<=%d)\n", glance_path, glance_on_thr, glance_off_thr);
+    const char *wpaths[] = { "/android-data/mainline/wear", "/mnt/data/mainline/wear" };
+    for (int i = 0; i < 2; i++) { FILE *f = fopen(wpaths[i], "r"); if (!f) continue; if (fscanf(f, "%d %d", &wear_on_thr, &wear_off_thr) != 2 || wear_on_thr <= wear_off_thr) { wear_on_thr = 100; wear_off_thr = 60; } fclose(f); break; }
+    if (glance_path[0]) fprintf(stderr, "jetd: glance sensor %s (glance on>=%d off<=%d, wear on>=%d off<=%d)\n", glance_path, glance_on_thr, glance_off_thr, wear_on_thr, wear_off_thr);
 }
 static int glance_read_avg(int n) {          /* n quick reads, ~20 ms apart; -1 if no sensor */
     if (!glance_path[0]) return -1;
@@ -798,6 +808,9 @@ static void glance_poll(void) {
     if (raw < 0) return;
     glance_raw = raw;
     if (mode == M_SETUP && setup_state == S_GLANCE) dirty = 1;   /* live reading on the calibration screen */
+    int wear = raw >= wear_on_thr ? 1 : raw <= wear_off_thr ? 0 : -1;
+    if (wear < 0 || wear == wear_worn) wear_run = 0;
+    else if (++wear_run >= 4) { wear_run = 0; wear_worn = wear; sendf("o %d %d\n", wear_worn, raw); }
     int want;                                                               /* -1: in the dead band */
     if (glance_on_thr >= glance_off_thr) want = raw >= glance_on_thr ? 1 : raw <= glance_off_thr ? 0 : -1;
     else                                 want = raw <= glance_on_thr ? 1 : raw >= glance_off_thr ? 0 : -1;   /* inverted sensor */
@@ -1522,10 +1535,11 @@ static void handle_line(char *l) {
     case 'z': vf_stop(); break;
     case 'K': raw_keys = atoi(l + 1) != 0; if (raw_keys) { chooser = 0; auto_remote = 0; if (mode != M_REMOTE) set_mode(M_REMOTE); dirty = 1; } break;   /* a client owns the UI */
     case 'J': { int n = atoi(l + 1); if (n <= 0 || n > klog_n) n = klog_n; for (int i = klog_n - n; i < klog_n; i++) sendf("j %s\n", klog[(klog_head + i) % LROWS]); sendf("J %d\n", n); } break;   /* log backlog: last n lines */
-    case 'U': { glance_worn = -1; glance_open(); view_thresholds_load(); sendf("U %d %d %d %d\n", glance_on_thr, glance_off_thr, view_deg_thr, view_still_ms); } break;   /* re-read calibration files */
+    case 'U': { glance_worn = -1; wear_worn = -1; glance_open(); view_thresholds_load(); sendf("U %d %d %d %d\n", glance_on_thr, glance_off_thr, view_deg_thr, view_still_ms); } break;   /* re-read calibration files */
     case 'L': set_backlight(atoi(l + 1)); break;
     case 'P': sendf("p\n"); break;
     case 'G': sendf("g %d %d\n", glance_worn, glance_raw); break;
+    case 'O': sendf("o %d %d\n", wear_worn, glance_raw); break;
     case 'V': cap_start(atoi(l + 1)); break;
     case 'Q': power_read(); sendf("q %d %d %d %d 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x %s %d\n", pstate.vbat, pstate.vsys, pstate.vbus, pstate.ma, pstate.ctrl1 & 0xff, pstate.stat1 & 0xff, pstate.lin & 0xff, pstate.cin & 0xff, pstate.vichrg & 0xff, pstate.udc[0] ? pstate.udc : "-", pstate.maxpower); break;
     case 'v': cap_stop("stop"); break;

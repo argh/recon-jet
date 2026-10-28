@@ -49,6 +49,7 @@ host -> jet:
 | `V [max_s]` / `v` | start / stop voice capture |
 | `W <len>` + bytes / `w` | queue 48 kHz stereo S16 PCM; `w` ends the clip |
 | `Q` | power snapshot -> `q vbat vsys vbus mA ctrl1 stat1 linsts cinlimit vichrg udc maxpower` |
+| `G` / `O` | current glance / wear state -> `g <at> <raw>` / `o <worn> <raw>` |
 
 Drawing commands are ignored unless remote mode is showing; the hub gets a fresh hello whenever
 remote comes back and must redraw (the hub re-sends its last screen on hello).
@@ -62,7 +63,8 @@ jet -> host:
 | `r <dx> <dy>` | touchpad motion (summed per gesture) |
 | `m <mode>` | mode changed |
 | `j <text>` | kernel log line (last 60 on connect, then live) |
-| `g <worn> <raw>` | glance state change |
+| `g <at> <raw>` | glance changed: the eye is at the glass (1) or looking ahead (0), thresholds from the user's calibration |
+| `o <worn> <raw>` | wear changed: the glasses are on a head (1) or off it (0); off the head the sensor reads ~0, worn 130-320 whichever way the eye looks, so fixed thresholds (>= 100 worn, <= 60 off; `mainline/wear` "on off" overrides) need no calibration. Both after 1 s of agreement |
 | `n <degrees>` | head turned then held still ("new view") |
 | `a <len>` + bytes | 16 kHz mono S16 capture chunk (100 ms); `A <end\|max\|stop\|error>` ends it |
 | `w <done\|timeout\|error\|idle>` | playback finished |
@@ -87,7 +89,9 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
 
 ## Sensors it polls
 
-- Glance: `in_proximity0_raw` of the IIO device named `tmd2771`.
+- Glance and wear: `in_proximity0_raw` of the IIO device named `tmd2771`, polled at 4 Hz, one
+  reading classified twice (eye at the glass / looking ahead from the calibration; on a head / off
+  it from fixed thresholds).
 - Gyro: "new view" detector at 20 Hz from the LSM9DS0 gyro, scale 0.000153 rad/s/LSB; zero-rate
   bias tracked while still (per-axis spread < 3 deg/s over 0.5 s); |omega - bias| > 5 deg/s
   accumulates degrees; >= 20 deg turned then 1 s still -> `n`; accumulator decays after 5 s.
@@ -158,5 +162,5 @@ still tracks the modifiers for Ctrl+Alt+Enter. jetd's other modes keep their own
 `Y` stops playback immediately and drops queued audio (barge-in); jetd answers `w flushed`.
 
 `J [n]` resends the last n kernel-log lines (whole ring by default) and ends with `J n`.
-`U` re-reads the calibration files on userdata (glance thresholds, new-view thresholds) and answers
+`U` re-reads the calibration files on userdata (glance and wear thresholds, new-view thresholds) and answers
 `U on off deg still`, so the app's setup screens take effect without a restart.
