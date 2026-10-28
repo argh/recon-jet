@@ -13,7 +13,8 @@ import path from 'node:path';
 import { Schema } from '@versionzero/module-manager';
 import { Chooser } from '../../modules/ui/chooser.js';
 import { C } from '../../modules/ui/style.js';
-import { appRoot } from '../../lib/config.js';
+import { appRoot, patchLayer } from '../../lib/config.js';
+import { writeIfPresent } from '../../lib/sysfs.js';
 import { ofmArgs, glanceFile, BACKLIGHT } from './calibration.js';
 import { StatusScreen } from './status.js';
 import { PadCalScreen } from './pad-cal.js';
@@ -23,6 +24,7 @@ import { PowerScreen } from './power.js';
 import { NetworkScreen } from './network.js';
 import { BluetoothScreen } from './bluetooth.js';
 import { AboutScreen } from './about.js';
+import { WearScreen } from './wear.js';
 
 const s = Schema.create;
 const WIZARD = ['pad', 'glance', 'brightness'];
@@ -39,15 +41,18 @@ export class SystemMode {
       .property('backlightSysfs', s('string').default('/sys/class/backlight/kopin-a230/brightness').meta('description', 'backlight control'))
       .property('netDir', s('string').default('/sys/class/net').meta('description', 'interfaces listed on the Network screen'))
       .property('btMarker', s('string').default('/android-data/mainline/bt').meta('description', 'exists = init powers the Bluetooth radio on at boot'))
+      .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer, where System screens persist settings'))
       .property('modes', s('Modes').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
       .property('input', s('Input').meta('internal', true))
       .property('power', s('Power').meta('internal', true))
       .property('sensors', s('Sensors').meta('internal', true))
+      .property('wear', s('Wear').meta('internal', true))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
+      .property('sounds', s('Sounds').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; modes; ui; input; power; sensors; deviceLink; logger;
+  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; deviceConfig; modes; ui; input; power; sensors; wear; deviceLink; sounds; logger;
 
   id = 'system'; label = 'System';
   /** @type {Chooser} */ menu;
@@ -61,12 +66,12 @@ export class SystemMode {
     this.modes.register(this);   // before any await: registration order is the switcher's order
     const version = await fs.readFile(path.join(appRoot, 'package.json'), 'utf8').then((t) => JSON.parse(t).version, () => '?');
     this.screens = {
-      status: new StatusScreen(this), pad: new PadCalScreen(this), glance: new GlanceCalScreen(this), brightness: new BrightnessScreen(this),
+      status: new StatusScreen(this), pad: new PadCalScreen(this), glance: new GlanceCalScreen(this), brightness: new BrightnessScreen(this), wear: new WearScreen(this),
       power: new PowerScreen(this), network: new NetworkScreen(this), bluetooth: new BluetoothScreen(this), about: new AboutScreen(this, version),
     };
     this.menu = new Chooser({ title: 'SYSTEM', items: [
       { id: 'status', label: 'Status' }, { id: 'pad', label: 'Pad calibration' }, { id: 'glance', label: 'Glance calibration' },
-      { id: 'brightness', label: 'Brightness' }, { id: 'power', label: 'Power' }, { id: 'network', label: 'Network' }, { id: 'bluetooth', label: 'Bluetooth' }, { id: 'about', label: 'About' },
+      { id: 'brightness', label: 'Brightness' }, { id: 'wear', label: 'Wear' }, { id: 'power', label: 'Power' }, { id: 'network', label: 'Network' }, { id: 'bluetooth', label: 'Bluetooth' }, { id: 'about', label: 'About' },
     ], hint: 'swipe: move   front: open' });
     this.input.on('motion', (m) => { if (this.#current && this.screen === this.screens.pad) this.screens.pad.onMotion(m); });
     this.power.on('update', () => { if (this.#current && this.screen === this.screens.status && this.screens.status.onPower()) this.ui.requestRender(); });
@@ -101,6 +106,7 @@ export class SystemMode {
 
   /** A calibration/brightness screen finished: next wizard step, or back to the menu. */
   stepDone() {
+    this.sounds.play('success');
     if (this.wizard && ++this.wizardIndex < this.wizard.length) return this.open(this.wizard[this.wizardIndex]);
     if (this.wizard) { this.wizard = null; this.ui.setStrip('setup complete', { colour: C.ok, ms: 3000 }); }
     this.open(null);
@@ -128,6 +134,8 @@ export class SystemMode {
   render(s) { if (this.screen) this.screen.render(s); else this.menu.render(s); }
 
   // ---- files and sysfs ------------------------------------------------------------------------
+  /** A setting into the per-device config layer (deep-merged), e.g. `{ wear: { enabled } }`. */
+  saveSetting(patch) { return patchLayer(this.deviceConfig, patch); }
   /** Pad thresholds: live to jet-ofm, and to the args file for the next boot. */
   async savePad({ thrX, thrY }) {
     await Promise.all([writeIfPresent(path.join(this.ofmSysfs, 'thr_x'), `${thrX}\n`), writeIfPresent(path.join(this.ofmSysfs, 'thr_y'), `${thrY}\n`)]);
@@ -176,4 +184,3 @@ export class SystemMode {
 
 async function writeFile(file, text) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, text); }
 /** Write a sysfs attribute when it exists (a dev box has none). */
-async function writeIfPresent(file, text) { if (await fs.access(file).then(() => true, () => false)) await fs.writeFile(file, text); }

@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { stack, fakeMode, settle, tmpdir } from './helpers.js';
+import { stack, fakeMode, fakeSounds, settle, tmpdir } from './helpers.js';
 import { readState } from '../src/modules/modes/state.js';
 import { DoomMode } from '../src/modes/doom/index.js';
 
@@ -20,7 +20,7 @@ function fakeDoom() {
 async function setup(t, command) {
   const s = await stack(); t.after(s.stop);
   const wad = path.join(s.dir, 'x.wad'); fs.writeFileSync(wad, 'IWAD');
-  const doom = Object.assign(new DoomMode(), { command, args: `-iwad ${wad}`, dataDir: path.join(s.dir, 'doom'), returnTo: 'system', modes: s.modes, ui: s.ui });
+  const doom = Object.assign(new DoomMode(), { command, args: `-iwad ${wad}`, dataDir: path.join(s.dir, 'doom'), returnTo: 'system', modes: s.modes, ui: s.ui, sounds: fakeSounds() });
   s.modes.register(fakeMode('log')).register(fakeMode('system'));
   await doom.start(); t.after(() => doom.stop());
   await s.modes.begin(); await settle();
@@ -68,7 +68,7 @@ test('doom: quitting by itself returns to the previous mode; a crash shows why a
   await until(() => s.ui.suspended, 'running again');
   doom.child.kill('SIGKILL');
   await until(() => doom.error, 'crash reported');
-  assert.match(doom.error, /SIGKILL/); assert.equal(s.modes.current, doom); assert.equal(s.ui.active, true);
+  assert.match(doom.error, /SIGKILL/); assert.deepEqual(doom.sounds.played, ['error'], 'a crash is heard'); assert.equal(s.modes.current, doom); assert.equal(s.ui.active, true);
   s.k.rearPress(1000); await settle();
   assert.equal(s.modes.current.id, 'system');
 });

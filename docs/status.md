@@ -70,7 +70,7 @@ reset on purpose because warm resets hang in the stock bootloader about one time
 | Speaker (TFA9895 on McBSP2 I2S) | working, audible, untuned | tfa989x + simple-audio-card; McBSP overlay derives a bit-clock divider the generic card never sets | 48 kHz stereo S16 only: a mono stream silences the amp. Android loaded NXP's DSP tuning with a closed tool; mainline is a plain I2S bypass |
 | Microphones (OMAP4 DMIC) | working | omap-dmic + dmic-codec; overlay derives the mic clock | 96 or 192 kHz S32 only; downmix/decimate in software |
 | IMU (LSM9DS0 accel/mag/gyro), barometer (LPS25H) | working (IIO) | st_sensors | never read the raw sysfs attributes in a UI loop (50 ms power-up per read); use the IIO buffer; ldo2/3/4 must be always-on or the bus dies at 30 s |
-| Proximity "glance" sensor (APDS9900) | working, calibrated per user | tsl2772 as `tmd2771` | polarity is inverted (looking at the glass reads lower); the LED current must be capped (25 mA) or it saturates; ALS reads 0 inside the pod |
+| Proximity "glance" sensor (APDS9900) | working: wear (on a head or not) from fixed thresholds, glance (eye at the glass) calibrated per user | tsl2772 as `tmd2771` | off the head it reads ~0, worn 130-320; looking at the glass reads lower than looking ahead; the LED current must be capped (25 mA) or it saturates; ALS reads 0 inside the pod |
 | Board temperature (TMP102) | working | hwmon | |
 | PMIC (TWL6032): regulators, RTC, GPADC, PWM LED, USB comparator | working | mainline twl + `ti,twl6032-gpadc` | PWRON interrupt must be unmasked by the consumer; pwm-twl lacks `get_state` (LED starts off) |
 | Charger and fuel gauge | working: linear charging, current readout, USB-aware charge policy | overlay `twl6030_charger` (in-tree driver never enables the linear stage) + an init policy loop writing CINLIMIT/VICHRG | 100 mA before USB enumeration, 450 mA on a PC port, 1 A on a wall adapter; exceeding the host allocation makes macOS cut the port. On a PC port only ~50-130 mA reaches the cell while running. The original 10-year-old cell was dead; a 500 mAh cell on the stock protection board is fitted. A dead cell looks like a bricked device |
@@ -143,8 +143,10 @@ socket; new functionality is a Node module, not a change to the C daemon.
   `surface` (an RGB565 rasteriser with two PSF fonts, icons, partial flushes), `input` (raw keys
   to a fixed gesture vocabulary: press/hold front and rear, four swipes, tap; a keyboard's Enter,
   Esc and arrows map onto the same gestures), `ui` (render scheduling, a status strip, transient
-  notices), `modes` (registry, switcher, persistence), `power`, `sensors`, `llm` (OpenAI-compatible
-  client for ASR, chat, TTS and vision), `voice`.
+  notices), `modes` (registry, switcher, persistence), `power`, `sensors`, `sounds` (a small cue
+  vocabulary in one tonal language: power on/off, ack, success, error, worn/removed), `wear` (the
+  backlight follows the glance sensor: dark 2 s after the glasses come off, back on when worn, any
+  button relights), `llm` (OpenAI-compatible client for ASR, chat, TTS and vision), `voice`.
 - **A new application is a mode plugin:** an object `{ id, label, enter(ctx), leave(), onGesture(g)
   -> handled, render(surface), tick?(), firstUse?() }` registered with `modes` from a module's
   `start()`. The switcher (front hold, or a held Enter on a keyboard) lists modes in registration

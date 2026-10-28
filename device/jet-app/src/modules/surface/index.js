@@ -36,8 +36,9 @@ export class Surface extends EventEmitter {
   /** @type {Raster|null} */ raster = null;
   /** @type {{w:number, h:number, bpp:number, stride:number}|null} from jetd's `E` reply */ geometry = null;
   /** @type {import('./raster.js').Rect|null} jetd's camera rectangle while streaming */ viewfinderRect = null;
+  /** the camera stream is held off (display dark); what the mode asked for waits in #vf for `resumeViewfinder()` */ viewfinderPaused = false;
   active = false;
-  #fd = -1; #shown = null; #force = null; #lastFlush = 0; #timer = null;
+  #fd = -1; #shown = null; #force = null; #lastFlush = 0; #timer = null; #vf = null;
 
   get ready() { return this.raster !== null; }
   get width() { return this.raster?.width ?? 0; }
@@ -49,7 +50,7 @@ export class Surface extends EventEmitter {
     this.fonts = { main: load(this.mainFont), small: load(this.smallFont) };
     this.deviceLink.on('connected', () => this.#acquire());
     this.deviceLink.on('hello', () => this.invalidate());
-    this.deviceLink.on('disconnected', () => { this.raster = null; this.geometry = null; this.viewfinderRect = null; this.active = false; });
+    this.deviceLink.on('disconnected', () => { this.raster = null; this.geometry = null; this.viewfinderRect = null; this.#vf = null; this.active = false; });
     if (this.deviceLink.connected) this.#acquire();
     // modules stop in dependency order (the link first), so the panel is handed back at abort time
     abort?.signal.addEventListener('abort', () => this.#release(), { once: true });
@@ -140,21 +141,44 @@ export class Surface extends EventEmitter {
   }
 
   // ---- camera rectangle ------------------------------------------------------------------
-  /** Stream the camera into (x, y, w, h) at `fps`. Resolves with the source size `{w, h}`. */
+  /**
+   * Stream the camera into (x, y, w, h) at `fps`. Resolves with the source size `{w, h}`, or null
+   * while paused: the stream then starts on `resumeViewfinder()`.
+   */
   async viewfinder(x, y, w, h, fps = this.viewfinderFps) {
-    const src = await this.deviceLink.viewfinder(x, y, w, h, fps);
-    this.viewfinderRect = { x, y, w, h };
-    this.logger?.info({ x, y, w, h, fps, src }, 'viewfinder started');
+    this.#vf = { x, y, w, h, fps };
+    if (this.viewfinderPaused) { this.logger?.info({ x, y, w, h }, 'viewfinder parked'); return null; }
+    return this.#stream();
+  }
+
+  /** jetd starts streaming the wanted rectangle; a stop or pause that raced the reply wins. */
+  async #stream() {
+    const p = this.#vf;
+    const src = await this.deviceLink.viewfinder(p.x, p.y, p.w, p.h, p.fps);
+    if (this.#vf !== p || this.viewfinderPaused) { this.deviceLink.viewfinderStop(); return null; }
+    this.viewfinderRect = { x: p.x, y: p.y, w: p.w, h: p.h };
+    this.logger?.info({ ...p, src }, 'viewfinder started');
     return src;
   }
 
-  stopViewfinder() {
+  stopViewfinder() { this.#vf = null; this.#halt('stopped'); }
+
+  /** Hold the camera off (the display is dark); the mode's request is kept for `resumeViewfinder()`. */
+  pauseViewfinder() { if (!this.viewfinderPaused) { this.viewfinderPaused = true; this.#halt('paused'); } }
+
+  resumeViewfinder() {
+    if (!this.viewfinderPaused) return;
+    this.viewfinderPaused = false;
+    if (this.#vf) this.#stream().catch((error) => this.logger?.warn({ error: error.message }, 'viewfinder resume'));
+  }
+
+  #halt(why) {
     const rect = this.viewfinderRect;
     if (!rect) return;
     this.viewfinderRect = null;
     this.deviceLink.viewfinderStop();
     this.#force = union(this.#force, rect);   // our pixels go back on the next flush
     this.raster?.touch(rect);
-    this.logger?.info('viewfinder stopped');
+    this.logger?.info(`viewfinder ${why}`);
   }
 }

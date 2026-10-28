@@ -24,9 +24,10 @@ export class DemoMode {
       .property('power', s('Power').meta('internal', true))
       .property('sensors', s('Sensors').meta('internal', true))
       .property('voice', s('Voice').meta('internal', true))
+      .property('sounds', s('Sounds').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  question; jpegQuality; modes; ui; surface; deviceLink; power; sensors; voice; logger;
+  question; jpegQuality; modes; ui; surface; deviceLink; power; sensors; voice; sounds; logger;
 
   id = 'demo'; label = 'Describe';
   /** @type {'idle'|'looking'|'answering'} */ state = 'idle';
@@ -61,6 +62,7 @@ export class DemoMode {
     const id = ++this.#look, t0 = Date.now();
     this.state = 'looking'; this.answer = ''; this.error = null;
     this.ui.setStrip('looking', { colour: C.title });
+    this.sounds.play('ack');
     try {
       const frame = await this.deviceLink.snapshot({ w: 640, h: 480 });
       const image = uyvyToRgba(frame.data, frame.w, frame.h, { scale: 2 });
@@ -76,6 +78,7 @@ export class DemoMode {
       if (id !== this.#look) return;
       this.error = error.message;
       this.logger?.warn({ error: error.message }, 'demo: look failed');
+      this.sounds.play('error');
     } finally {
       if (id === this.#look) { this.state = 'idle'; this.ui.setStrip(null); this.ui.requestRender(); }
     }

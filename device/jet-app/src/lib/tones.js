@@ -1,5 +1,6 @@
-// Earcons: short tones rendered as 48 kHz stereo S16 PCM (what jetd's `W` plays), with a
-// 5 ms fade at each end so they do not click. Pure functions, no device knowledge.
+// Tones rendered as 48 kHz stereo S16 PCM (what jetd's `W` plays), with a 5 ms fade at each end
+// so they do not click. Pure functions, no device knowledge; the vocabulary lives in the sounds
+// module.
 
 export const RATE = 48000;
 
@@ -24,10 +25,3 @@ export function tones(notes, { gain = 0.3, rate = RATE } = {}) {
   });
   return buf;
 }
-
-/** "I'm listening": two rising tones, 150 ms. */
-export const LISTEN_EARCON = () => tones([{ hz: 880, ms: 75 }, { hz: 1320, ms: 75 }]);
-/** A soft single tone for "still thinking" when no filler phrase is available. */
-export const SOFT_BEEP = () => tones([{ hz: 660, ms: 120 }], { gain: 0.12 });
-/** "Something went wrong": two falling tones. */
-export const ERROR_EARCON = () => tones([{ hz: 660, ms: 90 }, { hz: 440, ms: 120 }], { gain: 0.25 });

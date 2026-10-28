@@ -12,6 +12,8 @@ import { Ui } from './modules/ui/index.js';
 import { Modes } from './modules/modes/index.js';
 import { Llm } from './modules/llm/index.js';
 import { Voice } from './modules/voice/index.js';
+import { Sounds } from './modules/sounds/index.js';
+import { Wear } from './modules/wear/index.js';
 import { LogMode } from './modes/log/index.js';
 import { DemoMode } from './modes/demo/index.js';
 import { SystemMode } from './modes/system/index.js';
@@ -36,6 +38,8 @@ export class Jet extends AppModule {
       .property('modes', s('Modes').meta('internal', true))
       .property('llm', s('Llm').meta('internal', true))
       .property('voice', s('Voice').meta('internal', true))
+      .property('sounds', s('Sounds').meta('internal', true))
+      .property('wear', s('Wear').meta('internal', true))
       .property('logMode', s('LogMode').meta('internal', true))
       .property('demoMode', s('DemoMode').meta('internal', true))
       .property('systemMode', s('SystemMode').meta('internal', true))
@@ -45,9 +49,9 @@ export class Jet extends AppModule {
       .property('logLevel', s('string').default('info').values(['debug', 'info', 'warn', 'error']).meta('description', 'log threshold'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer (read before configuration)'))
       .property('tickRate', s('number').default(60000).meta('hidden', true)),
-    register: [DeviceLink, Surface, Input, Power, Sensors, Ui, Modes, Llm, Voice, AssistantMode, DemoMode, DoomMode, ShellMode, LogMode, SystemMode],
+    register: [DeviceLink, Surface, Input, Power, Sensors, Sounds, Wear, Ui, Modes, Llm, Voice, AssistantMode, DemoMode, DoomMode, ShellMode, LogMode, SystemMode],
   };
-  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; logMode; demoMode; systemMode; assistantMode; shellMode; doomMode; logLevel; deviceConfig;
+  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; sounds; wear; logMode; demoMode; systemMode; assistantMode; shellMode; doomMode; logLevel; deviceConfig;
 
   async init() {
     await super.init();
@@ -59,10 +63,15 @@ export class Jet extends AppModule {
     this.logger.info({ node: process.version, pid: process.pid }, 'jet-app started');
   }
 
-  /** Every module has started: enter the start mode, then wait for the shutdown signal. */
+  /**
+   * Every module has started: enter the start mode and say so, wait for the shutdown signal,
+   * then say goodbye (bounded: the modules stop right after).
+   */
   async main() {
     await this.modes.begin();
-    return super.main();
+    if (this.deviceLink.connected) this.sounds.play('powerOn'); else this.deviceLink.once('connected', () => this.sounds.play('powerOn'));
+    await super.main();
+    await Promise.race([this.sounds.play('powerOff'), new Promise((r) => setTimeout(r, 1500))]);
   }
 
   /** Heartbeat with the link state, every `tickRate` ms. */

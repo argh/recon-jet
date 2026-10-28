@@ -88,6 +88,7 @@ export class DeviceLink extends EventEmitter {
       case 'J': return this.#resolve('J', +a[0], 'logBacklog');
       case 'U': return this.#resolve('U', { on: +a[0], off: +a[1], deg: +a[2], still: +a[3] }, 'calibration');
       case 'g': return this.#resolve('g', { worn: +a[0], raw: +a[1] }, 'glance');
+      case 'o': return this.#resolve('o', { worn: +a[0], raw: +a[1] }, 'worn');
       case 'n': return this.emit('view', { degrees: +a[0] });
       case 'A': return this.emit('captureEnd', a[0]);
       case 'w': return this.#resolve('w', a[0], 'playDone');
@@ -122,6 +123,7 @@ export class DeviceLink extends EventEmitter {
   ping() { return this.#request('p', 'P'); }
   power() { return this.#request('q', 'Q'); }
   glance() { return this.#request('g', 'G'); }
+  worn() { return this.#request('o', 'O'); }
   /** Ask for the last `n` kernel-log lines again (the whole ring by default) as `j` lines; resolves with the count. */
   logBacklog(n) { return this.#request('J', n ? `J ${n}` : 'J'); }
   /** Make jetd re-read the calibration files; resolves with `{on, off, deg, still}`. */

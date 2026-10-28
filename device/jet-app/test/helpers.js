@@ -64,6 +64,9 @@ export async function stack({ link = fakeLink(), stateFile, defaultMode = '', bo
   return { dir, stateFile, link, surface, input, power, sensors, ui, modes, key, k, stop };
 }
 
+/** Stands in for the sounds module: records the cue names. */
+export function fakeSounds() { return { played: [], play(name) { this.played.push(name); return Promise.resolve('done'); } }; }
+
 /** A minimal mode that records what happens to it. */
 export function fakeMode(id, extra = {}) {
   const m = { id, label: id[0].toUpperCase() + id.slice(1), events: [], gestures: [], ticks: 0, rendered: 0,

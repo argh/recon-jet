@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import jpeg from 'jpeg-js';
 import { uyvyToRgba } from '../src/lib/uyvy.js';
 import { DemoMode } from '../src/modes/demo/index.js';
-import { fakeLink, settle } from './helpers.js';
+import { fakeLink, fakeSounds, settle } from './helpers.js';
 
 test('uyvy -> rgba: grey, pure colours, subsampling', () => {
   const px = (Y, U, V) => Buffer.from([U, Y, V, Y]);   // two pixels
@@ -30,7 +30,7 @@ test('demo: front press takes a snapshot, encodes it and streams the answer; rea
   const surface = { width: 428, height: 240, viewfinderRect: null, viewfinder(x, y, w, h) { this.viewfinderRect = { x, y, w, h }; return Promise.resolve({ w: 640, h: 480 }); }, stopViewfinder() { this.viewfinderRect = null; } };
   let resolveLook; const looks = [];
   const voice = { look(jpg, q, { onToken }) { looks.push({ jpg, q }); onToken('It '); onToken('is a wall.'); return new Promise((r) => { resolveLook = r; }); } };
-  const demo = Object.assign(new DemoMode(), { question: 'what?', jpegQuality: 50, modes: { register() {} }, ui, surface, deviceLink: link, power: { smoothed: null }, sensors: { glance: null, view: null }, voice });
+  const demo = Object.assign(new DemoMode(), { question: 'what?', jpegQuality: 50, modes: { register() {} }, ui, surface, deviceLink: link, power: { smoothed: null }, sensors: { glance: null, view: null }, voice, sounds: fakeSounds() });
   await demo.start();
   demo.enter(); await settle();
   assert.deepEqual(surface.viewfinderRect, { x: 428 - 160 - 6, y: 14, w: 160, h: 120 });
@@ -57,4 +57,5 @@ test('demo: front press takes a snapshot, encodes it and streams the answer; rea
   demo.enter(); link.snapshot = async () => { throw new Error('no camera'); };
   demo.onGesture('press:front'); await new Promise((r) => setTimeout(r, 20));
   assert.equal(demo.error, 'no camera'); assert.equal(demo.state, 'idle');
+  assert.deepEqual(demo.sounds.played.filter((n) => n === 'error'), ['error'], 'the failure is heard'); assert.equal(demo.sounds.played[0], 'ack', 'sending is acknowledged');
 });

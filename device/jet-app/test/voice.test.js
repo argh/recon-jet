@@ -10,7 +10,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Voice } from '../src/modules/voice/index.js';
-import { tones, LISTEN_EARCON } from '../src/modules/voice/tones.js';
+import { tones } from '../src/lib/tones.js';
+import { Sounds } from '../src/modules/sounds/index.js';
+
+const ACK = Sounds.pcm('ack');
 import { wrapWords } from '../src/modules/ui/style.js';
 
 /** Records the state machine's calls as frames (`sent`); the tests emit the events by hand. */
@@ -37,7 +40,7 @@ async function make(overrides = {}) {
   const sessions = [];
   const fillerPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'jet-voice-')), 'voice', 'filler.pcm');
   const llm = { configured: true };
-  const voice = Object.assign(new Voice(), { enabled: true, llm, fillerMs: 60, fillerText: 'hmm', fillerPath, maxSeconds: 8, captureDelayMs: 0, debugPort: 0, deviceLink: link, ui, ...overrides });
+  const voice = Object.assign(new Voice(), { enabled: true, llm, fillerMs: 60, fillerText: 'hmm', fillerPath, maxSeconds: 8, captureDelayMs: 0, debugPort: 0, deviceLink: link, ui, sounds: Object.assign(new Sounds(), { enabled: true, gain: 1, deviceLink: link }), ...overrides });
   voice.createSession = (l) => { const s = new FakeSession(l); sessions.push(s); return s; };
   const states = [];
   voice.on('state', (s) => states.push(s.to));
@@ -55,7 +58,7 @@ test('voice: a full turn, startTurn -> listening -> thinking -> speaking -> idle
   assert.equal(voice.state, 'idle'); assert.equal(voice.configured, true);
   press(voice);
   assert.equal(voice.state, 'listening');
-  assert.deepEqual(link.sent, [`W ${LISTEN_EARCON().length}`, 'w', 'V 8'], 'earcon then capture');
+  assert.deepEqual(link.sent, [`W ${ACK.length}`, 'w', 'V 8'], 'ack cue then capture');
   assert.deepEqual(ctl(session), [{ type: 'start', turn: 1 }]);
   assert.deepEqual(ui.strips, ['listening']);
   link.emit('captureChunk', Buffer.alloc(3200, 1)); link.emit('captureChunk', Buffer.alloc(3200, 2));
@@ -97,7 +100,7 @@ test('voice: barge-in during speaking flushes jetd, cancels the host turn and st
   assert.equal(voice.state, 'speaking');
   const before = link.sent.length;
   press(voice);
-  assert.deepEqual(link.sent.slice(before), ['Y', `W ${LISTEN_EARCON().length}`, 'w', 'V 8']);
+  assert.deepEqual(link.sent.slice(before), ['Y', `W ${ACK.length}`, 'w', 'V 8']);
   assert.deepEqual(ctl(session).slice(-2), [{ type: 'cancel', turn: 1 }, { type: 'start', turn: 2 }]);
   assert.equal(voice.state, 'listening'); assert.equal(voice.turn, 2);
   assert.deepEqual(states, ['listening', 'thinking', 'speaking', 'idle', 'listening']);
@@ -122,12 +125,12 @@ test('voice: a clip still playing (say, filler) is flushed with Y before a new c
   await voice.say('hello');   // W + w queued, jetd has not reported it played
   const before = link.sent.length;
   press(voice);
-  assert.deepEqual(link.sent.slice(before, before + 2), ['Y', `W ${LISTEN_EARCON().length}`], 'flushed, then the earcon');
+  assert.deepEqual(link.sent.slice(before, before + 2), ['Y', `W ${ACK.length}`], 'flushed, then the ack cue');
   link.emit('playDone', 'flushed'); link.emit('playDone', 'done'); await sleep(1);
   voice.cancel();
   const n = link.sent.length;
   press(voice);
-  assert.equal(link.sent[n], `W ${LISTEN_EARCON().length}`, 'nothing playing: no Y');
+  assert.equal(link.sent[n], `W ${ACK.length}`, 'nothing playing: no Y');
 });
 
 test('voice: cancel stops the capture or the playback, tells the host, and leaves the answer', async (t) => {
@@ -175,7 +178,7 @@ test('voice: the filler plays when answer audio is late, not when it is early; a
   await sleep(20);
   session.emit('audio', { type: 'audio', bytes: 4, sentence: 'Hi.', pcm: Buffer.alloc(4), turn: 1 });
   await sleep(80);
-  assert.deepEqual(link.sent.filter((l) => l[0] === 'W'), [`W ${LISTEN_EARCON().length}`, 'W 4'], 'no filler: audio came first');
+  assert.deepEqual(link.sent.filter((l) => l[0] === 'W'), [`W ${ACK.length}`, 'W 4'], 'no filler: audio came first');
   assert.deepEqual(session.said, []);
   session.emit('done', { type: 'done', answer: 'Hi.', turn: 1 }); link.emit('playDone', 'done'); await sleep(1);
   // late audio: soft beep (no cache yet), and the cache gets rendered through the session's TTS
@@ -183,8 +186,8 @@ test('voice: the filler plays when answer audio is late, not when it is early; a
   session.emit('final', { type: 'final', text: 'hi', turn: 2 });
   await sleep(90);
   const ws = link.sent.filter((l) => l[0] === 'W');
-  assert.equal(ws.length, 4, 'earcon, answer, earcon, soft beep');
-  assert.ok(+ws[3].slice(2) > 0 && +ws[3].slice(2) !== LISTEN_EARCON().length);
+  assert.equal(ws.length, 4, 'ack, answer, ack, thinking');
+  assert.ok(+ws[3].slice(2) > 0 && +ws[3].slice(2) !== ACK.length);
   await sleep(20);
   assert.deepEqual(session.said, ['hmm'], 'the filler was rendered once');
   assert.equal(fs.readFileSync(fillerPath).toString(), 'say:hmm');
@@ -236,7 +239,7 @@ test('tones: stereo S16 at 48 kHz, faded ends', () => {
   assert.ok(Math.abs(pcm.readInt16LE(pcm.length - 2)) < 100, 'ends near silence');
   let peak = 0; for (let i = 0; i < pcm.length; i += 2) peak = Math.max(peak, Math.abs(pcm.readInt16LE(i)));
   assert.ok(peak > 14000 && peak <= 16384, `peak ${peak}`);   // 10 ms notes are mostly fade
-  assert.equal(LISTEN_EARCON().length, 7200 * 4);   // 150 ms
+  assert.equal(ACK.length, 7680 * 4);   // 160 ms
 });
 
 test('wrapWords', () => {

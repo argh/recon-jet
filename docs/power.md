@@ -58,6 +58,24 @@ overlay driver also re-asserts EN_CHARGER|EN_LINCH in its 10 s watchdog work whe
 is set. On a PC port only ~50-130 mA reaches the cell while the system runs: charge from a wall
 adapter.
 
+## Where the current goes (measured 2026-10-28, on battery, glasses on the desk)
+
+| state | mA |
+|---|---|
+| jet-app in Describe: camera viewfinder live (640x480 at 10 fps into the ISS), backlight 0, 208 or 1023 | 395 |
+| same, viewfinder stopped | 310 |
+| jetd alone, CPU capped at 300 MHz, one core, WiFi power save | 290 |
+
+Backlight brightness (0..1023) and `bl_power` make no measurable difference. The viewfinder is
+~85 mA (sensor, ISS, memory traffic, jetd blitting). CPU cap plus cpu1 offline is ~15 mA; WiFi
+power save shows nothing (and must stay off, see status.md). The ~290 mA floor is the SoC awake:
+`/sys/kernel/debug/pm_debug/count` shows `core_pwrdm` never leaving ON and `mpu_pwrdm` in RET
+only a few hundred times since boot; cpuidle spends 99.9 % of idle time in C1 (MPU on) because the
+DSS, the ISS and the SDIO WiFi keep the domains up. The thermal zone reports 88 C. Only
+suspend-to-RAM (`deep` is listed in `/sys/power/mem_sleep`, untested) would change the order of
+magnitude. 500 mAh: ~1.3 h live, ~1.6 h idle. The fuel gauge is only meaningful off USB: on a
+charger with the charge path idle it reads a steady +96 mA whatever the load.
+
 ## macOS over-current behaviour
 
 With u-boot's limits left in place (1.5 A / unlimited) and EN_LINCH forced, the Jet drew system

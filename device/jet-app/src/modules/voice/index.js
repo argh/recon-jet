@@ -5,7 +5,7 @@
 //
 //   idle --startTurn--> listening --A--> thinking --audio--> speaking --done+played--> idle
 //
-// listening: an earcon plays at once, jetd captures (`V maxSeconds`, energy VAD) and every `a`
+// listening: the ack cue plays at once, jetd captures (`V maxSeconds`, energy VAD) and every `a`
 //   chunk goes to the session, which transcribes the whole buffer every `partialMs`; `A` ends it
 //   (`session.end()`); a second press ends the capture early (`v`).
 // thinking: partial transcripts are shown as they arrive; `fillerMs` after the final transcript
@@ -30,7 +30,6 @@ import { Schema } from '@versionzero/module-manager';
 import { C } from '../ui/style.js';
 import { uyvyToRgba } from '../../lib/uyvy.js';
 import { VoiceSession, SYSTEM_PROMPT } from './session.js';
-import { LISTEN_EARCON, SOFT_BEEP, ERROR_EARCON } from './tones.js';
 
 const s = Schema.create;
 const STATES = ['idle', 'listening', 'thinking', 'speaking'];
@@ -46,14 +45,15 @@ export class Voice extends EventEmitter {
       .property('fillerText', s('string').default('Hmm, let me think.').meta('description', 'the filler phrase (rendered by the TTS once, cached on the device)'))
       .property('fillerPath', s('string').default('/android-data/mainline/voice/filler.pcm').meta('description', 'filler cache (48 kHz stereo S16 raw)'))
       .property('maxSeconds', s('number').default(8).meta('description', 'longest capture (jetd V argument)'))
-      .property('captureDelayMs', s('number').default(250).meta('description', 'ms between the earcon and opening the mic'))
+      .property('captureDelayMs', s('number').default(250).meta('description', 'ms between the ack cue and opening the mic'))
       .property('debugPort', s('number').default(0).meta('description', 'debug HTTP port (POST /talk, /cancel, /say, /filler, /look; GET /state); 0 = off'))
       .property('llm', s('Llm').meta('internal', true))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
+      .property('sounds', s('Sounds').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  enabled; systemPrompt; partialMs; fillerMs; fillerText; fillerPath; maxSeconds; captureDelayMs; debugPort; llm; deviceLink; ui; logger;
+  enabled; systemPrompt; partialMs; fillerMs; fillerText; fillerPath; maxSeconds; captureDelayMs; debugPort; llm; deviceLink; ui; sounds; logger;
 
   /** @type {'idle'|'listening'|'thinking'|'speaking'} */ state = 'idle';
   turn = 0;           // the current (or last) turn id; events from older turns are ignored
@@ -130,8 +130,8 @@ export class Voice extends EventEmitter {
     this.transcript = ''; this.answer = ''; this.audioFrames = 0;
     this.#setState('listening');
     this.ui.setStrip('listening', { colour: C.ok });
-    this.#play(LISTEN_EARCON());
-    // open the mic only after the earcon has played, so jetd's noise-floor window (its first
+    this.#cue('ack');
+    // open the mic only after the cue has played, so jetd's noise-floor window (its first
     // 300 ms of capture) does not measure the beep
     const open = () => {
       if (this.turn !== turn || this.state !== 'listening') return;
@@ -206,7 +206,7 @@ export class Voice extends EventEmitter {
     this.#session.cancel();
     this.#setState('idle');
     this.ui.setStrip(`voice: ${why}`, { colour: C.bad, ms: 3000 });
-    this.#play(ERROR_EARCON());
+    this.#cue('error');
   }
 
   #setState(next) {
@@ -219,7 +219,10 @@ export class Voice extends EventEmitter {
   }
 
   // ---- speaker --------------------------------------------------------------------------------
-  /** One clip (earcon, filler): queue it and close it; jetd's `w` reply is logged, not waited for. */
+  /** A cue from the sounds module, counted like a clip of our own so a barge-in flushes it. */
+  #cue(name) { this.#clips++; this.sounds.play(name).finally(() => { this.#clips--; }); }
+
+  /** One clip (the filler): queue it and close it; jetd's `w` reply is logged, not waited for. */
   #play(pcm) {
     if (!this.deviceLink.play(pcm)) return;
     const t0 = this.now();
@@ -236,7 +239,7 @@ export class Voice extends EventEmitter {
   #filler() {
     if (this.#fillerPcm) { this.logger?.info({ turn: this.turn }, 'filler'); return this.#play(this.#fillerPcm); }
     this.logger?.info({ turn: this.turn }, 'filler not cached: beep');
-    this.#play(SOFT_BEEP());
+    this.#cue('thinking');
     this.makeFiller().catch(() => {});
   }
 

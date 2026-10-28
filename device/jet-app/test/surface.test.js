@@ -155,3 +155,28 @@ test('surface: acquires geometry, writes changed rows only, leaves the viewfinde
   assert.deepEqual(s.flush(), { x: 0, y: 0, w: 8, h: 4 });
   await s.stop();
 });
+
+test('surface: a paused viewfinder is stopped at jetd but remembered; resume restarts it, a stop while paused forgets it', async () => {
+  const device = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'jet-fb-')), 'fb0');
+  const sent = [];
+  const link = { connected: true, on() {}, send: (l) => sent.push(l), surface: async () => ({ w: 8, h: 4, bpp: 16, stride: 16 }),
+    flushRect: (...a) => sent.push(`F ${a.join(' ')}`), viewfinder: async (...a) => { sent.push(`Z ${a.join(' ')}`); return { w: 640, h: 480 }; }, viewfinderStop: () => sent.push('z') };
+  const s = Object.assign(new Surface(), { device, minFlushMs: 0, fontDir, mainFont: 'ter-u20b.psf', smallFont: 'Lat2-Terminus12x6.psf', viewfinderFps: 10, deviceLink: link });
+  const ready = once(s, 'ready');
+  await s.start(); await ready; s.active = true; s.flush();
+  await s.viewfinder(4, 0, 4, 4);
+  sent.length = 0;
+  s.pauseViewfinder(); s.pauseViewfinder();
+  assert.equal(s.viewfinderRect, null, 'jetd is not streaming, so the rectangle is ours again');
+  assert.deepEqual(s.flush(), { x: 4, y: 0, w: 4, h: 4 }); assert.deepEqual(sent, ['z', 'F 4 0 4 4']);
+  sent.length = 0;
+  assert.equal(await s.viewfinder(0, 0, 4, 4), null, 'a mode asking while paused is parked');
+  assert.deepEqual(sent, []);
+  s.resumeViewfinder(); await new Promise((r) => setImmediate(r));
+  assert.deepEqual(sent, ['Z 0 0 4 4 10']); assert.deepEqual(s.viewfinderRect, { x: 0, y: 0, w: 4, h: 4 }, 'the latest request, not the first');
+  sent.length = 0;
+  s.pauseViewfinder(); s.stopViewfinder(); s.resumeViewfinder(); await new Promise((r) => setImmediate(r));
+  assert.deepEqual(sent, ['z'], 'stopped while paused: nothing to resume');
+  assert.equal(s.viewfinderRect, null);
+  await s.stop();
+});

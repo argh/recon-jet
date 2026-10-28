@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { SystemMode } from '../src/modes/system/index.js';
-import { fakeLink, tmpdir, settle } from './helpers.js';
+import { fakeLink, fakeSounds, tmpdir, settle } from './helpers.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** Poll until `cond()` is true (2 s limit). */
@@ -30,7 +30,8 @@ async function make({ calibrated = false, glanceRaw = 150 } = {}) {
   const sys = Object.assign(new SystemMode(), {
     ofmArgsFile: path.join(dir, 'mainline', 'ofm-args'), ofmSysfs: dir, glanceFile: path.join(dir, 'mainline', 'glance'), iioDir: path.join(dir, 'iio'),
     backlightFile: path.join(dir, 'mainline', 'backlight'), backlightSysfs: path.join(dir, 'brightness'), netDir: path.join(dir, 'net'),
-    modes, ui, input, power, sensors: { glance: null, view: null }, deviceLink: link });
+    modes, ui, input, power, sensors: { glance: null, view: null, worn: null }, deviceLink: link, sounds: fakeSounds(),
+    deviceConfig: path.join(dir, 'mainline', 'jet-app.json'), wear: { enabled: false, lit: true, calls: [], setEnabled(on) { this.enabled = on; this.calls.push(on); } } });
   if (calibrated) { fs.mkdirSync(path.join(dir, 'mainline')); fs.writeFileSync(sys.ofmArgsFile, 'thr_x=41 thr_y=38\n'); fs.writeFileSync(sys.glanceFile, '180 197\n'); }
   await sys.start();
   return { sys, dir, link, ui, input, power, modes, setRaw, read: (f) => fs.readFileSync(path.join(dir, f), 'utf8') };
@@ -111,7 +112,7 @@ test('system: the menu opens every screen; brightness rear reverts; Status repai
   const { sys, power, ui, read } = await make({ calibrated: true });
   sys.enter();
   const ids = sys.menu.items.map((i) => i.id);
-  assert.deepEqual(ids, ['status', 'pad', 'glance', 'brightness', 'power', 'network', 'bluetooth', 'about']);
+  assert.deepEqual(ids, ['status', 'pad', 'glance', 'brightness', 'wear', 'power', 'network', 'bluetooth', 'about']);
   for (const id of ids) { sys.open(id); assert.equal(sys.screen, sys.screens[id]); assert.equal(sys.onGesture('press:rear'), true); assert.equal(sys.screen, null); }
   sys.onGesture('swipe:up'); assert.equal(sys.menu.item.id, 'about', 'wraps');
   sys.open('brightness');
@@ -136,4 +137,22 @@ test('system: the menu opens every screen; brightness rear reverts; Status repai
     text(x, y, str) { drawn.push(str); }, line() {}, fillRect() {}, strokeRect() {}, icon() {} };
   status.render(s);
   assert.ok(drawn.includes('192.168.1.9') && drawn.includes('no address'), drawn.join('|'));
+});
+
+test('system: Wear toggles the off-head behaviour live and persists it into the per-device config layer', async () => {
+  const { sys, ui, read } = await make({ calibrated: true });
+  fs.writeFileSync(sys.deviceConfig, '{ "llm": { "base": "http://x" }, "wear": { "offDelayMs": 5000 } }\n');
+  sys.enter(); sys.open('wear');
+  assert.equal(sys.onGesture('press:front'), true);
+  await until(() => sys.screens.wear.busy === false && ui.strips.includes('off-head dark on'), 'saved');
+  assert.deepEqual(sys.wear.calls, [true], 'live first');
+  assert.deepEqual(JSON.parse(read('mainline/jet-app.json')), { llm: { base: 'http://x' }, wear: { offDelayMs: 5000, enabled: true } }, 'merged, nothing else touched');
+  sys.onGesture('press:tap');
+  await until(() => ui.strips.includes('off-head dark off'), 'saved again');
+  assert.equal(JSON.parse(read('mainline/jet-app.json')).wear.enabled, false);
+  sys.screens.wear.render({ fillRect() {}, text() { return { w: 0, h: 0 }; }, measureText() { return { w: 0, h: 0, chars: 0 }; }, line() {}, strokeRect() {}, width: 428, height: 240, fonts: { main: {}, small: {} } });
+  fs.rmSync(path.dirname(sys.deviceConfig), { recursive: true });
+  sys.onGesture('press:front');
+  await until(() => sys.screens.wear.error, 'a failed save is shown');
+  assert.equal(sys.wear.enabled, true, 'the live change still happened');
 });

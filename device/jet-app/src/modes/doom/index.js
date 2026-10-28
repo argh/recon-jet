@@ -24,9 +24,10 @@ export class DoomMode {
       .property('returnTo', s('string').default('system').meta('description', 'mode to return to when nothing was showing before'))
       .property('modes', s('Modes').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
+      .property('sounds', s('Sounds').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  command; args; dataDir; returnTo; modes; ui; logger;
+  command; args; dataDir; returnTo; modes; ui; sounds; logger;
 
   id = 'doom'; label = 'Doom'; transient = true;
   /** @type {import('node:child_process').ChildProcess|null} */ child = null;
@@ -95,7 +96,7 @@ export class DoomMode {
     });
   }
 
-  #failed(message) { this.error = message; this.frozen = false; this.ui.suspend(false); this.logger?.warn({ error: message }, 'doom failed'); this.ui.requestRender(); }
+  #failed(message) { this.error = message; this.sounds.play('error'); this.frozen = false; this.ui.suspend(false); this.logger?.warn({ error: message }, 'doom failed'); this.ui.requestRender(); }
 
   #kill() { const c = this.child; if (!c) return; this.child = null; c.kill('SIGTERM'); this.frozen = false; }
 
