@@ -41,7 +41,7 @@ Full build ~4 min, incremental ~20 s. Then `kernel/mkboot.sh` packs `boot-mainli
   `tsl2772.ko`. Init loads them in the order ISS -> tsl2772 -> jet-ofm -> panel (panel last so a
   display hang is caught by the already-armed watchdog), gated by safe level and flags.
 - Everything else: `modules.tar` untarred at `/android-data/mainline/modules`; init symlinks
-  `/lib/modules/$(uname -r)` there, in the initramfs and in the Alpine chroot (so `modprobe` works
+  `/lib/modules/$(uname -r)` there, in the initramfs and in the rootfs chroot (so `modprobe` works
   over ssh; busybox modprobe has no `-d`).
 - Firmware: `firmware_class.path` = `/mnt/data/mainline/firmware` (BT `TIInit_*.bts` under
   `ti-connectivity/`). WiFi firmware (`wl128x-fw-5-sr/mr.bin`, NVS renamed to `wl128x-nvs.bin`,

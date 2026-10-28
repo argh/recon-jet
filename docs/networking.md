@@ -22,8 +22,7 @@ userdata (`mainline/hub`, `mainline/usbnet`).
 
 | Service | Where it runs | Port |
 |---|---|---|
-| dropbear ssh (root, no password) | Alpine chroot on userdata (`/mnt/data/alpine`), supervised by init | 22 |
-| telnetd | chroot | 23 |
+| dropbear ssh (root, key only) | the rootfs chroot on userdata (`/mnt/data/rootfs`, Debian), supervised by init | 22 |
 | getty | initramfs, on `ttyGS0` | USB serial |
 
 - The chroot sees userdata as `/android-data`; the initramfs as `/mnt/data`. The initramfs
@@ -34,8 +33,9 @@ userdata (`mainline/hub`, `mainline/usbnet`).
   session (`udhcpc -b` holding stdio kept sessions open).
 - `tools/jsh.sh` wraps ssh with a hard timeout and falls back to `jet.local` when the USB
   address is silent. Rule: cap remote commands at ~2 min; if it is not instant it is hung.
-- The Alpine chroot has `apk` (over WiFi): i2c-tools, v4l-utils, alsa-utils, bluez, avahi,
-  nodejs (armv7, 39 MB RSS, sub-second start) all install fine.
+- The Debian chroot has `apt` (over WiFi); the rootfs image already carries i2c-tools, v4l-utils,
+  alsa-utils, bluez, avahi, vim-tiny, mg and Node 22 (see rootfs.md). Debian has no `killall`
+  (use `kill $(pidof ...)`) and its GNU `tar` does not load (busybox tar does).
 
 ## mDNS
 
@@ -62,11 +62,16 @@ avahi in the chroot (`host-name=jet`, usb0 + wlan0, no dbus), started by init: t
 
 ## Bluetooth (modules on userdata)
 
-- `hci_uart` with TI HCI-LL over uart2 (`ti,wl1283-st`, enable gpio 46); `hciconfig hci0 up`
-  loads `TIInit_7.2.31.bts` (329 commands) from `mainline/firmware/ti-connectivity/`.
-- **Coexistence problem (rule): keep hci0 down unless in use.** With hci0 up, even idle, WiFi rx
-  bitrate pins at 1 Mbit/s (50 % ping loss, multi-second RTT); `hciconfig hci0 down` restores
-  MCS6 immediately. No bluetoothd/dbus is set up yet (hciconfig/hcitool only).
+- `hci_uart` with TI HCI-LL over uart2 (`ti,wl1283-st`, enable gpio 46); powering hci0 loads
+  `TIInit_7.2.31.bts` (329 commands) from `mainline/firmware/ti-connectivity/`.
+- Stack: init starts dbus + bluetoothd (bluez 5.66, `AutoEnable=false`) in the chroot on every boot
+  and powers the radio only when `mainline/bt` exists; jet-app's System > Bluetooth toggles it live
+  and keeps the marker in step. `uhid`/`hid-generic` (LE HID-over-GATT keyboards) and `hidp`
+  (classic) are loaded. Pairing is `bluetoothctl` over ssh; pairings persist in the rootfs
+  `/var/lib/bluetooth` and a trusted keyboard reconnects by itself (see hardware.md).
+- **Coexistence problem (rule): radio off unless in use.** With hci0 up, even idle, WiFi rx
+  bitrate pins at 1 Mbit/s (50 % ping loss, multi-second RTT); powering it off restores MCS6
+  immediately. Use the keyboard on the USB link; switch the radio off to work over WiFi.
 
 ## What the Jet reaches over WiFi
 

@@ -107,8 +107,8 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
   150) following speech, or at `max_s` (default 8), or on `v`.
 - `W`: queues 48 kHz stereo S16 for `aplay -D hw:0,0`, drained non-blocking from the poll loop;
   `w done` when played. Mono input must be upmixed on the host (see audio.md).
-- ALSA tools are run via `chroot /mnt/data/alpine` when jetd runs from the initramfs, directly
-  when it already runs inside the chroot.
+- ALSA tools (and the shell) run via `chroot /mnt/data/rootfs` (the userdata rootfs symlink) when
+  jetd runs from the initramfs, directly when it already runs inside the chroot.
 
 ## Networking rules inside jetd
 

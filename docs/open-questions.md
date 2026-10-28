@@ -77,23 +77,14 @@ for working around a problem are in the other docs; this is the list of what is 
 - aplay drain latency (~3 s for a 1 s clip) not optimised.
 - Wake word on device: not started (needs a small embedded library; mics work now).
 - Mic gain/quality with the pod worn, and 192 kHz vs 96 kHz capture, not compared.
-- **jetd capture/playback deadlock** (2026-10-22): `spawn_pipe` in `agent/jetd.c` leaves the
-  other stream's pipe fds open across `fork`, so an `arecord` started while `aplay` is still
-  playing a long clip inherits aplay's stdin write end; at the clip's end `play_close` blocks in
-  `waitpid(aplay)` forever (no EOF), jetd stops reading arecord, arecord blocks on its full pipe:
-  no `A`, every later command (`S`) times out. Fix in jetd: `O_CLOEXEC` on the pipe fds (or kill
-  the child before waiting). Until then jet-app sends `Y` before `V` when a clip is in flight,
-  and the recovery is `kill -KILL` of the arecord child (SIGTERM is swallowed by alsa-utils'
-  restarted `write`); jetd resumes by itself.
 - After the Jet's own speaker played the question into the mic, the VAD did not end the capture
   on trailing silence (ran to `max`); whether the floor measured during the earcon tail or the
   speaker's room echo keeps `rms` above `floor * 1.5` is not checked.
 
 ## Radios
 
-- **BT/WiFi coexistence**: hci0 up pins WiFi rx at 1 Mbit/s. Coex tuning (wlcore/NVS/firmware
-  parameters) not investigated; no bluetoothd/dbus; the one BT LE scan before an outage may or
-  may not have contributed.
+- **BT/WiFi coexistence**: hci0 up pins WiFi rx at 1 Mbit/s, so the radio is off unless asked
+  for. Coex tuning (wlcore/NVS/firmware parameters) not investigated.
 - GPS and FM portability: the transport is TI shared transport (`ti-st`, removed from mainline
   but carriable) with `TIInit_*.bts`/`fm*.bts` firmware present. GPS needs a black-box capture of
   the closed "AI2" protocol the stock `navd`/`libgps` speak on `/dev/tigps` (strace on Android
@@ -113,10 +104,12 @@ for working around a problem are in the other docs; this is the list of what is 
 
 - The mode chooser (front hold) has been exercised by the author but not by a second person; the
   WiFi-via-QR setup item is a placeholder.
-- Personalisation vs generic client: host lists, model names, WiFi, prompts still live in
-  `work/`, flag files and env vars; the repo-level config story is not finished.
-- Node on the device (Alpine armv7) is viable for app logic; moving modes/menus/voice out of
-  jetd behind a local socket is a plan, not done. Docker on the device: ruled out.
+- Personalisation vs generic client: device settings live in `mainline/jet-app.json` and flag
+  files, host tools read env vars; a documented "bring your own services" path for a second
+  person has not been exercised.
+- jetd died once, without a log line, at the moment a Bluetooth keyboard reconnected (191 s after
+  boot). Not reproduced after the hotplug poll-ordering fix; a fatal-signal logger and the
+  unstripped `agent/jetd.dbg` stay in place to catch a repeat. Docker on the device: ruled out.
 
 ## Voice turn (2026-10-22)
 - First audio arrives ~6 s after the user stops talking with qwen-27b warm (0.6-3 s to the first

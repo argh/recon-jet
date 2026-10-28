@@ -7,7 +7,7 @@ This file is the index. Facts live in `docs/` (one topic per file); the chronolo
 is private and not in the repo. Keep docs to known truths and explicit open questions.
 
 ## Docs
-`docs/hardware.md`, `docs/boot.md`, `docs/kernel.md`, `docs/jetd.md`, `docs/power.md`,
+`docs/status.md` (executive summary of the current state), `docs/hardware.md`, `docs/boot.md`, `docs/kernel.md`, `docs/jetd.md`, `docs/power.md`,
 `docs/audio.md`, `docs/networking.md`, `docs/open-questions.md`.
 
 ## Layout
@@ -42,7 +42,7 @@ is private and not in the repo. Keep docs to known truths and explicit open ques
   Kernel modules (BT, ALSA, ...) and firmware live on userdata at `/android-data/mainline/`
   (`modules/`, `firmware/`), installed from `refs/linux/out-6.18/modules.tar`.
 - USB: CDC ECM with the Jet at `.1` of the USB subnet (init's `USBNET`, overridable with the
-  userdata file `mainline/usbnet`), ssh root (dropbear in an Alpine chroot on userdata); the Jet
+  userdata file `mainline/usbnet`), ssh root (dropbear in the Debian rootfs chroot on userdata); the Jet
   announces `jet.local` over mDNS on USB and WiFi, which every host tool uses by default
   (`JET_HOST` overrides). WiFi joins the network configured in the chroot's wpa_supplicant.conf.
 - Boot guard (`/android-data/mainline/bootfail`): failed boots degrade to safe levels (no
@@ -60,12 +60,15 @@ is private and not in the repo. Keep docs to known truths and explicit open ques
   (coexistence untuned) so keep hci0 down unless in use.
 - Cap remote commands at ~2 min; if it is not instant it is probably hung.
 - Speaker path wants 48 kHz stereo S16; mics deliver 96 kHz S32 only (downmix on the host).
+- Debian has no `killall`: restart jetd with `kill $(pidof jetd)`. A Bluetooth keyboard's
+  Ctrl+Alt+Enter opens jetd's shell (bash in the rootfs, vi/mg work) from any screen.
 
-## Personalisation vs generic client (project goal, not done yet)
+## Personalisation vs generic client (project goal, partly done)
 The intent is that another person can take this repo, point their agent at this file, and add
 their own services without removing anything. Rules: no addresses, hostnames or credentials in
 committed files; private config lives in `work/` (gitignored) on the host and under
 `mainline/` on the Jet's userdata (hub host list, WiFi, calibration). Host-side services are
 configured by environment only: `LLM_BASE` (OpenAI-compatible base URL), `LLM_*_MODEL`,
-`LLM_INSECURE_TLS`, `JET_HOST`. The remaining personal choices (model names, voices, prompts in
-`host/*.sh`) move into per-module config with the Node port (see `docs/`).
+`LLM_INSECURE_TLS`, `JET_HOST`. On the device, model names, voices and the inference server
+live in `mainline/jet-app.json` (per-module config of jet-app, see `docs/jet-app.md`); the host
+scripts in `host/` are developer tools and keep reading the environment.

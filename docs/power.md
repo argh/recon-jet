@@ -1,7 +1,7 @@
 # Power, charging and the fuel gauge (TWL6032)
 
 All registers are on PMIC i2c address 0x49 (bus `i2c-0` on mainline). Read/write from the
-Alpine chroot with `i2cget/i2cset -f -y 0 0x49 <reg>`; jetd uses `/dev/i2c-0` directly.
+rootfs chroot with `i2cget/i2cset -f -y 0 0x49 <reg>`; jetd uses `/dev/i2c-0` directly.
 
 ## Charger registers used
 

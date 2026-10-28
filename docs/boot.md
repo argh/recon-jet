@@ -39,7 +39,7 @@ the reboot command to SAR RAM, then:
 | `reboot2 bootloader` | warm | fastboot |
 | `reboot2 recovery` | warm | `recovery` = rooted Android with adb |
 
-`tools/reboot2` exists because busybox `reboot` cannot pass a RESTART2 string. From the Alpine
+`tools/reboot2` exists because busybox `reboot` cannot pass a RESTART2 string. From the
 chroot use `/usr/local/bin/reboot2` (the initramfs `/bin` is not visible there). From Android,
 `adb reboot` (warm + "normal") returns to mainline. Plain reboots are cold on purpose: warm
 restarts from a display/camera-active mainline hung the next boot about 1 in 5 times.
@@ -62,7 +62,7 @@ the end of init).
 |---|---|---|
 | 1 | 0 | normal |
 | 2 | 2 | no camera (ISS) and no touchpad modules |
-| 3 | 3 | no panel either (ssh/telnet only) |
+| 3 | 3 | no panel either (ssh only) |
 | 4 | | `reboot2 bootloader` (fastboot) and the count resets to 0 |
 
 Front button held during init forces level 2. `mainline/safe=N` forces a level and skips
@@ -76,6 +76,7 @@ counting. Killing jetd and rebooting before the 60 s mark counts as a failed boo
 | `panel-off` | do not load the panel module |
 | `camera-off` | do not load the ISS module |
 | `charge-off` | disable init's charge policy loop |
+| `bt` | power the Bluetooth radio at boot (the stack always starts; jet-app's System > Bluetooth keeps this in step) |
 | `hub` | comma-separated hub host list jetd dials (default: the USB peer pool) |
 | `usbnet` | first three octets of the USB subnet (default in init) |
 | `ofm-args` | insmod args for jet-ofm (written by pad calibration, e.g. `thr_x=14 thr_y=16`) |

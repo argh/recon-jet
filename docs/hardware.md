@@ -124,7 +124,7 @@ out), module in the userdata module tree.
 | p8 | boot | 8 MB | **mainline** (`boot-emmc.img`, must stay <= 8 MB) |
 | p9 | system | 512 MB | stock /system (ext4, used read-only by the chroot) |
 | p10 | cache | 256 MB | |
-| p11 | userdata | 6.2 GB | ext4: Alpine chroot, `mainline/` flags, modules, firmware |
+| p11 | userdata | 6.2 GB | ext4: the Debian rootfs (`rootfs` symlink; Alpine kept as a fallback tree), `mainline/` flags, modules, firmware |
 
 Backups of GPT + p1..p10 and the factory OTA live in `refs/` (gitignored).
 
