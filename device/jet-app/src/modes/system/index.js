@@ -52,12 +52,13 @@ export class SystemMode {
       .property('power', s('Power').meta('internal', true))
       .property('sensors', s('Sensors').meta('internal', true))
       .property('wear', s('Wear').meta('internal', true))
+      .property('gps', s('Gps').meta('internal', true))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('sounds', s('Sounds').meta('internal', true))
       .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; gpsScript; deviceConfig; modes; ui; input; power; sensors; wear; deviceLink; sounds; actions; logger;
+  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; gpsScript; deviceConfig; modes; ui; input; power; sensors; wear; gps; deviceLink; sounds; actions; logger;
 
   id = 'system'; label = 'System'; spoken = ['settings'];
   /** @type {Chooser} */ menu;
@@ -80,6 +81,7 @@ export class SystemMode {
     ], hint: 'swipe: move   front: open' });
     this.input.on('motion', (m) => { if (this.#current && this.screen === this.screens.pad) this.screens.pad.onMotion(m); });
     this.power.on('update', () => { if (this.#current && this.screen === this.screens.status && this.screens.status.onPower()) this.ui.requestRender(); });
+    this.gps?.on('update', () => { if (this.#current && (this.screen === this.screens.location || this.screen === this.screens.status)) this.ui.requestRender(); });
     this.backlight.level = await this.#readBacklight();
     // "heya jet, open bluetooth": come here and show the screen (the Modes "open" declines names
     // that are no mode, so this gets them whatever the start order); the nouns the ASR has been

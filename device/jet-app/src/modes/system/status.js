@@ -80,8 +80,9 @@ export class StatusScreen {
     y = row(s, y, 'wifi', this.wifi ? `${this.wifi.ssid ?? '?'}  ${this.wifi.signal ?? ''}  ${ip('wlan0') ?? 'no address'}` : ip('wlan0') ?? 'not associated', this.wifi || ip('wlan0') ? C.ok : C.dim);
     y = row(s, y, 'usb', ip('usb0') ?? 'no address', ip('usb0') ? C.ok : C.dim);
     y = row(s, y, 'bluetooth', this.bt ? (this.bt.powered ? `on${this.bt.device ? '  ' + this.bt.device : ''}` : 'off') : 'no controller', this.bt?.powered ? C.warn : C.dim);
-    const gps = this.sys.screens.location?.running;
-    y = row(s, y, 'gps', gps == null ? '-' : gps ? 'on' : 'off', gps ? C.warn : C.dim);
+    const gps = this.sys.screens.location?.running, gstate = this.sys.gps?.state;
+    const gval = gps == null ? '-' : !gps ? 'off' : gstate && gstate.at ? (gstate.fix !== 'none' ? `on  ${gstate.fix} fix  ${gstate.satsUsed} sats` : `on  ${gstate.satsUsed}/${gstate.satsInView} sats`) : 'on';
+    y = row(s, y, 'gps', gval, gps ? C.warn : C.dim);
     y = row(s, y, 'glance', sensors.glance ? `${sensors.glance.worn ? 'worn' : 'off'}  raw ${sensors.glance.raw}  ${ago(sensors.glance.t)}` : '-');
     y = row(s, y, 'new view', sensors.view ? `${sensors.view.degrees} deg  ${ago(sensors.view.t)}` : '-');
     y = row(s, y, 'jet-app', `${this.version}  up ${fmtUp(process.uptime())}`);

@@ -1,9 +1,10 @@
-// Location: the GPS receiver on or off. GPS lives in the same combo chip as Bluetooth and rides
-// its UART, so turning it on powers that radio too (scripts/gps.sh does the bring-up: chroot
-// mounts, hci0 up, TI's navd from the stock partition - docs/gps.md); while it runs, WiFi rx is
-// slow (coex untuned). Front toggles ("heya jet, enable gps" too); off stops the daemon and
-// powers the radio back down unless Bluetooth is set to be on. No boot persistence yet: GPS
-// starts off. Fix details will come from the NMEA stream once something consumes it.
+// Location: the GPS receiver on or off, and what it sees. GPS lives in the same combo chip as
+// Bluetooth and rides its UART, so turning it on powers that radio too (scripts/gps.sh does the
+// bring-up: chroot mounts, hci0 up, TI's navd from the stock partition - docs/gps.md); while it
+// runs, WiFi rx is slow (coex untuned). The gps module follows the NMEA stream while on: this
+// screen shows satellites, fix and position live (and keeps the capture at gps.logFile for
+// later). Front toggles ("heya jet, enable gps" too); off stops the daemon and powers the radio
+// back down unless Bluetooth is set to be on. No boot persistence yet: GPS starts off.
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { C, TOP, heading, row, hint } from '../../modules/ui/style.js';
@@ -22,9 +23,11 @@ export class LocationScreen {
     return false;
   }
 
-  /** Is the GPS daemon up? (pgrep: exit 1 just means no.) */
+  /** Is the GPS daemon up? (pgrep: exit 1 just means no.) The gps module follows the answer. */
   async probe() {
     this.running = await run('pgrep', ['navd']).then(() => true, () => false);
+    if (this.running && !this.sys.gps?.listening) this.sys.gps?.listen();
+    if (this.running === false && this.sys.gps?.listening) this.sys.gps?.stopListening();
     return this.running;
   }
 
@@ -44,6 +47,7 @@ export class LocationScreen {
         if (!btWanted) await run('bluetoothctl', ['power', 'off']).catch(() => {});
       }
       this.running = on;
+      if (on) this.sys.gps?.listen(); else this.sys.gps?.stopListening();
       this.sys.logger?.info({ on }, 'gps');
       this.sys.ui.setStrip(`gps ${on ? 'on' : 'off'}`, { colour: on ? C.warn : C.ok, ms: 2000 });
     } catch (error) {
@@ -60,12 +64,21 @@ export class LocationScreen {
     heading(s, 'location');
     let y = TOP + 26;
     if (this.error) y = row(s, y, 'error', this.error, C.bad);
-    const on = this.running === true;
+    const on = this.running === true, g = this.sys.gps?.state;
     y = row(s, y, 'gps', this.busy ? 'switching...' : this.running == null ? '-' : on ? 'ON  (WiFi rx degraded)' : 'off', this.busy ? C.dim : on ? C.warn : C.ok);
-    y = row(s, y, 'receiver', 'in the radio chip; GPS on powers Bluetooth\'s radio too', C.dim);
-    y = row(s, y, 'fix', on ? 'see the NMEA stream (docs/gps.md)' : '-', C.dim);
+    if (on && g) {
+      const stale = !g.at || Date.now() - g.at > 5000;
+      y = row(s, y, 'satellites', stale ? 'no data from the receiver' : `${g.satsUsed} used  /  ${g.satsInView} in view`, stale ? C.dim : g.satsUsed ? C.ok : C.white);
+      y = row(s, y, 'fix', g.fix === 'none' ? 'none yet' : `${g.fix.toUpperCase()}${g.hdop != null ? `  hdop ${g.hdop}` : ''}`, g.fix === 'none' ? C.dim : C.ok);
+    }
+    if (g && g.lat != null) {
+      y = row(s, y, 'position', `${g.lat.toFixed(5)}  ${g.lon.toFixed(5)}${g.altM != null ? `  ${Math.round(g.altM)} m` : ''}`, g.fix === 'none' ? C.dim : C.ok);
+      if (g.speedKmh != null) y = row(s, y, 'motion', `${g.speedKmh} km/h${g.courseDeg != null ? `  ${Math.round(g.courseDeg)} deg` : ''}`);
+      if (g.time) y = row(s, y, 'gps time', new Date(g.time).toISOString().slice(11, 19) + ' utc', C.dim);
+    }
     y += 4;
-    row(s, y, 'first fix', 'cold start can take minutes under open sky', C.dim);
+    if (!on) y = row(s, y, 'receiver', 'in the radio chip; GPS on powers Bluetooth\'s radio too', C.dim);
+    if (!g || g.fix === 'none') row(s, y, 'first fix', 'cold start can take minutes under open sky', C.dim);
     hint(s, `front: gps ${on ? 'off' : 'on'}   rear: menu`);
   }
 }

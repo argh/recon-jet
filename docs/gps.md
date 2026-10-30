@@ -37,8 +37,10 @@ hci_ll.c (+ GPS channel 9) ── /dev/tigps ──> navd ──┬── /data/
     command-complete `{opcode, result}`, 2 a report bundle, 9 the engine/version banner.
   - `/data/gps/recongps` (FIFO): `[code u32][len u32][text]` records, code 0x10, text =
     one NUL-terminated NMEA sentence. GGA, RMC, GLL, VTG, GSA and GSV all arrive at 1 Hz
-    during a fix session. **This is the stream to consume**; the gps4121 report bundles are
-    TI-internal structures there is no need to parse.
+    during a fix session. **This is the stream to consume**, and jet-app's `gps` module does
+    (one reader only: FIFO bytes are taken, not shared); the gps4121 report bundles are
+    TI-internal structures there is no need to parse. While listening, the module keeps a raw
+    timestamped capture at `/android-data/gps/nmea.log` (truncated each time GPS turns on).
 
 ## Bring-up and verification (2026-10-30)
 
