@@ -125,7 +125,6 @@ static void ll_gps_tx(void)
 		skb = skb_dequeue(&ll_gps.tx_q);
 		if (skb) {
 			ll_gps.credit = false;
-			bt_dev_info(ll_gps.hu->hdev, "gps: tx %u bytes, hcill state %lu", skb->len, ((struct ll_struct *)ll_gps.hu->priv)->hcill_state);
 			ll_enqueue(ll_gps.hu, skb);
 			hci_uart_tx_wakeup(ll_gps.hu);
 		}
@@ -136,11 +135,16 @@ static void ll_gps_tx(void)
 /* A channel-9 frame from the chip: skb->data = [opcode][plen le16][payload]. */
 static int ll_recv_gps(struct hci_dev *hdev, struct sk_buff *skb)
 {
-	u8 op = skb->data[0];
-	u16 plen = get_unaligned_le16(skb->data + 1);
+	u8 op;
+	u16 plen;
 	unsigned long flags;
 
-	bt_dev_info(hdev, "gps: rx opcode %u, %u bytes", op, skb->len);
+	if (skb->len < LL_GPS_HDR_LEN) {	/* the H4 framer guarantees this; be sure before we index */
+		kfree_skb(skb);
+		return 0;
+	}
+	op = skb->data[0];
+	plen = get_unaligned_le16(skb->data + 1);
 	skb_pull(skb, LL_GPS_HDR_LEN);
 	switch (op) {
 	case LL_GPS_OP_READ:
