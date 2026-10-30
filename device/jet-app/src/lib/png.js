@@ -45,3 +45,60 @@ export function rgb565ToRgba(buf, width, height, pitch = width) {
   }
   return out;
 }
+
+/**
+ * Decode a PNG to RGBA, enough of the format for OSM raster tiles: 8-bit depth, colour types
+ * grayscale (0), RGB (2), palette (3), grey+alpha (4) and RGBA (6), all five scanline filters,
+ * no interlace. Returns the shape `blitImage` takes. Throws on anything it does not handle.
+ * @param {Buffer|Uint8Array} buf @returns {{width: number, height: number, data: Uint8Array}}
+ */
+export function decodePng(buf) {
+  buf = Buffer.isBuffer(buf) ? buf : Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
+  if (buf.length < 8 || !buf.subarray(0, 8).equals(SIGNATURE)) throw new Error('png: bad signature');
+  let i = 8, width = 0, height = 0, depth = 0, colour = 0, interlace = 0;
+  let palette = null, trns = null;
+  const idat = [];
+  while (i + 8 <= buf.length) {
+    const len = buf.readUInt32BE(i), type = buf.toString('latin1', i + 4, i + 8), data = buf.subarray(i + 8, i + 8 + len);
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0); height = data.readUInt32BE(4);
+      depth = data[8]; colour = data[9]; interlace = data[12];
+    } else if (type === 'PLTE') palette = data;
+    else if (type === 'tRNS') trns = data;
+    else if (type === 'IDAT') idat.push(data);
+    else if (type === 'IEND') break;
+    i += 12 + len;   // length + type + data + crc
+  }
+  if (!width || !height) throw new Error('png: no IHDR');
+  if (depth !== 8) throw new Error(`png: ${depth}-bit depth unsupported`);
+  if (interlace) throw new Error('png: interlaced unsupported');
+  const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colour];
+  if (!channels) throw new Error(`png: colour type ${colour} unsupported`);
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  if (raw.length < (stride + 1) * height) throw new Error('png: short pixel data');
+  // unfilter in place: each scanline is 1 filter byte then `stride` bytes
+  const px = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    const f = raw[y * (stride + 1)], src = y * (stride + 1) + 1, dst = y * stride, up = dst - stride;
+    for (let x = 0; x < stride; x++) {
+      const a = x >= channels ? px[dst + x - channels] : 0, b = y > 0 ? px[up + x] : 0, c = x >= channels && y > 0 ? px[up + x - channels] : 0;
+      let v = raw[src + x];
+      if (f === 1) v += a; else if (f === 2) v += b; else if (f === 3) v += (a + b) >> 1;
+      else if (f === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
+      px[dst + x] = v & 0xff;
+    }
+  }
+  // expand to RGBA
+  const out = new Uint8Array(width * height * 4);
+  for (let p = 0, o = 0; p < width * height; p++, o += 4) {
+    let r, g, b, alpha = 255;
+    if (colour === 3) { const idx = px[p]; r = palette[idx * 3]; g = palette[idx * 3 + 1]; b = palette[idx * 3 + 2]; if (trns && idx < trns.length) alpha = trns[idx]; }
+    else if (colour === 0) { r = g = b = px[p]; }
+    else if (colour === 4) { r = g = b = px[p * 2]; alpha = px[p * 2 + 1]; }
+    else if (colour === 2) { r = px[p * 3]; g = px[p * 3 + 1]; b = px[p * 3 + 2]; }
+    else { r = px[p * 4]; g = px[p * 4 + 1]; b = px[p * 4 + 2]; alpha = px[p * 4 + 3]; }
+    out[o] = r; out[o + 1] = g; out[o + 2] = b; out[o + 3] = alpha;
+  }
+  return { width, height, data: out };
+}

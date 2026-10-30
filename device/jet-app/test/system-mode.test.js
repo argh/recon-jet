@@ -32,7 +32,7 @@ async function make({ calibrated = false, glanceRaw = 150, extra = {} } = {}) {
   const link = fakeLink();
   const ui = Object.assign(new EventEmitter(), { renders: 0, strips: [], requestRender() { this.renders++; }, setStrip(t) { this.strips.push(t); }, surface: { width: 428, height: 240 } });
   const input = new EventEmitter(), power = Object.assign(new EventEmitter(), { last: null, smoothed: null });
-  const modes = { registered: [], list: [], current: null, register(m) { this.registered.push(m.id); }, switchTo() { return true; } };
+  const modes = { registered: [], list: [], current: null, switched: [], register(m) { this.registered.push(m.id); }, switchTo(id) { this.switched.push(id); return true; } };
   const sys = Object.assign(new SystemMode(), {
     ofmArgsFile: path.join(dir, 'mainline', 'ofm-args'), ofmSysfs: dir, glanceFile: path.join(dir, 'mainline', 'glance'), iioDir: path.join(dir, 'iio'),
     backlightFile: path.join(dir, 'mainline', 'backlight'), backlightSysfs: path.join(dir, 'brightness'), netDir: path.join(dir, 'net'),
@@ -196,7 +196,7 @@ test('system: "check my location" speaks the hunt: satellites as they lock, the 
   await until(() => voice.said.includes('3 satellites locked.'), 'sats spoken');
   gps.sats = 5; gps.fix = { good: true };
   await until(() => voice.said.at(-1) === 'Got a fix. On your display.', 'fix spoken');
-  assert.equal(sys.screen, sys.screens.location);
+  assert.ok(sys.modes.switched.includes('map'), 'the fix opens the map');
   assert.ok(!voice.said.includes('5 satellites locked.'), 'the fix beat the count');
   // a second call while one runs is swallowed; with a fresh good fix the answer is immediate
   voice.said.length = 0;

@@ -135,10 +135,10 @@ export class SystemMode {
     } finally { this.#checking = false; }
   }
 
-  /** The fix landed: the screen first, then the word. */
+  /** The fix landed: the map (centred on the fix), then the word. Falls back to the Location
+   * screen if the map mode is not available. */
   async #fixFound() {
-    if (this.modes.current !== this) this.modes.switchTo(this.id);
-    this.open('location');
+    if (!this.modes.switchTo('map')) { if (this.modes.current !== this) this.modes.switchTo(this.id); this.open('location'); }
     await this.voice?.say?.('Got a fix. On your display.');
   }
 

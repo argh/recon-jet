@@ -22,6 +22,7 @@ import { SystemMode } from './modes/system/index.js';
 import { AssistantMode } from './modes/assistant/index.js';
 import { ShellMode } from './modes/shell/index.js';
 import { DoomMode } from './modes/doom/index.js';
+import { MapMode } from './modes/map/index.js';
 
 const s = Schema.create;
 
@@ -46,6 +47,7 @@ export class Jet extends AppModule {
       .property('actions', s('Actions').meta('internal', true))
       .property('logMode', s('LogMode').meta('internal', true))
       .property('demoMode', s('DemoMode').meta('internal', true))
+      .property('mapMode', s('MapMode').meta('internal', true))
       .property('systemMode', s('SystemMode').meta('internal', true))
       .property('assistantMode', s('AssistantMode').meta('internal', true))
       .property('shellMode', s('ShellMode').meta('internal', true))
@@ -53,9 +55,9 @@ export class Jet extends AppModule {
       .property('logLevel', s('string').default('info').values(['debug', 'info', 'warn', 'error']).meta('description', 'log threshold'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer (read before configuration)'))
       .property('tickRate', s('number').default(60000).meta('hidden', true)),
-    register: [DeviceLink, Surface, Input, Power, Sensors, Sounds, Wear, Gps, Actions, Ui, Modes, Llm, Voice, AssistantMode, DemoMode, DoomMode, ShellMode, LogMode, SystemMode],
+    register: [DeviceLink, Surface, Input, Power, Sensors, Sounds, Wear, Gps, Actions, Ui, Modes, Llm, Voice, AssistantMode, DemoMode, DoomMode, MapMode, ShellMode, LogMode, SystemMode],
   };
-  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; sounds; wear; gps; actions; logMode; demoMode; systemMode; assistantMode; shellMode; doomMode; logLevel; deviceConfig;
+  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; sounds; wear; gps; actions; logMode; demoMode; mapMode; systemMode; assistantMode; shellMode; doomMode; logLevel; deviceConfig;
 
   async init() {
     await super.init();
