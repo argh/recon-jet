@@ -29,3 +29,5 @@ device/doom/build/
 # Doom's IWADs are not ours to distribute (device/doom/README.md says where to get one)
 *.wad
 *.WAD
+# IDE
+.idea/
