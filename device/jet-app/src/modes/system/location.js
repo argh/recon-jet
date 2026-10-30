@@ -72,7 +72,7 @@ export class LocationScreen {
       y = row(s, y, 'fix', g.fix === 'none' ? 'none yet' : `${g.fix.toUpperCase()}${g.hdop != null ? `  hdop ${g.hdop}` : ''}`, g.fix === 'none' ? C.dim : C.ok);
     }
     if (g && g.lat != null) {
-      y = row(s, y, 'position', `${g.lat.toFixed(5)}  ${g.lon.toFixed(5)}${g.altM != null ? `  ${Math.round(g.altM)} m` : ''}`, g.fix === 'none' ? C.dim : C.ok);
+      y = row(s, y, 'position', `${g.lat.toFixed(5)}  ${g.lon.toFixed(5)}${g.altM != null ? `  ${Math.round(g.altM)} m` : ''}${g.good ? '' : '  (rough)'}`, g.good ? C.ok : C.dim);
       if (g.speedKmh != null) y = row(s, y, 'motion', `${g.speedKmh} km/h${g.courseDeg != null ? `  ${Math.round(g.courseDeg)} deg` : ''}`);
       if (g.time) y = row(s, y, 'gps time', new Date(g.time).toISOString().slice(11, 19) + ' utc', C.dim);
     }

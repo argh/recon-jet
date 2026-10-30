@@ -21,8 +21,8 @@ import { Schema } from '@versionzero/module-manager';
 
 const s = Schema.create;
 const WAKE_REMNANT = /^(?:(?:hey|heya|hey ya|hiya|okay|ok) jet|jet,)[,.!?]* /;
-const VERB_FORMS = /^(run|open|enabl|disabl)(?:ning|ing|e?s|e?d) /;   // "running" -> "run", "enabling" -> "enable"
-const STEM = { run: 'run', open: 'open', enabl: 'enable', disabl: 'disable' };
+const VERB_FORMS = /^(run|open|check|enabl|disabl)(?:ning|king|ing|e?s|e?d) /;   // "running" -> "run", "checking" -> "check"
+const STEM = { run: 'run', open: 'open', check: 'check', enabl: 'enable', disabl: 'disable' };
 
 /** @param {string} text @returns {string} */
 export function normalise(text) {

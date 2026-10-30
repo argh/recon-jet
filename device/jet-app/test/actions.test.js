@@ -11,6 +11,7 @@ test('actions: normalising drops case, punctuation and what the capture kept of 
   assert.equal(normalise('jet lag is awful'), 'jet lag is awful', 'only a leading wake word goes');
   assert.equal(normalise("what's the jet's speed"), "what's the jet's speed");
   assert.equal(normalise('Running analysis.'), 'run analysis', 'the ASR inflects the verb'); assert.equal(normalise('Enabling Bluetooth'), 'enable bluetooth');
+  assert.equal(normalise('Checking my location.'), 'check my location'); assert.equal(normalise('chickens are checking in'), 'chickens are checking in');
   assert.equal(normalise('opens the door'), 'open the door'); assert.equal(normalise('runner stopped'), 'runner stopped', 'only the verb forms');
   assert.equal(normalise(''), ''); assert.equal(normalise(null), '');
 });

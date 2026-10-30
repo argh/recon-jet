@@ -73,14 +73,20 @@ test('gps module: follows the FIFO, logs raw sentences, survives writer restarts
   await until(() => cmds.includes(0x10), 'session started');
   assert.deepEqual(cmds.slice(0, 2), [1, 0x10], 'baseband start, then fix start');
   assert.equal(gps.state.satsInView, 3); assert.equal(gps.state.satsUsed, 3);
+  assert.equal(gps.state.good, false, 'three satellites is not a position (the indoor flap is 0 <-> 4-5)');
+  assert.equal(gps.goodFix(), null);
   assert.equal(updates.length, 1, 'bursts collapse into one update');
   // the writer closed (daemon restart): a new writer is picked up
   await sleep(60);
   w = fs.createWriteStream(fifo);
-  w.end(frame(nmea('GPGSV,1,1,07')));
+  w.write(frame(nmea('GPGSV,1,1,07')));
+  w.write(frame(nmea('GPGGA,123520,4807.038,N,01131.000,E,1,05,1.0,545.4,M,46.9,M,,')));
+  w.end(frame(nmea('GPGSA,A,3,01,02,03,04,05,,,,,,,,2.0,1.0,1.6')));
   await until(() => gps.state.satsInView === 7, 'reopened');
+  await until(() => gps.state.good, 'gated fix');
+  assert.ok(gps.goodFix(), 'fresh and good');
   const log = fs.readFileSync(gps.logFile, 'utf8');
-  assert.equal(log.split('\n').filter((l) => l && !l.startsWith('#')).length, 3);
+  assert.equal(log.split('\n').filter((l) => l && !l.startsWith('#')).length, 5);
   assert.match(log, /GPGSV,1,1,07/);
   gps.stopListening(); gps.stopListening();
   assert.equal(gps.listening, false);

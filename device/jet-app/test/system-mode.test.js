@@ -14,7 +14,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** Poll until `cond()` is true (2 s limit). */
 async function until(cond, what = 'condition') { for (let i = 0; i < 400; i++) { if (cond()) return; await sleep(5); } throw new Error(`timeout: ${what}`); }
 
-async function make({ calibrated = false, glanceRaw = 150 } = {}) {
+async function make({ calibrated = false, glanceRaw = 150, extra = {} } = {}) {
   const dir = tmpdir('jet-system-');
   const iio = path.join(dir, 'iio', 'iio:device5'); fs.mkdirSync(iio, { recursive: true });
   fs.writeFileSync(path.join(iio, 'name'), 'tmd2771\n');
@@ -27,12 +27,12 @@ async function make({ calibrated = false, glanceRaw = 150 } = {}) {
   const link = fakeLink();
   const ui = Object.assign(new EventEmitter(), { renders: 0, strips: [], requestRender() { this.renders++; }, setStrip(t) { this.strips.push(t); }, surface: { width: 428, height: 240 } });
   const input = new EventEmitter(), power = Object.assign(new EventEmitter(), { last: null, smoothed: null });
-  const modes = { registered: [], list: [], register(m) { this.registered.push(m.id); } };
+  const modes = { registered: [], list: [], current: null, register(m) { this.registered.push(m.id); }, switchTo() { return true; } };
   const sys = Object.assign(new SystemMode(), {
     ofmArgsFile: path.join(dir, 'mainline', 'ofm-args'), ofmSysfs: dir, glanceFile: path.join(dir, 'mainline', 'glance'), iioDir: path.join(dir, 'iio'),
     backlightFile: path.join(dir, 'mainline', 'backlight'), backlightSysfs: path.join(dir, 'brightness'), netDir: path.join(dir, 'net'),
     modes, ui, input, power, sensors: { glance: null, view: null, worn: null }, deviceLink: link, sounds: fakeSounds(),
-    deviceConfig: path.join(dir, 'mainline', 'jet-app.json'), gpsScript: path.join(dir, 'gps.sh'), btMarker: path.join(dir, 'mainline', 'bt'), wear: { enabled: false, lit: true, calls: [], setEnabled(on) { this.enabled = on; this.calls.push(on); } } });
+    deviceConfig: path.join(dir, 'mainline', 'jet-app.json'), gpsScript: path.join(dir, 'gps.sh'), btMarker: path.join(dir, 'mainline', 'bt'), checkFixS: 180, ...extra, wear: { enabled: false, lit: true, calls: [], setEnabled(on) { this.enabled = on; this.calls.push(on); } } });
   if (calibrated) { fs.mkdirSync(path.join(dir, 'mainline')); fs.writeFileSync(sys.ofmArgsFile, 'thr_x=41 thr_y=38\n'); fs.writeFileSync(sys.glanceFile, '180 197\n'); }
   await sys.start();
   return { sys, dir, link, ui, input, power, modes, setRaw, read: (f) => fs.readFileSync(path.join(dir, f), 'utf8') };
@@ -155,6 +155,42 @@ test('system: Location toggles GPS through the bring-up script; "enable gps" goe
   sys.gpsScript = path.join(dir, 'missing.sh');
   await assert.rejects(sys.screens.location.set(true), /missing\.sh/);
   assert.equal(ui.strips.at(-1), 'gps off', 'no strip for the failure');
+});
+
+test('system: "check my location" speaks the hunt: satellites as they lock, the fix brings the screen up', async () => {
+  const voice = { said: [], warmed: 0, async say(t) { this.said.push(t); }, warm() { this.warmed++; } };
+  const gps = { sats: 0, fix: null, get state() { return { satsUsed: this.sats }; }, goodFix() { return this.fix; }, listen() {}, stopListening() {}, on() {} };
+  const actions = { list: [], register(name, pattern, run) { this.list.push({ name, pattern, run }); return this; } };
+  const { sys, ui, dir } = await make({ calibrated: true, extra: { voice, gps, actions, checkFixS: 1 } });
+  sys.checkStepMs = 10;
+  const check = actions.list.find((a) => a.name === 'check location');
+  assert.ok(check.pattern.test('check my location')); assert.ok(check.pattern.test('check gps'));
+  assert.ok(!check.pattern.test('check my calendar'));
+  sys.enter();
+  // no fix in time: the hunt narrates and gives up onto the screen
+  check.run();
+  await until(() => voice.said.length >= 2, 'gave up');
+  assert.equal(voice.said[0], 'Getting a fix on you.');
+  assert.match(voice.said.at(-1), /No fix yet/);
+  assert.equal(sys.screen, sys.screens.location, 'the hunt is on the glass');
+  assert.equal(voice.warmed, 1);
+  assert.match(fs.readFileSync(path.join(dir, 'gps-calls'), 'utf8'), /^start\n/, 'gps was turned on');
+  // satellites lock, then the gated fix: progressive news, then the screen and the word
+  voice.said.length = 0;
+  sys.open(null);
+  check.run();
+  await until(() => voice.said.length === 1, 'hunting again');
+  gps.sats = 3;
+  await until(() => voice.said.includes('3 satellites locked.'), 'sats spoken');
+  gps.sats = 5; gps.fix = { good: true };
+  await until(() => voice.said.at(-1) === 'Got a fix. On your display.', 'fix spoken');
+  assert.equal(sys.screen, sys.screens.location);
+  assert.ok(!voice.said.includes('5 satellites locked.'), 'the fix beat the count');
+  // a second call while one runs is swallowed; with a fresh good fix the answer is immediate
+  voice.said.length = 0;
+  check.run(); check.run();
+  await until(() => voice.said.at(-1) === 'Got a fix. On your display.', 'immediate');
+  assert.equal(voice.said.length, 1);
 });
 
 test('system: Wear toggles the off-head behaviour live and persists it into the per-device config layer', async () => {

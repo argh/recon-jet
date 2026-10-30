@@ -23,16 +23,27 @@ export class Gps extends EventEmitter {
       .property('socket', s('string').default('/android-data/gps/gps4121').meta('description', 'the GPS daemon\'s command socket: the fix session is started there'))
       .property('logFile', s('string').default('/android-data/gps/nmea.log').meta('description', 'raw NMEA capture while listening, appended (reset past 5 MB); empty = off'))
       .property('retryMs', s('number').default(2000).meta('description', 'reopen interval while the FIFO has no writer'))
+      .property('maxHdop', s('number').default(10).meta('description', 'a fix with worse dilution is not treated as a position'))
+      .property('minSats', s('number').default(4).meta('description', 'a fix using fewer satellites is not treated as a position'))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  fifo; socket; logFile; retryMs; logger;
+  fifo; socket; logFile; retryMs; maxHdop; minSats; logger;
 
   /** @type {NmeaState} the rolling picture; `state` is its snapshot */ nmea = new NmeaState();
   listening = false;
   #fd = null; #retry = null; #log = null; #records = null; #sock = null; #sockRetry = null;
   #emitAt = 0; #summaryAt = 0; #lastFix = 'none';
 
-  get state() { return this.nmea.snapshot(); }
+  /** The snapshot, plus the quality gate: `good` = a position worth showing or speaking
+   * (during signal loss the chip emits wild fixes with hdop ~100 and under 4 satellites). */
+  get state() {
+    const s = this.nmea.snapshot();
+    s.good = s.fix !== 'none' && s.lat != null && s.satsUsed >= (this.minSats ?? 4) && (s.hdop == null || s.hdop <= (this.maxHdop ?? 10));
+    return s;
+  }
+
+  /** The gated position when it is also fresh (sentences within 5 s), else null. */
+  goodFix() { const s = this.state; return s.good && s.at && Date.now() - s.at < 5000 ? s : null; }
 
   /** The app may have (re)started while GPS was already on: follow the stream again. */
   async start() {

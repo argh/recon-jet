@@ -53,12 +53,14 @@ export class SystemMode {
       .property('sensors', s('Sensors').meta('internal', true))
       .property('wear', s('Wear').meta('internal', true))
       .property('gps', s('Gps').meta('internal', true))
+      .property('voice', s('Voice').lax().meta('internal', true))
+      .property('checkFixS', s('number').default(180).meta('description', '"check my location": how long to hunt for a fix before giving up'))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('sounds', s('Sounds').meta('internal', true))
       .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; gpsScript; deviceConfig; modes; ui; input; power; sensors; wear; gps; deviceLink; sounds; actions; logger;
+  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; gpsScript; deviceConfig; checkFixS; modes; ui; input; power; sensors; wear; gps; voice; deviceLink; sounds; actions; logger;
 
   id = 'system'; label = 'System'; spoken = ['settings'];
   /** @type {Chooser} */ menu;
@@ -90,6 +92,10 @@ export class SystemMode {
       if (this.modes.current !== this) this.modes.switchTo(this.id);
       this.wizard = null; this.open(SCREEN_ALIAS[m[1]] ?? m[1]);
     });
+    // "heya jet, check my location": GPS on if it is off, then a spoken running commentary in
+    // the background until the fix lands (the Location screen comes up) or the hunt times out.
+    // The action itself resolves at once, so the voice route's ack is all the registry says.
+    this.actions?.register('check location', /^check (?:my |the )?(location|position|gps)\b/, () => { this.#checkLocation(); });
     // "heya jet, enable bluetooth" / "disable wear": a setting's switch, from any mode (the ASR
     // sometimes hears the past tense, hence the optional d)
     this.actions?.register('setting', /^(enabled?|disabled?) (bluetooth|wear|where|ware|dark|gps|location)$/, (m) => {
@@ -98,6 +104,43 @@ export class SystemMode {
     });
   }
   #current = false;
+
+  // ---- "check my location" --------------------------------------------------------------------
+  #checking = false;
+  checkStepMs = 2000;   // the watch cadence (tests shrink it)
+
+  /** The spoken hunt: progressive satellite news until the gated fix lands or time runs out. */
+  async #checkLocation() {
+    if (this.#checking) return;
+    this.#checking = true;
+    try {
+      if (!(await this.screens.location.probe())) await this.screens.location.set(true);
+      this.voice?.warm?.();
+      if (this.gps?.goodFix()) return await this.#fixFound();
+      await this.voice?.say?.('Getting a fix on you.');
+      const t0 = Date.now();
+      let saidSats = 0;
+      while (Date.now() - t0 < this.checkFixS * 1000) {
+        await new Promise((r) => setTimeout(r, this.checkStepMs));
+        if (this.gps?.goodFix()) return await this.#fixFound();
+        const sats = this.gps?.state.satsUsed ?? 0;
+        if (sats >= 2 && sats !== saidSats) { saidSats = sats; await this.voice?.say?.(`${sats} satellites locked.`); }
+      }
+      await this.voice?.say?.('No fix yet. I will keep looking; your display has the hunt.');
+      if (this.modes.current !== this) this.modes.switchTo(this.id);
+      this.open('location');
+    } catch (error) {
+      this.logger?.warn({ error: error.message }, 'check location failed');
+      await this.voice?.say?.('The receiver did not come up.').catch(() => {});
+    } finally { this.#checking = false; }
+  }
+
+  /** The fix landed: the screen first, then the word. */
+  async #fixFound() {
+    if (this.modes.current !== this) this.modes.switchTo(this.id);
+    this.open('location');
+    await this.voice?.say?.('Got a fix. On your display.');
+  }
 
   /** First use: no pad or glance calibration on userdata yet. */
   async firstUse() {
