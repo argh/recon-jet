@@ -23,10 +23,12 @@
 // Debug: `voice.debugPort` (JET_VOICE_DEBUG_PORT) serves POST /talk (start a turn, as the
 // Assistant mode's front press would), POST /cancel, POST /say {text} (TTS round trip to the
 // speaker), POST /phrases (render the missing phrases), POST /look {question?} (a camera snapshot
-// through the vision model, as the Demo mode's front press), GET /state.
+// through the vision model, as the Demo mode's front press), GET /state, GET /screen.png?scale=N (the
+// framebuffer as a PNG: what the panel shows).
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import { screenshot } from '../../lib/screenshot.js';
 import path from 'node:path';
 import jpeg from 'jpeg-js';
 import { Schema } from '@versionzero/module-manager';
@@ -55,7 +57,7 @@ export class Voice extends EventEmitter {
       .property('wake', s('boolean').default(true).meta('description', 'hands-free: jetd listens for the wake word (needs mainline/wake.tflite on the device) and a hit starts a turn'))
       .property('wakeCutoff', s('number').default(0.97).meta('description', 'detection probability cutoff, from the model manifest'))
       .property('wakeWindow', s('number').default(5).meta('description', 'probabilities averaged for a detection'))
-      .property('debugPort', s('number').default(0).meta('description', 'debug HTTP port (POST /talk, /cancel, /say, /phrases, /look; GET /state); 0 = off'))
+      .property('debugPort', s('number').default(0).meta('description', 'debug HTTP port (POST /talk, /cancel, /say, /phrases, /look; GET /state, /screen.png?scale=N); 0 = off'))
       .property('llm', s('Llm').meta('internal', true))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
@@ -389,6 +391,10 @@ export class Voice extends EventEmitter {
         const run = (p) => p.then((r) => reply(200, r), (e) => reply(500, { error: e.message }));
         try {
           const json = body ? JSON.parse(body) : {};
+          if (req.method === 'GET' && req.url.startsWith('/screen.png')) {   // the panel as shown (jetd, jet-app and the viewfinder); ?scale=N enlarges
+            const scale = Number(new URL(req.url, 'http://x').searchParams.get('scale')) || 1;
+            return screenshot({ scale }).then(({ png }) => { res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': png.length }); res.end(png); }, (e) => reply(500, { error: e.message }));
+          }
           if (req.method === 'GET' && req.url === '/state') return reply(200, { state: this.state, turn: this.turn, transcript: this.transcript, answer: this.answer, phrases: this.phraseStatus, configured: this.configured, llm: this.llm?.models ?? null });
           if (req.method === 'POST' && req.url === '/talk') return reply(200, { started: this.startTurn(), turn: this.turn });
           if (req.method === 'POST' && req.url === '/cancel') return reply(200, { cancelled: this.cancel() });
