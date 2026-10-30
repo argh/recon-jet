@@ -13,7 +13,9 @@ speaker, IMU, WiFi/BT) boots mainline Linux 6.18 from its eMMC boot partition in
 seconds to a live display, with the rooted stock Android kept in the recovery slot as a fallback.
 Every piece of hardware the project needs works from mainline: display, touchpad, both buttons,
 camera, WiFi, Bluetooth (LE keyboard paired), speaker, microphones, IMU, barometer, proximity
-"glance" sensor, board temperature, charger and fuel gauge, power LED, watchdog, RTC. Not ported:
+"glance" sensor, board temperature, charger and fuel gauge, power LED, watchdog, RTC. The wake
+word ("heya jet", a microWakeWord model trained on the Mac, `agent/wake`) runs on the device
+beside jetd for under 2 % of a core. Not ported:
 GPS and FM (closed protocol / removed driver), the Apple MFi coprocessor, and the speaker's DSP
 tuning. A small static C daemon (`jetd`) owns the panel and inputs and speaks a line protocol on
 a local socket; a Node application (`jet-app`) on the device owns the user interface as a set of
@@ -64,6 +66,7 @@ reset on purpose because warm resets hang in the stock bootloader about one time
 | Front button | working, KEY_102ND | gpio-keys | shares the pad of the stock console UART RX, so there is no serial console |
 | Rear button | working, KEY_END | PMIC PWRON via a patched twl4030-pwrbutton | long hold is the PMIC power path (5 s off, 9 s forced) and can never be used by software |
 | Camera (MT9M114, CSI-2) | working: 640x480 and 1280x960 UYVY, ~21 fps to memory, snapshots and a live viewfinder | `omap4iss` resurrected from v6.6 staging with DT glue, mainline mt9m114 | never rmmod the ISS; never read ISS registers without an active stream (L3 abort, hard hang); the CSI-2 reset needs idle-high lanes, so the sensor is powered fully off between streams; the first frames after start are dark/green (6 skipped) |
+| Wake word ("heya jet") | working: `agent/wake/jetwake` (tflite-micro + the TFLite audio frontend, static), jetd `D 1` listen mode, hands-free look / question / switch-mode / bluetooth verified from the speaker loop and from rg's recorded voice | microWakeWord model trained with `agent/wake/train/` (piper positives spelled so espeak says "hey-uh jet" the way it is spoken, two sets of hard negatives, rg's own recordings as extra positives), judged on real mic recordings with `realtest.sh`; `agent/wake/models/heya_jet.tflite` is round 6 | <2 % of a core; cutoff 0.5, window 5 on the device; the first rounds were trained on "heya" as espeak says it ("hee-ya"), which nobody says, so they heard piper and not rg; the DMICs take seconds to settle after loud speech, so the VAD also ends a turn at 8 % of the speech peak; needs `mainline/wake.tflite` on userdata |
 | WiFi (WL1283) | working: ~81/67 Mbit/s, auto-join at ~6 s | wlcore built in, linux-firmware blobs, stock NVS | power save must stay off (init re-disables every 30 s) or rx collapses to 1 Mbit/s; the PMIC 32 kHz output must be forced on or the card never initialises after a power cycle; stock firmware blobs are API 4 and unusable |
 | Bluetooth (WL1283, HCI-LL on UART2) | working: controller, bluetoothd, LE HID keyboard paired and auto-reconnecting | `hci_uart` serdev, bluez 5.66, `uhid` (added to the config: omap2plus omits it) | **coexistence is untuned: hci0 up pins WiFi rx at 1 Mbit/s.** The radio is therefore off at boot unless a marker file says otherwise, and a menu toggle flips it live. bluetoothd needs ~5 s on this CPU before the controller exists |
 | GPS, FM | not ported | TI shared transport (`ti-st`, removed from mainline but carriable) | GPS speaks a closed "AI2" protocol to stock user space; it would need a black-box capture under open sky. FM needs the removed `wl128x` fmdrv |
