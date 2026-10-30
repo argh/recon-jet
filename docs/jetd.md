@@ -46,7 +46,8 @@ host -> jet:
 | `M <remote\|log\|shell\|setup>` | switch mode |
 | `I <text>` | type into the shell pty (`\n`/`\r` = Enter (CR), `\t`, `\e` = ESC, `\\`) |
 | `S [w h [skip]]` | camera snapshot (default 640x480, skip 6 frames for exposure/AWB) -> `f <w> <h> UYVY <len>\n` + bytes, or `e <msg>` |
-| `V [max_s]` / `v` | start / stop voice capture |
+| `V [max_s]` / `v` | start / stop voice capture (a turn: 16 kHz chunks until silence, max_s or `v`) |
+| `D <0\|1> [cutoff [window]]` | listen for the wake word: the mic stays open and feeds jetwake (`agent/wake`, model `mainline/wake.tflite`, defaults 0.97 / 5) except while the speaker plays; a hit is `d <avg> <max>` and a turn begins at once with the 300 ms before the hit sent first; -> `x <on\|off\|error ...>` |
 | `W <len>` + bytes / `w` | queue 48 kHz stereo S16 PCM; `w` ends the clip |
 | `Q` | power snapshot -> `q vbat vsys vbus mA ctrl1 stat1 linsts cinlimit vichrg udc maxpower` |
 | `G` / `O` | current glance / wear state -> `g <at> <raw>` / `o <worn> <raw>` |
@@ -67,6 +68,8 @@ jet -> host:
 | `o <worn> <raw>` | wear changed: the glasses are on a head (1) or off it (0); off the head the sensor reads ~0, worn 130-320 whichever way the eye looks, so fixed thresholds (>= 100 worn, <= 60 off; `mainline/wear` "on off" overrides) need no calibration. Both after 1 s of agreement |
 | `n <degrees>` | head turned then held still ("new view") |
 | `a <len>` + bytes | 16 kHz mono S16 capture chunk (100 ms); `A <end\|max\|stop\|error>` ends it |
+| `d <avg> <max>` | wake word heard (window-average and peak probability, 0..255); the capture turn follows as after `V` |
+| `x <on\|off\|error ...>` | wake word listening state (`error no model`: put a model at `/android-data/mainline/wake.tflite`, e.g. `scp -O agent/wake/models/heya_jet.tflite root@jet.local:/android-data/mainline/wake.tflite`) |
 | `w <done\|timeout\|error\|idle>` | playback finished |
 | `p`, `q ...` | pong, power snapshot |
 

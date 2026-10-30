@@ -18,6 +18,7 @@ mkdir -p $W/initramfs/lib/modules && cp $OUT/panel-kopin-a230.ko $W/initramfs/li
 [ -f $OUT/tsl2772.ko ] && cp $OUT/tsl2772.ko $W/initramfs/lib/modules/
 # display test tool (color bars + moving block via OMAPFB_UPDATE_WINDOW), same binary as the bridge
 [ -x agent/jetd ] && cp agent/jetd $W/initramfs/bin/jetd && chmod 755 $W/initramfs/bin/jetd
+[ -x agent/wake/jetwake ] && cp agent/wake/jetwake $W/initramfs/bin/jetwake && chmod 755 $W/initramfs/bin/jetwake   # the wake word detector jetd spawns (D 1)
 [ -x tools/regdump/regdump ] && cp tools/regdump/regdump $W/initramfs/bin/regdump && chmod 755 $W/initramfs/bin/regdump
 [ -x tools/reboot2/reboot2 ] && cp tools/reboot2/reboot2 $W/initramfs/bin/reboot2 && chmod 755 $W/initramfs/bin/reboot2
 [ -x tools/fbfill/fbfill ] && cp tools/fbfill/fbfill $W/initramfs/bin/fbfill && chmod 755 $W/initramfs/bin/fbfill

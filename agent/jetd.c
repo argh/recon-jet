@@ -41,6 +41,8 @@
  *   (drawing commands are ignored unless the remote mode is showing; the hub
  *    gets a fresh "h" hello whenever remote comes back and should redraw)
  *   V [max_s]         start voice capture (see the voice section), v stops it
+ *   D <0|1> [cutoff [window]]   listen for the wake word (jetwake over the mic, see the voice
+ *                     section); a hit is "d <avg> <max>" and starts a capture as V would
  *   W <len> + bytes   queue 48 kHz stereo S16 PCM for the speaker; w = end of clip
  *   Y                 stop playback immediately and drop queued audio (barge-in) -> "w flushed"
  *   K <0|1>           raw keys: the client owns the UI: jetd stays in remote mode, forwards every
@@ -66,6 +68,8 @@
  *   o <worn> <raw>              wear changed: the glasses are on a head (1) or off (0)
  *   n <degrees>                 head turned that much and then held still (new view)
  *   a <len> + bytes             16 kHz mono S16 capture chunk; A <end|max|stop|error> ends it
+ *   d <avg> <max>               wake word heard (probabilities 0..255); a capture follows
+ *   x <on|off|error ...>        listening state
  *   w <done|timeout|error|idle> playback finished
  */
 #include <arpa/inet.h>
@@ -296,7 +300,9 @@ struct hub { int fd; char inbuf[1024]; size_t inlen; size_t bin_need; int64_t st
 static struct hub hubs[MAXHUB]; static int nhubs;
 static struct hub *cur_hub;      /* the hub whose line is being handled (W payload accounting) */
 static int only_fd = -1;         /* when >= 0, sendf/send_all go to this hub only (hello + log replay) */
-static void hub_drop(int i) { close(hubs[i].fd); hubs[i] = hubs[--nhubs]; if (!nhubs) { raw_keys = 0; ext_surface = 0; dirty = 1; } }   /* no client: recovery UI returns */
+static int turn_on, listen_on; static void turn_end(const char *why); static void listen_stop(const char *why);   /* voice section, below */
+/* no client: the recovery UI returns, the mic is released (a turn or the wake word has no one to serve) */
+static void hub_drop(int i) { close(hubs[i].fd); hubs[i] = hubs[--nhubs]; if (!nhubs) { raw_keys = 0; ext_surface = 0; dirty = 1; if (turn_on) turn_end("stop"); if (listen_on) listen_stop("off"); } }
 static int hub_add(int fd) {
     if (nhubs == MAXHUB) hub_drop(0);
     struct hub *h = &hubs[nhubs++]; memset(h, 0, sizeof *h); h->fd = fd; return nhubs - 1;
@@ -1405,21 +1411,33 @@ static void imu_poll(void) {
 static int send_all(const void *buf, size_t len);
 
 /* ---- voice: capture and playback through ALSA in the Alpine chroot ------------------
- * V [max_s]  start capture: arecord hw:0,1 (96 kHz S32 stereo, the DMIC's only mode) is
- *            downmixed/decimated here to 16 kHz mono S16 and streamed as "a <len>\n"+bytes
- *            (100 ms chunks). Ends on silence (energy VAD: ~0.8 s below the floor after speech),
- *            on max_s (default 8), or on "v"; then "A <end|max|stop|error>".
+ * The mic is one arecord (hw:0,1, 96 kHz S32 stereo, the DMIC's only mode) downmixed and
+ * decimated here to 16 kHz mono S16 in 100 ms chunks; it runs while a turn or the wake word
+ * detector needs it.
+ * V [max_s]  a turn: chunks stream out as "a <len>\n"+bytes until silence (energy VAD: ~0.8 s
+ *            below the floor after speech), max_s (default 8) or "v"; then "A <end|max|stop|error>".
+ * D 1 [cutoff [window]]  listen: chunks feed jetwake (agent/wake, a microWakeWord model from
+ *            mainline/wake.tflite) instead, except while the speaker plays (no self-waking).
+ *            A hit sends "d <avg> <max>" and begins a turn at once: the 300 ms before the hit go
+ *            out first (the command's first syllable), the VAD floor is what the room measured
+ *            before the wake word and speech counts as already started, so "heya jet, look"
+ *            ends on the silence after "look". D 0 stops; "x <on|off|error ...>" reports.
  * W <len>    + <len> bytes of 48 kHz stereo S16 PCM to play (aplay hw:0,0); chunks are queued
  *            and drained without blocking the UI; "w" marks the end -> "w" back when played. */
 #define ALPINE "/mnt/data/rootfs"      /* the userdata rootfs (symlink; see kernel/rootfs) */
-static pid_t cap_pid, play_pid;
-static int cap_fd = -1, play_fd = -1;
+static pid_t cap_pid, play_pid, wake_pid;
+static int cap_fd = -1, play_fd = -1, wake_in = -1, wake_out = -1;
+/* turn_on: a turn streams to the clients; listen_on: the mic feeds the detector (both declared with hub_drop) */
 static int64_t cap_t0, cap_max_ms, cap_last_voice, play_last;
-static int cap_speech, cap_chunks; static double cap_floor;
+static int cap_speech, cap_chunks; static double cap_floor, cap_peak;
 static int32_t cap_acc[2]; static int cap_accn;              /* decimation accumulator */
 static int16_t cap_out[1600]; static int cap_outn;            /* 100 ms of 16 kHz mono */
 static unsigned char cap_in[76800]; static size_t cap_inlen;
+static double floor_hist[30]; static int floor_i;             /* chunk RMS over the last 3 s of listening */
+static int16_t pre[3][1600]; static int pre_n, pre_i;         /* the last 300 ms before a wake */
+static char wake_line[128]; static int wake_linelen;
 static unsigned char *play_buf; static size_t play_len, play_off, play_cap; static int play_end;
+static void listen_stop(const char *why);
 
 static pid_t spawn_pipe(char *const argv[], int *fd, int for_write) {
     /* O_CLOEXEC: a child must not inherit the other child's pipe (an arecord started while aplay
@@ -1436,41 +1454,96 @@ static pid_t spawn_pipe(char *const argv[], int *fd, int for_write) {
     if (for_write) { close(p[0]); *fd = p[1]; } else { close(p[1]); *fd = p[0]; }
     return pid;
 }
-static void cap_send_chunk(void) {
-    if (!cap_outn) return;
-    double sq = 0; for (int i = 0; i < cap_outn; i++) sq += (double)cap_out[i] * cap_out[i];
-    double rms = sqrt(sq / cap_outn);
+/* a child fed on stdin (*in, non-blocking: a stalled detector drops audio rather than stalling jetd) and read on stdout (*out); stderr stays ours */
+static pid_t spawn_duplex(char *const argv[], int *in, int *out) {
+    int a[2], b[2];
+    if (pipe2(a, O_CLOEXEC) < 0) return -1;
+    if (pipe2(b, O_CLOEXEC) < 0) { close(a[0]); close(a[1]); return -1; }
+    pid_t pid = fork();
+    if (pid < 0) { close(a[0]); close(a[1]); close(b[0]); close(b[1]); return -1; }
+    if (pid == 0) { dup2(a[0], 0); dup2(b[1], 1); close(a[0]); close(a[1]); close(b[0]); close(b[1]); execv(argv[0], argv); _exit(127); }
+    close(a[0]); close(b[1]); *in = a[1]; *out = b[0];
+    fcntl(*in, F_SETFL, fcntl(*in, F_GETFL) | O_NONBLOCK);
+    return pid;
+}
+
+static double chunk_rms(void) { double sq = 0; for (int i = 0; i < cap_outn; i++) sq += (double)cap_out[i] * cap_out[i]; return sqrt(sq / (cap_outn ? cap_outn : 1)); }
+/* energy VAD: the first 300 ms set the floor, speech is 3x it, 0.8 s under 1.5x it (or under 8 % of the
+ * loudest chunk: the mics take seconds to settle back to the room after a loud voice) ends the turn */
+static void turn_vad(double rms) {
     cap_chunks++;
-    if (cap_chunks <= 3) { if (rms > cap_floor) cap_floor = rms; }
+    if (cap_chunks <= 3) { if (rms > cap_floor) cap_floor = rms; return; }
+    if (rms > cap_peak) cap_peak = rms;
+    double start = cap_floor * 3 > 300 ? cap_floor * 3 : 300, end = cap_floor * 1.5 > 150 ? cap_floor * 1.5 : 150;
+    if (cap_peak * 0.08 > end) end = cap_peak * 0.08;
+    if (rms > start) { cap_speech = 1; cap_last_voice = now_ms(); }
+    else if (cap_speech && rms < end && now_ms() - cap_last_voice > 800) cap_speech = 2;   /* trailing silence done */
+}
+static void chunk_send(const int16_t *pcm, int n) { if (nhubs && n > 0) { sendf("a %d\n", n * 2); send_all(pcm, n * 2); } }
+/* a 100 ms chunk is complete (or a turn ends on a partial one): to the clients during a turn, else to the detector */
+static void chunk_ready(void) {
+    if (!cap_outn) return;
+    double rms = chunk_rms();
+    if (turn_on) { turn_vad(rms); chunk_send(cap_out, cap_outn); if (getenv("JETD_VAD")) fprintf(stderr, "vad %lld %.0f %d\n", (long long)(now_ms() - cap_t0), rms, cap_speech); }
     else {
-        double start = cap_floor * 3 > 300 ? cap_floor * 3 : 300, end = cap_floor * 1.5 > 150 ? cap_floor * 1.5 : 150;
-        if (rms > start) { cap_speech = 1; cap_last_voice = now_ms(); }
-        else if (cap_speech && rms < end && now_ms() - cap_last_voice > 800) cap_speech = 2;   /* trailing silence done */
+        floor_hist[floor_i++ % 30] = rms;
+        memcpy(pre[pre_i], cap_out, cap_outn * 2); pre_i = (pre_i + 1) % 3; if (pre_n < 3) pre_n++;
+        if (listen_on && wake_in >= 0 && play_pid <= 0 && write(wake_in, cap_out, cap_outn * 2) < 0 && errno != EAGAIN) listen_stop("error detector gone");
     }
-    if (nhubs) { sendf("a %d\n", cap_outn * 2); send_all(cap_out, cap_outn * 2); }
     cap_outn = 0;
 }
-static void cap_stop(const char *why) {
-    if (cap_pid <= 0) return;
-    cap_send_chunk();
+static void mic_close(void) {
+    if (cap_pid <= 0 || turn_on || listen_on) return;
     kill(cap_pid, SIGTERM); close(cap_fd); cap_fd = -1; waitpid(cap_pid, NULL, 0); cap_pid = 0;
-    sendf("A %s\n", why);
 }
-static void cap_start(int max_s) {
-    if (cap_pid > 0) cap_stop("restart");
+static int mic_open(void) {
+    if (cap_pid > 0) return 1;
     /* from the initramfs the ALSA tools live in the Alpine chroot; when jetd itself runs inside
      * the chroot (live testing over ssh) they are plain /usr/bin paths */
     char *argv_chroot[] = { "/bin/chroot", ALPINE, "/usr/bin/arecord", "-q", "-D", "hw:0,1", "-c", "2", "-r", "96000", "-f", "S32_LE", "-t", "raw", "-", NULL };
     char *argv_direct[] = { "/usr/bin/arecord", "-q", "-D", "hw:0,1", "-c", "2", "-r", "96000", "-f", "S32_LE", "-t", "raw", "-", NULL };
     cap_pid = spawn_pipe(access(ALPINE "/usr/bin/arecord", X_OK) == 0 ? argv_chroot : argv_direct, &cap_fd, 0);
-    if (cap_pid <= 0) { sendf("A error\n"); return; }
+    if (cap_pid <= 0) return 0;
+    cap_accn = 0; cap_outn = 0; cap_inlen = 0; cap_acc[0] = cap_acc[1] = 0; pre_n = 0; pre_i = 0; floor_i = 0;
+    return 1;
+}
+static void turn_end(const char *why) {
+    if (!turn_on) return;
+    chunk_ready();
+    turn_on = 0;
+    fprintf(stderr, "jetd: turn %s after %lld ms (last voice %lld ms in, floor %.0f)\n", why, (long long)(now_ms() - cap_t0), (long long)(cap_last_voice - cap_t0), cap_floor);
+    sendf("A %s\n", why);
+    mic_close();
+}
+/* V, or a wake word: stream chunks to the clients until silence, max_s or v */
+static void turn_begin(int max_s, int wake) {
+    if (turn_on) turn_end("restart");
+    if (!mic_open()) { sendf("A error\n"); return; }
     cap_t0 = now_ms(); cap_max_ms = (max_s > 0 ? max_s : 8) * 1000LL; cap_last_voice = cap_t0;
-    cap_speech = 0; cap_chunks = 0; cap_floor = 0; cap_accn = 0; cap_outn = 0; cap_inlen = 0;
-    cap_acc[0] = cap_acc[1] = 0;
+    turn_on = 1; cap_speech = 0; cap_chunks = 0; cap_floor = 0; cap_peak = 0;
+    if (wake) {
+        /* the user is already talking: the floor is the room before the wake word (the mean of the
+         * quieter half of the last 3 s, which leaves the wake word itself out), and the last 300 ms
+         * carry the command's first syllable */
+        int n = floor_i < 30 ? floor_i : 30; double sum = 0, mean = 0, f = 0; int k = 0;
+        for (int i = 0; i < n; i++) sum += floor_hist[i];
+        if (n) mean = sum / n;
+        for (int i = 0; i < n; i++) if (floor_hist[i] <= mean) { f += floor_hist[i]; k++; }
+        cap_floor = k ? f / k : 0; cap_chunks = 3; cap_speech = 1;
+        fprintf(stderr, "jetd: wake turn: floor %.0f (room mean %.0f over %d chunks), speech above %.0f, silence below %.0f\n", cap_floor, mean, n, cap_floor * 3 > 300 ? cap_floor * 3 : 300, cap_floor * 1.5 > 150 ? cap_floor * 1.5 : 150);
+        for (int i = 0; i < pre_n; i++) chunk_send(pre[(pre_i + 3 - pre_n + i) % 3], 1600);
+    }
+    pre_n = 0;
 }
 static void cap_read(void) {
     ssize_t r = read(cap_fd, cap_in + cap_inlen, sizeof cap_in - cap_inlen);
-    if (r <= 0) { cap_stop("error"); return; }
+    if (r <= 0) {   /* arecord died: the turn (if any) fails, listening stops */
+        int t = turn_on; turn_on = 0;
+        close(cap_fd); cap_fd = -1; waitpid(cap_pid, NULL, 0); cap_pid = 0;
+        if (t) sendf("A error\n");
+        if (listen_on) listen_stop("error mic gone");
+        return;
+    }
     cap_inlen += r;
     size_t frames = cap_inlen / 8, i;
     const int32_t *f = (const int32_t *)cap_in;
@@ -1480,12 +1553,51 @@ static void cap_read(void) {
             int32_t v = (cap_acc[0] + cap_acc[1]) / 12;                   /* average L+R over 6 frames */
             v >>= 8; if (v > 32767) v = 32767; if (v < -32768) v = -32768;
             cap_out[cap_outn++] = (int16_t)v; cap_acc[0] = cap_acc[1] = 0; cap_accn = 0;
-            if (cap_outn == 1600) cap_send_chunk();
+            if (cap_outn == 1600) chunk_ready();
         }
     }
     size_t used = frames * 8; memmove(cap_in, cap_in + used, cap_inlen - used); cap_inlen -= used;
-    if (cap_speech == 2) cap_stop("end");
-    else if (now_ms() - cap_t0 > cap_max_ms) cap_stop("max");
+    if (turn_on) { if (cap_speech == 2) turn_end("end"); else if (now_ms() - cap_t0 > cap_max_ms) turn_end("max"); }
+}
+/* ---- wake word: jetwake reads our 16 kHz chunks and prints "wake <ms> <avg> <max>" per hit ---- */
+static void listen_stop(const char *why) {
+    if (wake_pid > 0) { kill(wake_pid, SIGTERM); close(wake_in); close(wake_out); wake_in = wake_out = -1; waitpid(wake_pid, NULL, 0); wake_pid = 0; }
+    listen_on = 0; wake_linelen = 0;
+    sendf("x %s\n", why);
+    mic_close();
+}
+static void listen_start(const char *args) {   /* "[cutoff [window]]" after D 1 */
+    /* already listening: start over, the client may have a new model or cutoff */
+    if (wake_pid > 0) { kill(wake_pid, SIGTERM); close(wake_in); close(wake_out); wake_in = wake_out = -1; waitpid(wake_pid, NULL, 0); wake_pid = 0; wake_linelen = 0; }
+    static const char *bins[] = { "/bin/jetwake", "/mnt/data/wake/jetwake", "/android-data/wake/jetwake" };
+    static const char *models[] = { "/mnt/data/mainline/wake.tflite", "/android-data/mainline/wake.tflite" };
+    const char *bin = NULL, *model = NULL;
+    for (int i = 0; i < 3 && !bin; i++) if (access(bins[i], X_OK) == 0) bin = bins[i];
+    for (int i = 0; i < 2 && !model; i++) if (access(models[i], R_OK) == 0) model = models[i];
+    if (!bin || !model) { sendf("x error %s\n", !bin ? "no detector" : "no model"); return; }
+    char cutoff[16] = "0.97", window[8] = "5"; float c; int w;
+    int got = sscanf(args, "%f %d", &c, &w);
+    if (got >= 1 && c > 0 && c <= 1) snprintf(cutoff, sizeof cutoff, "%.3f", c);
+    if (got == 2 && w > 0 && w < 100) snprintf(window, sizeof window, "%d", w);
+    char *argv[] = { (char *)bin, "--cutoff", cutoff, "--window", window, (char *)model, NULL };
+    wake_pid = spawn_duplex(argv, &wake_in, &wake_out);
+    if (wake_pid <= 0) { sendf("x error spawn\n"); return; }
+    listen_on = 1;
+    if (!mic_open()) { listen_stop("error no mic"); return; }
+    fprintf(stderr, "jetd: listening for the wake word (%s, %s, cutoff %s, window %s)\n", bin, model, cutoff, window);
+    sendf("x on\n");
+}
+static void wake_read(void) {
+    ssize_t r = read(wake_out, wake_line + wake_linelen, sizeof wake_line - 1 - wake_linelen);
+    if (r <= 0) { listen_stop("error detector exited"); return; }
+    wake_linelen += r;
+    char *nl;
+    while ((nl = memchr(wake_line, '\n', wake_linelen))) {
+        *nl = 0; long ms; int avg, mx;
+        if (sscanf(wake_line, "wake %ld %d %d", &ms, &avg, &mx) == 3 && listen_on && !turn_on && play_pid <= 0) { sendf("d %d %d\n", avg, mx); turn_begin(0, 1); }
+        size_t used = nl - wake_line + 1; memmove(wake_line, wake_line + used, wake_linelen - used); wake_linelen -= used;
+    }
+    if (wake_linelen >= (int)sizeof wake_line - 1) wake_linelen = 0;
 }
 static void play_close(const char *why) {
     if (play_pid <= 0) return;
@@ -1540,9 +1652,10 @@ static void handle_line(char *l) {
     case 'P': sendf("p\n"); break;
     case 'G': sendf("g %d %d\n", glance_worn, glance_raw); break;
     case 'O': sendf("o %d %d\n", wear_worn, glance_raw); break;
-    case 'V': cap_start(atoi(l + 1)); break;
+    case 'V': turn_begin(atoi(l + 1), 0); break;
+    case 'D': { int on = 0; char rest[64] = ""; sscanf(l + 1, "%d %63[^\n]", &on, rest); if (on) listen_start(rest); else listen_stop("off"); } break;
     case 'Q': power_read(); sendf("q %d %d %d %d 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x %s %d\n", pstate.vbat, pstate.vsys, pstate.vbus, pstate.ma, pstate.ctrl1 & 0xff, pstate.stat1 & 0xff, pstate.lin & 0xff, pstate.cin & 0xff, pstate.vichrg & 0xff, pstate.udc[0] ? pstate.udc : "-", pstate.maxpower); break;
-    case 'v': cap_stop("stop"); break;
+    case 'v': turn_end("stop"); break;
     case 'W': if (cur_hub) cur_hub->bin_need = strtoul(l + 1, NULL, 10); break;   /* payload bytes follow the line */
     case 'w': if (play_pid > 0) { play_end = 1; play_drain(); } else sendf("w idle\n"); break;
     case 'Y': if (play_pid > 0) { kill(play_pid, SIGKILL); play_close("flushed"); } else sendf("w idle\n"); break;   /* barge-in: drop queued audio now */
@@ -1581,7 +1694,7 @@ int main(int argc, char **argv) {
 
     for (;;) {
         if (!nhubs && connecting_fd < 0 && now_ms() >= next_connect) try_connect();
-        struct pollfd pf[9 + MAXIN + MAXHUB]; int n = 0, ipty = -1, ikmsg = -1, ilisten = -1, inot = -1;
+        struct pollfd pf[10 + MAXIN + MAXHUB]; int n = 0, ipty = -1, ikmsg = -1, ilisten = -1, inot = -1;
         int ihub = n; for (int i = 0; i < nhubs; i++) pf[n++] = (struct pollfd){ hubs[i].fd, POLLIN, 0 };
         if (kmsg_fd >= 0) { ikmsg = n; pf[n++] = (struct pollfd){ kmsg_fd, POLLIN, 0 }; }
         if (listen_fd >= 0) { ilisten = n; pf[n++] = (struct pollfd){ listen_fd, POLLIN, 0 }; }
@@ -1592,6 +1705,8 @@ int main(int argc, char **argv) {
         if (vf_fd >= 0) { ivf = n; pf[n++] = (struct pollfd){ vf_fd, POLLIN, 0 }; }
         int icap = -1, iplay = -1;
         if (cap_fd >= 0) { icap = n; pf[n++] = (struct pollfd){ cap_fd, POLLIN, 0 }; }
+        int iwake = -1;
+        if (wake_out >= 0) { iwake = n; pf[n++] = (struct pollfd){ wake_out, POLLIN, 0 }; }
         if (play_fd >= 0 && play_off < play_len) { iplay = n; pf[n++] = (struct pollfd){ play_fd, POLLOUT, 0 }; }
         if (inotify_fd >= 0) { inot = n; pf[n++] = (struct pollfd){ inotify_fd, POLLIN, 0 }; }
         int iin = n;
@@ -1602,7 +1717,7 @@ int main(int argc, char **argv) {
         if (glance_path[0] && timeout > 250) timeout = 250;
         if (imu_path[0][0] && timeout > 50) timeout = 50;
         if (mode == M_SETUP && setup_state == S_POWER && timeout > 250) timeout = 250;
-        if ((cap_pid > 0 || play_pid > 0) && timeout > 100) timeout = 100;
+        if ((turn_on || play_pid > 0) && timeout > 100) timeout = 100;
         static int64_t prof_last_report; static int prof_on = -1; static int prof_max[8]; static const char *prof_name[8] = { "sock", "pty", "kmsg", "cap", "play", "input", "holds+glance+imu", "render" };
         if (prof_on < 0) prof_on = getenv("JETD_PROF") != NULL;
         int64_t prof_t0 = now_ms();
@@ -1637,11 +1752,12 @@ int main(int argc, char **argv) {
         PROF(1);
         if (ivf >= 0 && pf[ivf].revents) vf_frame();
         if (icap >= 0 && pf[icap].revents) cap_read();
+        if (iwake >= 0 && pf[iwake].revents) wake_read();
         PROF(3);
         if (iplay >= 0 && pf[iplay].revents) play_drain();
         PROF(4);
         if (play_pid > 0 && !play_end && play_off == play_len && now_ms() - play_last > 3000) play_close("timeout");
-        if (cap_pid > 0 && now_ms() - cap_t0 > cap_max_ms) cap_stop("max");
+        if (turn_on && now_ms() - cap_t0 > cap_max_ms) turn_end("max");
         if (ikmsg >= 0 && pf[ikmsg].revents) kmsg_read();
         PROF(2);
         if (ilisten >= 0 && pf[ilisten].revents) accept_hub();
