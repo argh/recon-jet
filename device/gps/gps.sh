@@ -26,7 +26,7 @@ case "$1" in
         '-nav"-c/system/etc/gps/config/pathconfigfile.txt"' > /dev/null 2>&1 < /dev/null &
       sleep 3
     }
-    pgrep -a navd || { echo "navd did not start (see /tmp/navd.log)"; exit 1; }
+    pgrep -a navd || { echo "navd did not start (run it with --log_to_stdout to see why)"; exit 1; }
     ;;
   stop)
     pkill navd
