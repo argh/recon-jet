@@ -30,6 +30,7 @@ const s = Schema.create;
  * @property {() => void} [tick]  once per `tickMs` while current
  * @property {() => Promise<boolean>|boolean} [firstUse]  true: start here, as a wizard
  * @property {boolean} [transient]  never persisted as the start mode (e.g. jetd's shell)
+ * @property {string[]} [spoken]  other names "heya jet, open <name>" accepts besides the id and label ("settings", "console")
  * @property {() => string|null} [unavailable]  why the mode cannot be entered right now (e.g. its data is missing): listed disabled in the switcher with that reason, switchTo refuses
  */
 
@@ -43,9 +44,10 @@ export class Modes extends EventEmitter {
       .property('ui', s('Ui').meta('internal', true))
       .property('input', s('Input').meta('internal', true))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
+      .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  stateFile; tickMs; bootMode; ui; input; deviceLink; logger;
+  stateFile; tickMs; bootMode; ui; input; deviceLink; actions; logger;
 
   /** @type {Mode[]} in registration order */ list = [];
   /** @type {Mode|null} */ current = null;
@@ -57,6 +59,17 @@ export class Modes extends EventEmitter {
   async start() {
     this.ui.root = this;
     this.input.on('gesture', (g) => this.#onGesture(g));
+    // "heya jet, open settings": a mode by id, label or one of its `spoken` names; a name that is
+    // no mode is declined so a mode's own "open <screen>" command can take it
+    this.actions?.register('open', /^open (?:the )?(\w+)$/, (m) => {
+      const mode = this.spoken(m[1]);
+      if (!this.switchTo(mode.id)) throw new Error(`${mode.label ?? mode.id}: ${mode.unavailable?.() ?? 'unavailable'}`);
+    }, { when: (m) => Boolean(this.spoken(m[1])) });
+  }
+
+  /** The mode a spoken name means: its id, its label, or one of its `spoken` aliases. */
+  spoken(name) {
+    return this.list.find((x) => x.id === name || (x.label ?? '').toLowerCase() === name || x.spoken?.includes(name)) ?? null;
   }
   async stop() { clearInterval(this.#timer); this.current?.leave?.(); }
 

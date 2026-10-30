@@ -14,6 +14,7 @@ import { Llm } from './modules/llm/index.js';
 import { Voice } from './modules/voice/index.js';
 import { Sounds } from './modules/sounds/index.js';
 import { Wear } from './modules/wear/index.js';
+import { Actions } from './modules/actions/index.js';
 import { LogMode } from './modes/log/index.js';
 import { DemoMode } from './modes/demo/index.js';
 import { SystemMode } from './modes/system/index.js';
@@ -40,6 +41,7 @@ export class Jet extends AppModule {
       .property('voice', s('Voice').meta('internal', true))
       .property('sounds', s('Sounds').meta('internal', true))
       .property('wear', s('Wear').meta('internal', true))
+      .property('actions', s('Actions').meta('internal', true))
       .property('logMode', s('LogMode').meta('internal', true))
       .property('demoMode', s('DemoMode').meta('internal', true))
       .property('systemMode', s('SystemMode').meta('internal', true))
@@ -49,9 +51,9 @@ export class Jet extends AppModule {
       .property('logLevel', s('string').default('info').values(['debug', 'info', 'warn', 'error']).meta('description', 'log threshold'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer (read before configuration)'))
       .property('tickRate', s('number').default(60000).meta('hidden', true)),
-    register: [DeviceLink, Surface, Input, Power, Sensors, Sounds, Wear, Ui, Modes, Llm, Voice, AssistantMode, DemoMode, DoomMode, ShellMode, LogMode, SystemMode],
+    register: [DeviceLink, Surface, Input, Power, Sensors, Sounds, Wear, Actions, Ui, Modes, Llm, Voice, AssistantMode, DemoMode, DoomMode, ShellMode, LogMode, SystemMode],
   };
-  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; sounds; wear; logMode; demoMode; systemMode; assistantMode; shellMode; doomMode; logLevel; deviceConfig;
+  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; sounds; wear; actions; logMode; demoMode; systemMode; assistantMode; shellMode; doomMode; logLevel; deviceConfig;
 
   async init() {
     await super.init();

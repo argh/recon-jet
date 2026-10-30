@@ -1,8 +1,9 @@
 // Bluetooth: the radio (hci0) on or off, live and for the next boot. The stack (dbus + bluetoothd)
 // runs from init with AutoEnable off, so the radio only comes up when asked: an up hci0 pins the
 // wl1283's WiFi rx at 1 Mbit/s (coex untuned). On for a keyboard while on the USB link, off to use
-// WiFi unplugged. Front toggles and persists the choice as the marker file init reads; the screen
-// lists connected and paired devices. Pairing itself is still bluetoothctl over ssh.
+// WiFi unplugged. Front toggles (and "heya jet, enable bluetooth" sets) and persists the choice as
+// the marker file init reads; the screen lists connected and paired devices. Pairing itself is
+// still bluetoothctl over ssh.
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { C, TOP, heading, row, hint } from '../../modules/ui/style.js';
@@ -46,19 +47,25 @@ export class BluetoothScreen {
   }
 
   /** Flip the radio and make that the boot default (marker present = radio on at boot). */
-  async toggle() {
-    if (this.busy || !this.controller) return;
-    const on = !this.controller.powered;
+  toggle() { if (this.controller) this.set(!this.controller.powered).catch(() => {}); }
+
+  /** Radio on or off, live and at boot. Rejects, after showing why, when it cannot: a spoken command reports that. */
+  async set(on) {
+    if (this.busy) return;
+    if (this.controller === undefined) await this.refresh();
+    if (!this.controller) { this.error = 'no bluetooth controller'; this.sys.ui.requestRender(); throw new Error(this.error); }
     this.busy = true; this.sys.ui.requestRender();
+    let failed = null;
     try {
       await run('bluetoothctl', ['power', on ? 'on' : 'off']);
       if (on) await fs.writeFile(this.sys.btMarker, 'bluetooth radio on at boot (System > Bluetooth)\n');
       else await fs.rm(this.sys.btMarker, { force: true });
       this.sys.logger?.info({ on }, 'bluetooth radio');
       this.sys.ui.setStrip(`bluetooth ${on ? 'on' : 'off'}`, { colour: on ? C.warn : C.ok, ms: 2000 });
-    } catch (error) { this.error = error.message; this.sys.logger?.warn({ error: error.message }, 'bluetooth toggle failed'); }
+    } catch (error) { failed = error; this.error = error.message; this.sys.logger?.warn({ error: error.message }, 'bluetooth toggle failed'); }
     this.busy = false;
     await this.refresh();
+    if (failed) throw failed;
   }
 
   render(s) {

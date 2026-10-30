@@ -23,14 +23,16 @@ export const SYSTEM_PROMPT = 'You are a voice assistant on a pair of smart glass
 export class VoiceSession extends EventEmitter {
   /**
    * @param {import('../llm/index.js').Llm} llm
-   * @param {{partialMs?: number, systemPrompt?: string, logger?: object}} [options]
+   * @param {{partialMs?: number, systemPrompt?: string, sentenceGapMs?: number, logger?: object}} [options]
+   *   sentenceGapMs: silence after each sentence's audio; the TTS voices run "Roger. Say..." together
    */
-  constructor(llm, { partialMs = 1000, systemPrompt = SYSTEM_PROMPT, logger } = {}) {
+  constructor(llm, { partialMs = 1000, systemPrompt = SYSTEM_PROMPT, sentenceGapMs = 400, logger } = {}) {
     super();
-    this.llm = llm; this.partialMs = partialMs; this.systemPrompt = systemPrompt; this.logger = logger;
+    this.llm = llm; this.partialMs = partialMs; this.systemPrompt = systemPrompt; this.sentenceGapMs = sentenceGapMs; this.logger = logger;
   }
   now = () => performance.now();
   /** @type {object|null} the running turn */ #turn = null;
+  /** @type {((text: string) => boolean)|null} asked with the final transcript before the model: true means an action took the turn */ intercept = null;
 
   get busy() { return this.#turn !== null; }
   get turn() { return this.#turn?.id ?? null; }
@@ -121,6 +123,11 @@ export class VoiceSession extends EventEmitter {
       if (!this.#current(t)) return false;
       this.logger?.info({ turn: t.id, ms: this.#ms(tEnd), seconds: +(pcm.length / 32000).toFixed(2), partials: t.partials, text }, 'final');
       this.#emit(t, 'final', { text });
+      if (text && this.intercept?.(text)) {   // an action took it: no model, no speech
+        this.logger?.info({ turn: t.id, ms: this.#ms(t.t0), text }, 'turn routed');
+        this.#emit(t, 'done', { answer: '' });
+        return true;
+      }
       if (!text) {
         this.logger?.info({ turn: t.id, ms: this.#ms(t.t0), answer: '' }, 'turn');
         this.#emit(t, 'done', { answer: '' });
@@ -137,8 +144,9 @@ export class VoiceSession extends EventEmitter {
         drain = drain.then(async () => {
           while (queue.length && this.#current(t) && !ttsError) {
             const sentence = queue.shift(), t0 = this.now();
-            const audio = await this.llm.speak(sentence, signal);
+            const spoken = await this.llm.speak(sentence, signal);
             if (!this.#current(t)) return;
+            const audio = this.sentenceGapMs > 0 ? Buffer.concat([spoken, Buffer.alloc(Math.round(this.sentenceGapMs * 192))]) : spoken;   // 48 kHz stereo S16: 192 bytes per ms
             sentences++; firstAudio ??= this.#ms(tEnd);
             this.logger?.info({ turn: t.id, ms: this.#ms(t0), bytes: audio.length, audioS: +(audio.length / 192000).toFixed(2), sentence }, 'tts');
             this.#emit(t, 'audio', { pcm: audio, bytes: audio.length, sentence });

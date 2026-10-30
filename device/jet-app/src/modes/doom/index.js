@@ -25,9 +25,10 @@ export class DoomMode {
       .property('modes', s('Modes').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
       .property('sounds', s('Sounds').meta('internal', true))
+      .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  command; args; dataDir; returnTo; modes; ui; sounds; logger;
+  command; args; dataDir; returnTo; modes; ui; sounds; actions; logger;
 
   id = 'doom'; label = 'Doom'; transient = true;
   /** @type {import('node:child_process').ChildProcess|null} */ child = null;
@@ -40,6 +41,9 @@ export class DoomMode {
     this.modes.register(this);
     this.modes.on('mode', (m) => { if (m !== this) this.previous = m.id; });
     this.modes.on('switcher', (open) => this.#switcher(open));
+    // "heya jet, run doom" (the ASR hears "random" more often than not): the switcher's refusal
+    // (no binary, no WAD) is the error the voice reports
+    this.actions?.register('doom', /^run (?:doom|random|dune)\b/, () => { if (!this.modes.switchTo(this.id)) throw new Error(`Doom: ${this.unavailable() ?? 'unavailable'}`); });
   }
   async stop() { this.#kill(); }
 

@@ -89,6 +89,8 @@ export class DeviceLink extends EventEmitter {
       case 'U': return this.#resolve('U', { on: +a[0], off: +a[1], deg: +a[2], still: +a[3] }, 'calibration');
       case 'g': return this.#resolve('g', { worn: +a[0], raw: +a[1] }, 'glance');
       case 'o': return this.#resolve('o', { worn: +a[0], raw: +a[1] }, 'worn');
+      case 'd': return this.emit('wake', { avg: +a[0], max: +a[1] });
+      case 'x': return this.#resolve('x', a.join(' '), 'listen');
       case 'n': return this.emit('view', { degrees: +a[0] });
       case 'A': return this.emit('captureEnd', a[0]);
       case 'w': return this.#resolve('w', a[0], 'playDone');
@@ -117,6 +119,8 @@ export class DeviceLink extends EventEmitter {
   setMode(name) { return this.send(`M ${name}`); }
   captureStart(maxSeconds) { return this.send(maxSeconds ? `V ${maxSeconds}` : 'V'); }
   captureStop() { return this.send('v'); }
+  /** Wake word listening on (with the model's cutoff and window) or off; resolves with jetd's `x` state ("on", "off", "error ..."). */
+  wakeListen(on, cutoff = 0.97, window = 5) { return this.#request('x', on ? `D 1 ${cutoff} ${window}` : 'D 0'); }
   /** Queue 48 kHz stereo S16 PCM; `playEnd()` closes the clip and resolves when played. */
   play(pcm) { return this.#sock ? this.#sock.write(Buffer.concat([Buffer.from(`W ${pcm.length}\n`), pcm])) : false; }
   playEnd() { return this.#request('w', 'w', 15000); }

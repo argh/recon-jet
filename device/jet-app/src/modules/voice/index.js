@@ -9,8 +9,11 @@
 //   chunk goes to the session, which transcribes the whole buffer every `partialMs`; `A` ends it
 //   (`session.end()`); a second press ends the capture early (`v`).
 // thinking: partial transcripts are shown as they arrive; `fillerMs` after the final transcript
-//   with no audio yet, a cached filler phrase plays ("hmm", rendered once by the TTS and kept
-//   at `fillerPath`), or a soft beep while that cache is being made.
+//   with no audio yet, a cached "wait" phrase plays, or a soft beep while the cache is being made.
+//   A spoken command (`route()` matched an action) is answered the same way, from the phrase
+//   bank (`phrases.js`: ack / wait / error sets, rendered once in the current voice and kept
+//   under `phraseDir`): an ack at once, a wait phrase every `actionWaitMs` while it runs, an
+//   error phrase if it fails. A button-started action says nothing; only spoken ones are answered.
 // speaking: audio frames are queued to jetd (`W`) as they arrive, `w` at `done`, idle once jetd
 //   reports the clip played. The answer and transcript stay for the mode to show.
 // `startTurn()` during thinking/speaking is a barge-in: `Y` flushes jetd's playback, the session
@@ -19,7 +22,7 @@
 //
 // Debug: `voice.debugPort` (JET_VOICE_DEBUG_PORT) serves POST /talk (start a turn, as the
 // Assistant mode's front press would), POST /cancel, POST /say {text} (TTS round trip to the
-// speaker), POST /filler (re-render the filler), POST /look {question?} (a camera snapshot
+// speaker), POST /phrases (render the missing phrases), POST /look {question?} (a camera snapshot
 // through the vision model, as the Demo mode's front press), GET /state.
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
@@ -30,6 +33,7 @@ import { Schema } from '@versionzero/module-manager';
 import { C } from '../ui/style.js';
 import { uyvyToRgba } from '../../lib/uyvy.js';
 import { VoiceSession, SYSTEM_PROMPT } from './session.js';
+import { PhraseBank, PHRASES } from './phrases.js';
 
 const s = Schema.create;
 const STATES = ['idle', 'listening', 'thinking', 'speaking'];
@@ -41,19 +45,25 @@ export class Voice extends EventEmitter {
       .property('enabled', s('boolean').default(true).meta('description', 'voice turns allowed'))
       .property('systemPrompt', s('string').default(SYSTEM_PROMPT).meta('description', 'the chat model\'s system prompt for a turn'))
       .property('partialMs', s('number').default(1000).meta('description', 'partial transcript interval while listening'))
+      .property('sentenceGapMs', s('number').default(400).meta('description', 'silence appended to each spoken sentence (the TTS runs them together)'))
       .property('fillerMs', s('number').default(700).meta('description', 'play the filler when no answer audio has arrived this long after the transcript'))
-      .property('fillerText', s('string').default('Hmm, let me think.').meta('description', 'the filler phrase (rendered by the TTS once, cached on the device)'))
-      .property('fillerPath', s('string').default('/android-data/mainline/voice/filler.pcm').meta('description', 'filler cache (48 kHz stereo S16 raw)'))
+      .property('phrases', s('any').default(PHRASES).meta('description', 'spoken replies by set: ack (a command heard), wait (slow), error (failed); rendered once in the TTS voice'))
+      .property('phraseDir', s('string').default('/android-data/mainline/voice/phrases').meta('description', 'phrase cache (48 kHz stereo S16 raw clips)'))
+      .property('actionWaitMs', s('number').default(6000).meta('description', 'a wait phrase every this long while a spoken command is still running (a different one each time)'))
       .property('maxSeconds', s('number').default(8).meta('description', 'longest capture (jetd V argument)'))
       .property('captureDelayMs', s('number').default(250).meta('description', 'ms between the ack cue and opening the mic'))
-      .property('debugPort', s('number').default(0).meta('description', 'debug HTTP port (POST /talk, /cancel, /say, /filler, /look; GET /state); 0 = off'))
+      .property('wake', s('boolean').default(true).meta('description', 'hands-free: jetd listens for the wake word (needs mainline/wake.tflite on the device) and a hit starts a turn'))
+      .property('wakeCutoff', s('number').default(0.97).meta('description', 'detection probability cutoff, from the model manifest'))
+      .property('wakeWindow', s('number').default(5).meta('description', 'probabilities averaged for a detection'))
+      .property('debugPort', s('number').default(0).meta('description', 'debug HTTP port (POST /talk, /cancel, /say, /phrases, /look; GET /state); 0 = off'))
       .property('llm', s('Llm').meta('internal', true))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
       .property('sounds', s('Sounds').meta('internal', true))
+      .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  enabled; systemPrompt; partialMs; fillerMs; fillerText; fillerPath; maxSeconds; captureDelayMs; debugPort; llm; deviceLink; ui; sounds; logger;
+  enabled; systemPrompt; partialMs; sentenceGapMs; fillerMs; phrases; phraseDir; actionWaitMs; maxSeconds; captureDelayMs; wake; wakeCutoff; wakeWindow; debugPort; llm; deviceLink; ui; sounds; actions; logger;
 
   /** @type {'idle'|'listening'|'thinking'|'speaking'} */ state = 'idle';
   turn = 0;           // the current (or last) turn id; events from older turns are ignored
@@ -61,17 +71,20 @@ export class Voice extends EventEmitter {
   answer = '';
   audioFrames = 0;    // answer audio frames received this turn
   /** The session factory (tests inject a fake). @type {(llm: object) => VoiceSession} */
-  createSession = (llm) => new VoiceSession(llm, { partialMs: this.partialMs, systemPrompt: this.systemPrompt, logger: this.logger });
+  createSession = (llm) => new VoiceSession(llm, { partialMs: this.partialMs, systemPrompt: this.systemPrompt, sentenceGapMs: this.sentenceGapMs, logger: this.logger });
   now = () => Date.now();
   /** @type {VoiceSession|null} */ #session = null;
   #fillerTimer = null;
-  #fillerPcm = null;
-  #makingFiller = null;
+  #waitTimer = null;  // wait phrases while a spoken command runs
+  /** @type {PhraseBank|null} */ #bank = null;
   #debug = null;
   #stateT = 0;
   #clips = 0;         // clips queued with #play that jetd has not reported played yet
+  #wakeTurn = false;  // the running turn began with the wake word
+  #routed = false;    // the running turn went to an action, not the model
 
-  get fillerCached() { return this.#fillerPcm !== null; }
+  /** Cached phrase clips per set ({ack, wait, error}); {} before start. */
+  get phraseStatus() { return this.#bank?.status() ?? {}; }
   /** An inference server is configured and turns are allowed. */
   get configured() { return this.enabled && Boolean(this.llm?.configured); }
 
@@ -80,14 +93,30 @@ export class Voice extends EventEmitter {
     this.deviceLink.on('captureChunk', (pcm) => this.#onChunk(pcm));
     this.deviceLink.on('captureEnd', (reason) => this.#onCaptureEnd(reason));
     this.deviceLink.on('disconnected', () => { if (this.state !== 'idle') this.#fail('link down'); });
+    this.deviceLink.on('wake', (d) => this.#wake(d));
+    this.deviceLink.on('listen', (state) => this.logger?.info({ state }, 'wake word listening'));
+    const arm = () => { if (this.wake && this.configured) this.deviceLink.wakeListen(true, this.wakeCutoff, this.wakeWindow).catch((error) => this.logger?.warn({ error: error.message }, 'wake word listening not started')); };
+    this.deviceLink.on('connected', arm);
+    if (this.deviceLink.connected) arm();
     this.#session = this.#wire(this.createSession(this.llm));
+    this.#session.intercept = (text) => this.route(text);
+    // "heya jet, stop" / "cancel": a wake that was a mistake, or a change of mind; nothing is asked
+    this.actions?.register('stop', /^(?:stop|cancel|never ?mind)$/, () => {});
     if (!this.llm?.configured) this.logger?.warn('llm.base is not set: voice is off');
-    fs.readFile(this.fillerPath).then((pcm) => { this.#fillerPcm = pcm; this.logger?.info({ path: this.fillerPath, bytes: pcm.length }, 'filler cached'); }, () => {});
+    // the phrase bank: what is on disk is usable at once; what is missing (first run, a new
+    // voice) is rendered in the background, one clip at a time
+    const m = this.llm?.models;
+    this.#bank = new PhraseBank({ dir: this.phraseDir, sets: this.phrases, tag: m ? `${m.tts}/${m.voice}` : '', say: (text) => this.#session.say(text), logger: this.logger });
+    this.#bank.load().then((status) => {
+      this.logger?.info({ status, missing: this.#bank.missing().length }, 'phrases cached');
+      if (this.llm?.configured && this.#bank.missing().length) this.renderPhrases().catch(() => {});
+    });
     if (this.debugPort) this.#serveDebug();
   }
 
   async stop() {
-    clearTimeout(this.#fillerTimer);
+    clearTimeout(this.#fillerTimer); clearInterval(this.#waitTimer);
+    if (this.wake && this.deviceLink.connected) this.deviceLink.wakeListen(false).catch(() => {});
     if (this.state !== 'idle') { this.#session.cancel(); if (this.state === 'listening') this.deviceLink.captureStop(); }
     this.#debug?.close();
   }
@@ -125,11 +154,49 @@ export class Voice extends EventEmitter {
   /** Forget the last transcript and answer. */
   clear() { this.transcript = ''; this.answer = ''; }
 
-  #begin() {
+  /**
+   * The session asks with every final transcript before the model answers: a registered action
+   * runs instead (true, the strip names it, a failure is a cue and a message); otherwise the turn
+   * is a question and `question` is emitted (the Assistant brings itself up for a wake-word one).
+   */
+  route(text) {
+    // the ASR renders near-silence as a word in some other script ("对。"): nothing was said
+    if (!/[a-z]/i.test(text)) { this.logger?.info({ turn: this.turn, text }, 'transcript discarded'); this.#routed = true; this.ui.setStrip('nothing heard', { colour: C.dim, ms: 2000 }); return true; }
+    const a = this.actions?.match(text);
+    if (!a) { this.emit('question', { turn: this.turn, text, wake: this.#wakeTurn }); return false; }
+    this.#routed = true;
+    this.logger?.info({ turn: this.turn, action: a.name, text: a.text, wake: this.#wakeTurn }, 'action');
+    this.ui.setStrip(a.name, { colour: C.ok, ms: 1500 });
+    // spoken, so answered in speech: an ack now, a wait phrase every actionWaitMs while it runs
+    // (three at most, never the same one twice), an error phrase if it fails; 'stop' needs no ack
+    if (a.name !== 'stop') this.phrase('ack');
+    clearInterval(this.#waitTimer);
+    let waits = 0; const used = new Set();
+    const waitTimer = this.#waitTimer = setInterval(() => { if (++waits > 3) return clearInterval(waitTimer); this.logger?.info({ action: a.name, waits }, 'action slow'); this.phrase('wait', 'thinking', used); }, this.actionWaitMs);
+    waitTimer.unref?.();
+    a.run().catch((error) => {
+      this.logger?.warn({ action: a.name, error: error.message }, 'action failed');
+      this.ui.setStrip(`${a.name}: ${error.message}`, { colour: C.bad, ms: 3000 });
+      this.phrase('error', 'error');
+    }).finally(() => { clearInterval(waitTimer); if (this.#waitTimer === waitTimer) this.#waitTimer = null; });
+    return true;
+  }
+
+  /** jetd heard the wake word and is already capturing: a turn without the cue or `V`. */
+  #wake(d) {
+    if (!this.configured || !this.wake) { this.deviceLink.captureStop(); return; }
+    if (this.state === 'listening') return;
+    this.logger?.info({ avg: d.avg, max: d.max, state: this.state }, 'wake word');
+    if (this.state !== 'idle') this.#bargeIn();
+    this.#begin({ wake: true });
+  }
+
+  #begin({ wake = false } = {}) {
     const turn = ++this.turn;
-    this.transcript = ''; this.answer = ''; this.audioFrames = 0;
+    this.transcript = ''; this.answer = ''; this.audioFrames = 0; this.#wakeTurn = wake; this.#routed = false;
     this.#setState('listening');
     this.ui.setStrip('listening', { colour: C.ok });
+    if (wake) { this.#session.start(turn); return; }   // the mic is open and the user is mid-sentence: no cue over it
     this.#cue('ack');
     // open the mic only after the cue has played, so jetd's noise-floor window (its first
     // 300 ms of capture) does not measure the beep
@@ -196,7 +263,7 @@ export class Voice extends EventEmitter {
     clearTimeout(this.#fillerTimer);
     this.logger?.info({ turn: this.turn, why }, 'turn finished');
     this.#setState('idle');
-    this.ui.setStrip(why === 'nothing heard' ? 'nothing heard' : null, { colour: C.dim, ms: 2000 });
+    if (!this.#routed) this.ui.setStrip(why === 'nothing heard' ? 'nothing heard' : null, { colour: C.dim, ms: 2000 });   // an action owns the strip after a routed turn
   }
 
   #fail(why) {
@@ -206,7 +273,7 @@ export class Voice extends EventEmitter {
     this.#session.cancel();
     this.#setState('idle');
     this.ui.setStrip(`voice: ${why}`, { colour: C.bad, ms: 3000 });
-    this.#cue('error');
+    this.phrase('error', 'error');
   }
 
   #setState(next) {
@@ -236,27 +303,28 @@ export class Voice extends EventEmitter {
     this.#fillerTimer.unref?.();
   }
 
-  #filler() {
-    if (this.#fillerPcm) { this.logger?.info({ turn: this.turn }, 'filler'); return this.#play(this.#fillerPcm); }
-    this.logger?.info({ turn: this.turn }, 'filler not cached: beep');
-    this.#cue('thinking');
-    this.makeFiller().catch(() => {});
+  /** The answer is late: a wait phrase (or the soft beep until one is cached). */
+  #filler() { this.logger?.info({ turn: this.turn }, 'filler'); this.phrase('wait', 'thinking'); }
+
+  /**
+   * Play a random cached phrase of the set; without one, the cue named as fallback (if any) plays
+   * and the missing clips get rendered for next time. `used` (a Set kept for one command) makes
+   * every pick a different clip; once they are all used nothing plays.
+   */
+  phrase(set, fallbackCue = null, used = null) {
+    const pcm = this.#bank?.pick(set, used);
+    if (pcm) { this.logger?.info({ set, bytes: pcm.length }, 'phrase'); return this.#play(pcm); }
+    if (used && this.#bank?.status()[set]) { this.logger?.info({ set }, 'phrases all used'); return; }
+    this.logger?.info({ set, fallback: fallbackCue }, 'phrase not cached');
+    if (fallbackCue) this.#cue(fallbackCue);
+    if (this.llm?.configured) this.renderPhrases().catch(() => {});
   }
 
-  /** Render `fillerText` through the TTS and cache it at `fillerPath`. */
-  makeFiller() {
-    if (this.#makingFiller) return this.#makingFiller;
-    const t0 = this.now();
-    this.#makingFiller = (async () => {
-      const pcm = await this.#session.say(this.fillerText);
-      await fs.mkdir(path.dirname(this.fillerPath), { recursive: true });
-      await fs.writeFile(this.fillerPath, pcm);
-      this.#fillerPcm = pcm;
-      this.logger?.info({ path: this.fillerPath, bytes: pcm.length, ms: this.now() - t0 }, 'filler rendered');
-      return pcm;
-    })().catch((error) => { this.logger?.warn({ error: error.message }, 'filler failed'); throw error; })
-      .finally(() => { this.#makingFiller = null; });
-    return this.#makingFiller;
+  /** Render the phrases not cached yet (one TTS call each); resolves with the clips per set. */
+  renderPhrases() {
+    if (!this.#bank) return Promise.reject(new Error('not started'));
+    const t0 = this.now(), n = this.#bank.missing().length;
+    return this.#bank.render().then((status) => { if (n) this.logger?.info({ status, rendered: n, ms: Math.round(this.now() - t0) }, 'phrases rendered'); return status; });
   }
 
   /**
@@ -268,6 +336,27 @@ export class Voice extends EventEmitter {
     if (!this.llm?.configured) return Promise.reject(new Error('llm.base is not set'));
     return this.#session.look(jpg, question, { onToken });
   }
+
+  /** `text` through the TTS: 48 kHz stereo S16 PCM, not played (a mode queues it when it fits). */
+  synth(text) {
+    if (!this.llm?.configured) return Promise.reject(new Error('llm.base is not set'));
+    return this.#session.say(text);
+  }
+
+  /** Queue a clip (from `synth` or a phrase) to the speaker; a barge-in flushes it like any other. */
+  playClip(pcm) { this.#play(pcm); }
+
+  /**
+   * Wake the TTS up (the server unloads idle models): a one-word synth, discarded, at most once
+   * a minute, so a remark made a few seconds from now is not the request that pays the load.
+   */
+  warm() {
+    if (!this.llm?.configured || this.now() - this.#warmedAt < 60000) return;
+    this.#warmedAt = this.now();
+    const t0 = this.now();
+    this.#session.say('Okay.').then((pcm) => this.logger?.info({ ms: Math.round(this.now() - t0), bytes: pcm.length }, 'tts warmed'), (error) => this.logger?.warn({ error: error.message }, 'tts warm-up failed'));
+  }
+  #warmedAt = -Infinity;
 
   /** Debug: speak `text` through the TTS and the Jet's speaker; resolves with the PCM size. */
   async say(text) {
@@ -300,11 +389,11 @@ export class Voice extends EventEmitter {
         const run = (p) => p.then((r) => reply(200, r), (e) => reply(500, { error: e.message }));
         try {
           const json = body ? JSON.parse(body) : {};
-          if (req.method === 'GET' && req.url === '/state') return reply(200, { state: this.state, turn: this.turn, transcript: this.transcript, answer: this.answer, fillerCached: this.fillerCached, configured: this.configured, llm: this.llm?.models ?? null });
+          if (req.method === 'GET' && req.url === '/state') return reply(200, { state: this.state, turn: this.turn, transcript: this.transcript, answer: this.answer, phrases: this.phraseStatus, configured: this.configured, llm: this.llm?.models ?? null });
           if (req.method === 'POST' && req.url === '/talk') return reply(200, { started: this.startTurn(), turn: this.turn });
           if (req.method === 'POST' && req.url === '/cancel') return reply(200, { cancelled: this.cancel() });
           if (req.method === 'POST' && req.url === '/say') return run(this.say(String(json.text ?? 'hello')));
-          if (req.method === 'POST' && req.url === '/filler') return run(this.makeFiller().then((pcm) => ({ bytes: pcm.length })));
+          if (req.method === 'POST' && req.url === '/phrases') return run(this.renderPhrases());
           if (req.method === 'POST' && req.url === '/look') return run(this.#snapshotLook(String(json.question ?? 'Describe what is in front of me in one short sentence.')));
           reply(404, { error: 'no such route' });
         } catch (e) { reply(400, { error: e.message }); }

@@ -3,7 +3,8 @@
 // the capture, a press while thinking/speaking barges in. The answer is wrapped in the big font
 // (small when long), the transcript runs along the bottom; the status strip says what the turn
 // is doing. Rear press cancels a running turn, or clears the last answer; nothing at an idle
-// root. Leaving the mode cancels the turn. No other mode triggers voice.
+// root. Leaving the mode cancels the turn. No other mode triggers voice by button; a wake-word
+// question asked from another mode switches here so the answer is seen.
 import { Schema } from '@versionzero/module-manager';
 import { C, MARGIN, TOP, wrapWords, paragraph, hint } from '../../modules/ui/style.js';
 
@@ -19,12 +20,13 @@ export class AssistantMode {
   };
   modes; ui; voice;
 
-  id = 'assistant'; label = 'Assistant';
+  id = 'assistant'; label = 'Assistant'; spoken = ['radio', 'jet'];
   #current = false;
 
   async start() {
     this.modes.register(this);
     this.voice.on('state', () => { if (this.#current) this.ui.requestRender(); });
+    this.voice.on('question', (q) => { if (q.wake && !this.#current) this.modes.switchTo(this.id); });   // "heya jet, <question>" from any mode: the answer shows here
   }
   enter() { this.#current = true; }
   leave() { this.#current = false; this.voice.cancel(); }

@@ -20,7 +20,8 @@ function fakeDoom() {
 async function setup(t, command) {
   const s = await stack(); t.after(s.stop);
   const wad = path.join(s.dir, 'x.wad'); fs.writeFileSync(wad, 'IWAD');
-  const doom = Object.assign(new DoomMode(), { command, args: `-iwad ${wad}`, dataDir: path.join(s.dir, 'doom'), returnTo: 'system', modes: s.modes, ui: s.ui, sounds: fakeSounds() });
+  const actions = { registered: [], register(name, pattern, run) { this.registered.push({ name, pattern, run }); return this; } };
+  const doom = Object.assign(new DoomMode(), { command, args: `-iwad ${wad}`, dataDir: path.join(s.dir, 'doom'), returnTo: 'system', modes: s.modes, ui: s.ui, sounds: fakeSounds(), actions });
   s.modes.register(fakeMode('log')).register(fakeMode('system'));
   await doom.start(); t.after(() => doom.stop());
   await s.modes.begin(); await settle();
@@ -90,4 +91,12 @@ test('doom: without the binary or the WAD the switcher lists it disabled and it 
   assert.equal(doom.unavailable(), 'no binary');
   fs.writeFileSync(path.join(s.dir, 'x.wad'), 'IWAD'); doom.command = fakeDoom();
   assert.equal(doom.unavailable(), null, 'checked live: dropping the files in is enough');
+  const [run] = doom.actions.registered;
+  assert.equal(run.name, 'doom'); assert.ok(run.pattern.test('run doom') && run.pattern.test('random') === false && run.pattern.test('run random') && !run.pattern.test('doom is scary'));
+  fs.unlinkSync(path.join(s.dir, 'x.wad'));
+  await assert.rejects(Promise.resolve().then(() => run.run([], 'run doom')), /Doom: no WAD/, 'spoken while unavailable: the reason comes back');
+  assert.equal(s.modes.current.id, 'system');
+  fs.writeFileSync(path.join(s.dir, 'x.wad'), 'IWAD');
+  run.run([], 'run doom'); await settle();
+  assert.equal(s.modes.current, doom, '"run doom" enters the mode');
 });

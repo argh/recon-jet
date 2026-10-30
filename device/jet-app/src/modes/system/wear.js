@@ -16,9 +16,11 @@ export class WearScreen {
     return false;
   }
 
-  async toggle() {
+  toggle() { return this.set(!this.sys.wear.enabled); }
+
+  /** Dark-when-off on or off, live and persisted ("heya jet, enable wear" comes here too). */
+  async set(on) {
     if (this.busy) return;
-    const on = !this.sys.wear.enabled;
     this.busy = true;
     this.sys.wear.setEnabled(on);
     try {

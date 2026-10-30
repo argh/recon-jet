@@ -16,6 +16,9 @@ import { C } from '../../modules/ui/style.js';
 import { appRoot, patchLayer } from '../../lib/config.js';
 import { writeIfPresent } from '../../lib/sysfs.js';
 import { ofmArgs, glanceFile, BACKLIGHT } from './calibration.js';
+
+/** What the ASR makes of a screen's name when it gets it wrong, back to the screen. */
+const SCREEN_ALIAS = { stages: 'status', glands: 'glance', where: 'wear', ware: 'wear', networks: 'network' };
 import { StatusScreen } from './status.js';
 import { PadCalScreen } from './pad-cal.js';
 import { GlanceCalScreen } from './glance-cal.js';
@@ -50,11 +53,12 @@ export class SystemMode {
       .property('wear', s('Wear').meta('internal', true))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('sounds', s('Sounds').meta('internal', true))
+      .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; deviceConfig; modes; ui; input; power; sensors; wear; deviceLink; sounds; logger;
+  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; deviceConfig; modes; ui; input; power; sensors; wear; deviceLink; sounds; actions; logger;
 
-  id = 'system'; label = 'System';
+  id = 'system'; label = 'System'; spoken = ['settings'];
   /** @type {Chooser} */ menu;
   /** @type {Record<string, object>} */ screens;
   /** @type {object|null} the open screen, null at the menu */ screen = null;
@@ -76,6 +80,19 @@ export class SystemMode {
     this.input.on('motion', (m) => { if (this.#current && this.screen === this.screens.pad) this.screens.pad.onMotion(m); });
     this.power.on('update', () => { if (this.#current && this.screen === this.screens.status && this.screens.status.onPower()) this.ui.requestRender(); });
     this.backlight.level = await this.#readBacklight();
+    // "heya jet, open network": come here and show the screen (the Modes "open" declines names
+    // that are no mode, so this gets them whatever the start order); the nouns the ASR has been
+    // heard to bend ("stages", "where") are accepted as aliases
+    this.actions?.register('open screen', /^open (?:the )?(status|stages|pad|glance|glands|brightness|wear|where|ware|power|network|networks|bluetooth|about)$/, (m) => {
+      if (this.modes.current !== this) this.modes.switchTo(this.id);
+      this.wizard = null; this.open(SCREEN_ALIAS[m[1]] ?? m[1]);
+    });
+    // "heya jet, enable bluetooth" / "disable wear": a setting's switch, from any mode (the ASR
+    // sometimes hears the past tense, hence the optional d)
+    this.actions?.register('setting', /^(enabled?|disabled?) (bluetooth|wear|where|ware|dark)$/, (m) => {
+      const on = m[1].startsWith('enable'), screen = m[2] === 'bluetooth' ? this.screens.bluetooth : this.screens.wear;
+      return screen.set(on);
+    });
   }
   #current = false;
 

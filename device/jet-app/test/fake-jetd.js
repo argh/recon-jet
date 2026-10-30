@@ -37,6 +37,7 @@ export class FakeJetd extends EventEmitter {
         else if (line[0] === 'M') sock.write(`m ${line.slice(2)}\n` + (line.slice(2) === 'remote' ? this.hello + '\n' : ''));
         else if (line === 'w') sock.write('w idle\n');
         else if (line[0] === 'S') sock.write('e no camera\n');
+        else if (line[0] === 'D') sock.write(line[2] === '1' ? 'x on\n' : 'x off\n');
         else if (line[0] === 'E') sock.write(`E ${this.surface}\n`);
         else if (line[0] === 'Z') sock.write(this.camera ? `Z ${this.camera}\n` : 'e viewfinder: open: No such device\n');
         else if (line[0] === 'J') { const n = Math.min(this.klog.length, +line.slice(2) || this.klog.length); for (const l of this.klog.slice(-n)) sock.write(`j ${l}\n`); sock.write(`J ${n}\n`); }

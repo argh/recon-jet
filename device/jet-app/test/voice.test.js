@@ -33,21 +33,23 @@ async function make(overrides = {}) {
     send(l) { this.sent.push(l); return true; },
     captureStart(max) { return this.send(`V ${max}`); },
     captureStop() { return this.send('v'); },
+    wakeListen(on, c, w) { this.send(on ? `D 1 ${c} ${w}` : 'D 0'); return Promise.resolve(on ? 'on' : 'off'); },
     play(pcm) { this.sent.push(`W ${pcm.length}`); this.clips.push(pcm); return true; },
     playEnd() { this.send('w'); return new Promise((resolve) => this.once('playDone', resolve)); },
   });
   const ui = { strips: [], renders: 0, setStrip(t, o) { this.strips.push(t); }, requestRender() { this.renders++; } };
   const sessions = [];
-  const fillerPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'jet-voice-')), 'voice', 'filler.pcm');
-  const llm = { configured: true };
-  const voice = Object.assign(new Voice(), { enabled: true, llm, fillerMs: 60, fillerText: 'hmm', fillerPath, maxSeconds: 8, captureDelayMs: 0, debugPort: 0, deviceLink: link, ui, sounds: Object.assign(new Sounds(), { enabled: true, gain: 1, deviceLink: link }), ...overrides });
+  const phraseDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'jet-voice-')), 'voice', 'phrases');
+  const llm = { configured: true, models: { tts: 'kokoro', voice: 'af_heart' } };
+  // one phrase per set (two waits, to see them never repeat), so what plays is predictable
+  const voice = Object.assign(new Voice(), { enabled: true, llm, fillerMs: 60, phrases: { ack: ['ok'], wait: ['hmm', 'hm2'], error: ['oops'] }, phraseDir, actionWaitMs: 40, maxSeconds: 8, captureDelayMs: 0, wake: true, wakeCutoff: 0.97, wakeWindow: 5, debugPort: 0, deviceLink: link, ui, sounds: Object.assign(new Sounds(), { enabled: true, gain: 1, deviceLink: link }), ...overrides });
   voice.createSession = (l) => { const s = new FakeSession(l); sessions.push(s); return s; };
   const states = [];
   voice.on('state', (s) => states.push(s.to));
   await voice.start();
-  await sleep(5);   // the filler read fails asynchronously
+  await sleep(10);   // the bank loads (nothing on disk) and renders its phrases through the fake session
   assert.equal(sessions.length, 1); assert.equal(sessions[0].llm, llm, 'the session drives the llm module');
-  return { voice, link, ui, states, session: sessions[0], llm, fillerPath };
+  return { voice, link, ui, states, session: sessions[0], llm, phraseDir };
 }
 const press = (voice) => voice.startTurn();
 const ctl = (session) => session.sent.filter((f) => !Buffer.isBuffer(f));
@@ -58,7 +60,7 @@ test('voice: a full turn, startTurn -> listening -> thinking -> speaking -> idle
   assert.equal(voice.state, 'idle'); assert.equal(voice.configured, true);
   press(voice);
   assert.equal(voice.state, 'listening');
-  assert.deepEqual(link.sent, [`W ${ACK.length}`, 'w', 'V 8'], 'ack cue then capture');
+  assert.deepEqual(link.sent, ['D 1 0.97 5', `W ${ACK.length}`, 'w', 'V 8'], 'listening armed at start; ack cue then capture');
   assert.deepEqual(ctl(session), [{ type: 'start', turn: 1 }]);
   assert.deepEqual(ui.strips, ['listening']);
   link.emit('captureChunk', Buffer.alloc(3200, 1)); link.emit('captureChunk', Buffer.alloc(3200, 2));
@@ -170,36 +172,67 @@ test('voice: look hands a JPEG to the session and streams the answer; refused wi
   await assert.rejects(off.say('x'), /llm.base/);
 });
 
-test('voice: the filler plays when answer audio is late, not when it is early; a soft beep makes the cache', async (t) => {
-  const { voice, link, session, fillerPath } = await make();
+test('voice: the phrase bank renders at start; a wait phrase plays when answer audio is late, not when it is early', async (t) => {
+  const { voice, link, session, phraseDir } = await make();
   t.after(() => voice.stop());
+  assert.deepEqual(session.said, ['ok', 'hmm', 'hm2', 'oops'], 'every phrase rendered once through the TTS at start');
+  assert.deepEqual(voice.phraseStatus, { ack: 1, wait: 2, error: 1 });
+  assert.equal(fs.readdirSync(phraseDir).filter((f) => f.startsWith('wait-')).length, 2, 'kept on disk, named by set and hash');
   press(voice); link.emit('captureEnd', 'end');
   session.emit('final', { type: 'final', text: 'hi', turn: 1 });
   await sleep(20);
   session.emit('audio', { type: 'audio', bytes: 4, sentence: 'Hi.', pcm: Buffer.alloc(4), turn: 1 });
   await sleep(80);
   assert.deepEqual(link.sent.filter((l) => l[0] === 'W'), [`W ${ACK.length}`, 'W 4'], 'no filler: audio came first');
-  assert.deepEqual(session.said, []);
   session.emit('done', { type: 'done', answer: 'Hi.', turn: 1 }); link.emit('playDone', 'done'); await sleep(1);
-  // late audio: soft beep (no cache yet), and the cache gets rendered through the session's TTS
+  // late audio: the cached wait phrase
   press(voice); link.emit('captureEnd', 'end');
   session.emit('final', { type: 'final', text: 'hi', turn: 2 });
   await sleep(90);
-  const ws = link.sent.filter((l) => l[0] === 'W');
-  assert.equal(ws.length, 4, 'ack, answer, ack, thinking');
-  assert.ok(+ws[3].slice(2) > 0 && +ws[3].slice(2) !== ACK.length);
-  await sleep(20);
-  assert.deepEqual(session.said, ['hmm'], 'the filler was rendered once');
-  assert.equal(fs.readFileSync(fillerPath).toString(), 'say:hmm');
-  assert.equal(voice.fillerCached, true);
-  session.emit('audio', { type: 'audio', bytes: 4, sentence: 'Hi.', pcm: Buffer.alloc(4), turn: 2 });
-  session.emit('done', { type: 'done', answer: 'Hi.', turn: 2 }); link.emit('playDone', 'done'); await sleep(1);
-  // next time the cached phrase plays
-  press(voice); link.emit('captureEnd', 'end');
-  session.emit('final', { type: 'final', text: 'hi', turn: 3 });
-  await sleep(90);
-  assert.equal(link.clips.at(-1).toString(), 'say:hmm');
+  assert.ok(link.clips.at(-1).toString().startsWith('say:hm'), 'a wait phrase');
   assert.equal(voice.state, 'thinking');
+  assert.deepEqual(session.said, ['ok', 'hmm', 'hm2', 'oops'], 'nothing rendered again');
+  // a second start finds the clips on disk and renders nothing
+  const again = await make({ phraseDir });
+  t.after(() => again.voice.stop());
+  assert.deepEqual(again.session.said, []); assert.deepEqual(again.voice.phraseStatus, { ack: 1, wait: 2, error: 1 });
+});
+
+test('voice: with no wait phrase cached the soft beep plays instead', async (t) => {
+  const { voice, link, session } = await make({ phrases: { wait: [] } });
+  t.after(() => voice.stop());
+  press(voice); link.emit('captureEnd', 'end');
+  session.emit('final', { type: 'final', text: 'hi', turn: 1 });
+  await sleep(90);
+  const ws = link.sent.filter((l) => l[0] === 'W');
+  assert.equal(ws.length, 2, 'ack, thinking beep');
+  assert.ok(+ws[1].slice(2) > 0 && +ws[1].slice(2) !== ACK.length);
+});
+
+test('voice: a spoken command is acknowledged in speech, nagged while slow, and told when it fails', async (t) => {
+  const { voice, link } = await make();
+  t.after(() => voice.stop());
+  let finish; const slow = new Promise((r) => { finish = r; });
+  voice.actions = { match(text) {
+    if (text.includes('slow')) return { name: 'analysis', text, run: () => slow };
+    if (text.includes('boom')) return { name: 'boom', text, run: () => Promise.reject(new Error('bang')) };
+    if (text.includes('stop')) return { name: 'stop', text, run: () => Promise.resolve() };
+    return null;
+  } };
+  const clips = () => link.clips.map((c) => c.toString());
+  assert.equal(voice.route('jet, slow'), true);
+  assert.deepEqual(clips(), ['say:ok'], 'the ack at once');
+  await sleep(150);   // actionWaitMs is 40: three nags due, but only two wait phrases exist and none repeats
+  const waits = clips().filter((c) => c.startsWith('say:hm'));
+  assert.deepEqual([...waits].sort(), ['say:hm2', 'say:hmm'], `each wait phrase once while it runs: ${clips()}`);
+  finish(); await sleep(60);
+  const n = clips().length;
+  await sleep(60);
+  assert.equal(clips().length, n, 'no more nagging once it finished');
+  assert.equal(voice.route('boom'), true); await sleep(5);
+  assert.deepEqual(clips().slice(-2), ['say:ok', 'say:oops'], 'ack, then the error phrase');
+  assert.equal(voice.route('stop'), true); await sleep(5);
+  assert.equal(clips().at(-1), 'say:oops', 'stop is not acknowledged');
 });
 
 test('voice: not configured is refused; a session error ends the turn', async (t) => {
@@ -247,4 +280,37 @@ test('wrapWords', () => {
   assert.deepEqual(wrapWords('abcdefghijklmnop q', 6), ['abcdef', 'ghijkl', 'mnop q']);
   assert.deepEqual(wrapWords('one\ntwo three', 20), ['one', 'two three']);
   assert.deepEqual(wrapWords('', 10), ['']);
+});
+
+test('voice: the wake word begins a turn with no cue and no V; an action takes the transcript; a question from a wake turn is announced', async (t) => {
+  const { voice, link, ui, states, session } = await make({ wake: true, wakeCutoff: 0.9, wakeWindow: 4 });
+  t.after(() => voice.stop());
+  assert.deepEqual(link.sent, ['D 1 0.9 4'], 'jetd told to listen with the model\'s cutoff and window');
+  const questions = []; voice.on('question', (q) => questions.push(q));
+  const ran = [];
+  voice.actions = { match(text) { return text.includes('look') ? { name: 'look', text, run: () => { ran.push(text); return Promise.resolve(); } } : text.includes('boom') ? { name: 'boom', text, run: () => Promise.reject(new Error('bang')) } : null; } };
+  link.emit('wake', { avg: 250, max: 255 });
+  assert.equal(voice.state, 'listening'); assert.deepEqual(link.sent, ['D 1 0.9 4'], 'no cue, no V: jetd is already capturing');
+  assert.deepEqual(ctl(session), [{ type: 'start', turn: 1 }]);
+  link.emit('captureChunk', Buffer.alloc(3200, 1)); link.emit('captureEnd', 'end');
+  assert.equal(voice.state, 'thinking');
+  assert.equal(voice.route('jet, look'), true, 'an action: the model is not asked'); assert.deepEqual(ran, ['jet, look']);
+  assert.equal(ui.strips.at(-1), 'look');
+  session.emit('final', { type: 'final', text: 'jet, look', turn: 1 }); session.emit('done', { type: 'done', answer: '', turn: 1 });
+  assert.equal(voice.state, 'idle'); assert.equal(ui.strips.at(-1), 'look', 'the action keeps the strip');
+  link.emit('wake', { avg: 250, max: 255 });
+  assert.equal(voice.route('what time is it'), false, 'a question goes on to the model');
+  assert.deepEqual(questions, [{ turn: 2, text: 'what time is it', wake: true }]);
+  link.emit('captureEnd', 'end'); session.emit('final', { type: 'final', text: 'what time is it', turn: 2 }); session.emit('done', { type: 'done', answer: '', turn: 2 });
+  assert.equal(voice.state, 'idle');
+  press(voice);
+  assert.equal(voice.route('boom'), true); await sleep(5);
+  assert.match(ui.strips.at(-1), /boom: bang/, 'a failing action is reported'); assert.ok(link.sent.some((l) => l === 'V 8'), 'a button turn still opens the mic');
+  voice.cancel();
+  assert.deepEqual(states, ['listening', 'thinking', 'idle', 'listening', 'thinking', 'idle', 'listening', 'idle']);
+  const off = await make({ wake: false });
+  t.after(() => off.voice.stop());
+  assert.deepEqual(off.link.sent, [], 'wake off: jetd is not asked to listen');
+  off.link.emit('wake', { avg: 250, max: 255 });
+  assert.equal(off.voice.state, 'idle'); assert.deepEqual(off.link.sent, ['v'], 'a stray detection: the capture jetd began is stopped');
 });

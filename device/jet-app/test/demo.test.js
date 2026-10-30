@@ -59,3 +59,45 @@ test('demo: front press takes a snapshot, encodes it and streams the answer; rea
   assert.equal(demo.error, 'no camera'); assert.equal(demo.state, 'idle');
   assert.deepEqual(demo.sounds.played.filter((n) => n === 'error'), ['error'], 'the failure is heard'); assert.equal(demo.sounds.played[0], 'ack', 'sending is acknowledged');
 });
+
+test('demo: the "run analysis" command comes to this mode first, then describes', async () => {
+  const link = fakeLink();
+  const ui = { renders: 0, strips: [], requestRender() { this.renders++; }, setStrip(t) { this.strips.push(t); } };
+  const surface = { width: 428, height: 240, viewfinderRect: null, viewfinder(x, y, w, h) { this.viewfinderRect = { x, y, w, h }; return Promise.resolve({ w: 640, h: 480 }); }, stopViewfinder() { this.viewfinderRect = null; } };
+  // spoken: the SAY line comes first and never reaches the glass; its TTS starts as soon as the line is complete
+  // (while the details still stream) and the clip plays right after the "report" phrase
+  const voice = { asked: [], phrases: [], synthed: [], played: [], warmed: 0, synthAt: null,
+    look(jpg, q, { onToken }) { this.asked.push(q); for (const t of ['SAY: “someone', ' needs a shelf.”\n', 'a desk', ' with mugs.']) { onToken(t); if (this.synthed.length && this.synthAt === null) this.synthAt = t; } return Promise.resolve('SAY: “someone needs a shelf.”\na desk with mugs.'); },
+    phrase(set) { this.phrases.push(set); }, synth(text) { this.synthed.push(text); return Promise.resolve(Buffer.from(`pcm:${text}`)); }, playClip(pcm) { this.played.push(pcm.toString()); }, warm() { this.warmed++; } };
+  const registered = []; const actions = { register(name, pattern, run) { registered.push({ name, pattern, run }); return this; } };
+  const modes = { current: null, switched: [], register() {}, switchTo(id) { this.switched.push(id); this.current = demo; return true; } };
+  const demo = Object.assign(new DemoMode(), { question: 'what?', spokenQuestion: 'what? then SAY:', jpegQuality: 50, modes, ui, surface, deviceLink: link, power: { smoothed: null }, sensors: { glance: null, view: null }, voice, sounds: fakeSounds(), actions });
+  await demo.start();
+  assert.equal(registered.length, 1); assert.equal(registered[0].name, 'analysis');
+  assert.ok(registered[0].pattern.test('run analysis')); assert.ok(registered[0].pattern.test('run analysis of the camera view'), 'trailing words are fine');
+  assert.ok(!registered[0].pattern.test('look')); assert.ok(!registered[0].pattern.test('run analysisx'));
+  assert.ok(!registered[0].pattern.test('what time is it'));
+  await registered[0].run([], 'run analysis');
+  assert.deepEqual(modes.switched, ['demo'], 'not current: switched first');
+  assert.deepEqual(voice.asked, ['what? then SAY:'], 'the spoken prompt');
+  assert.equal(demo.answer, 'a desk with mugs.', 'the SAY line is not on the glass');
+  assert.equal(voice.warmed, 1, 'the TTS was woken when the look began');
+  assert.deepEqual(voice.synthed, ['someone needs a shelf.'], 'quotes dropped, synthesised once');
+  assert.equal(voice.synthAt, ' needs a shelf.”\n', 'the TTS started on the token that completed the SAY line, before the details');
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(voice.phrases, ['report']); assert.deepEqual(voice.played, ['pcm:someone needs a shelf.'], 'the report phrase, then the remark');
+  const { splitRemark } = await import('../src/modes/demo/index.js');
+  assert.deepEqual(splitRemark('SAY: tidy up\nTwo mugs.'), { details: 'Two mugs.', say: 'tidy up' });
+  assert.deepEqual(splitRemark('Two mugs.\nsay: "tidy up"'), { details: 'Two mugs.', say: 'tidy up' }, 'last line works too');
+  assert.deepEqual(splitRemark('SAY: tidy', { final: false }), { details: '', say: '' }, 'a SAY line still being written: nothing yet');
+  assert.deepEqual(splitRemark('SAY: tidy', { final: true }), { details: '', say: 'tidy' }, 'the answer ended on it: complete');
+  assert.deepEqual(splitRemark('Two mugs. SAY: no'), { details: 'Two mugs. SAY: no', say: '' }, 'only on its own line');
+  assert.deepEqual(splitRemark(''), { details: '', say: '' });
+  // the button's describe: the plain prompt, nothing spoken, no warm-up
+  demo.answer = ''; voice.asked.length = 0;
+  await demo.describe();
+  assert.deepEqual(voice.asked, ['what?']); assert.deepEqual(voice.phrases, ['report'], 'no second phrase'); assert.deepEqual(voice.synthed, ['someone needs a shelf.']); assert.equal(voice.warmed, 1);
+  assert.equal(demo.answer, 'a desk with mugs.', 'the model still answered with a SAY line; the glass drops it');
+  await registered[0].run([], 'look');
+  assert.deepEqual(modes.switched, ['demo'], 'already current: no switch');
+});

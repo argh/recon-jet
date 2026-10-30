@@ -44,7 +44,7 @@ function fakeLlm({ chatDelayMs = 2, speakMs = () => 2, tokens = ['It is', ' sunn
 
 function make(opts) {
   const llm = fakeLlm(opts);
-  const session = new VoiceSession(llm, { partialMs: 15 });
+  const session = new VoiceSession(llm, { partialMs: 15, sentenceGapMs: 0 });   // no gap: audio bytes = sentence bytes below
   const events = [];
   for (const type of ['partial', 'final', 'token', 'audio', 'done', 'error']) session.on(type, (m) => events.push(m));
   return { llm, session, events, types: () => events.map((e) => e.type) };
@@ -157,13 +157,23 @@ test('sentence splitter: boundaries on streamed tokens, decimals and short fragm
   const s = new SentenceSplitter();
   const out = [];
   for (const tok of ['Hello', ' there', '.', ' It', ' is 3', '.5 degrees', ' today!', ' Really', '?', ' Yes', '.']) out.push(...s.push(tok));
-  assert.deepEqual(out, ['Hello there.', 'It is 3.5 degrees today!']);   // "Really?" waits for the space; "Yes." for flush
+  assert.deepEqual(out, ['Hello there.', 'It is 3.5 degrees today!', 'Really?']);   // a one-word sentence is a sentence (the TTS gets a gap after it)
   out.push(...s.push(' '));
-  assert.deepEqual(out, ['Hello there.', 'It is 3.5 degrees today!', 'Really? Yes.']);   // "Really?" alone was under minChars
-  assert.equal(s.flush(), null);
+  assert.deepEqual(out, ['Hello there.', 'It is 3.5 degrees today!', 'Really?'], '"Yes." waits to see how the next word starts');
+  assert.equal(s.flush(), 'Yes.');
   const s2 = new SentenceSplitter();
   assert.deepEqual(s2.push('No. 5 is fine. "Sure!" she said.\nNext line'), ['No. 5 is fine.', '"Sure!" she said.']);
   assert.equal(s2.flush(), 'Next line');
   const s3 = new SentenceSplitter();
   assert.deepEqual(s3.push('one\ntwo\n'), ['one', 'two']);
+});
+
+test('session: an intercepted final transcript ends the turn with no chat and no speech', async () => {
+  const llm = fakeLlm();
+  const s = new VoiceSession(llm, { partialMs: 1000 });
+  const events = []; for (const e of ['partial', 'final', 'token', 'audio', 'done', 'error']) s.on(e, (m) => events.push(m.type));
+  const routed = []; s.intercept = (text) => { routed.push(text); return text.startsWith('heard'); };
+  s.start(1); s.audio(Buffer.alloc(3200)); await s.end(); await sleep(10);
+  assert.deepEqual(routed, ['heard 3200']); assert.deepEqual(events, ['final', 'done']);
+  assert.equal(llm.calls.chat.length, 0); assert.equal(llm.calls.speak.length, 0);
 });

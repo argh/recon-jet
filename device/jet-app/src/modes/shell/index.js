@@ -20,7 +20,7 @@ export class ShellMode {
   };
   returnTo; modes; ui; deviceLink; logger;
 
-  id = 'shell'; label = 'Shell'; transient = true;
+  id = 'shell'; label = 'Shell'; transient = true; spoken = ['console'];
   /** @type {string|null} the mode showing before the shell */ previous = null;
   #current = false;
 
