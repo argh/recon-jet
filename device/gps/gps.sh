@@ -5,6 +5,9 @@
 #   gps.sh stop     stop navd; hci0 stays up only if something else wants Bluetooth
 #   gps.sh status   what is running, and the last NMEA sentences seen
 # Needs the hci_uart.ko with the GPS channel (the stock /dev/tigps contract; kernel/overlay).
+# navd logs nowhere by default: its Android logging has no logd to reach on mainline, and its
+# stdout logger prints every protocol byte and will FILL tmpfs in minutes (it killed jet-app
+# once). To debug, add --log_to_stdout and redirect to /android-data, never /tmp.
 # While hci0 is up, WiFi rx drops to ~1 Mbit/s (coexistence is untuned) — expected on the move.
 R=/android-data/stock
 case "$1" in
@@ -19,8 +22,8 @@ case "$1" in
     hciconfig hci0 up || exit 1
     sleep 2
     pgrep navd >/dev/null || {
-      setsid nohup chroot $R /system/bin/navd --android_log NAVD --log_to_stdout -p3 \
-        '-nav"-c/system/etc/gps/config/pathconfigfile.txt"' > /tmp/navd.log 2>&1 < /dev/null &
+      setsid nohup chroot $R /system/bin/navd --android_log NAVD -p3 \
+        '-nav"-c/system/etc/gps/config/pathconfigfile.txt"' > /dev/null 2>&1 < /dev/null &
       sleep 3
     }
     pgrep -a navd || { echo "navd did not start (see /tmp/navd.log)"; exit 1; }
