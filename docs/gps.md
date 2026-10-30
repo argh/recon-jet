@@ -61,7 +61,14 @@ test.
 ## Caveats
 
 - **BT/WiFi coexistence is untuned**: hci0 up pins WiFi rx at ~1 Mbit/s, and GPS keeps hci0 up.
-  Fine on the move; toggle GPS off on the desk.
+  Fine on the move; toggle GPS off on the desk. The pinned rate does NOT recover on its own when
+  the radio goes down, so turning GPS off (when Bluetooth is not wanted) now runs
+  `wpa_cli reassociate` to restore throughput.
+- **The chip streams on its own**: once a fix session starts, the GPS core emits reports over the
+  shared radio link continuously, with no client needed. Killing navd does not stop it, and a chip
+  left fixing keeps strangling WiFi. Turning GPS off ends the session at the chip (fix-stop +
+  baseband-stop over the command socket) before the daemon is stopped, then brings hci0 down to
+  power the chip off.
 - navd and its libraries stay on the stock partition and run in place; nothing closed is copied
   or redistributed. The chroot mounts do not survive a reboot; `gps.sh start` redoes them.
 - First fix after a long power-off can take minutes (the 2013-era aiding data is stale and the

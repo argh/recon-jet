@@ -39,15 +39,21 @@ export class LocationScreen {
     this.busy = true; this.error = null; this.sys.ui.requestRender();
     let failed = null;
     try {
-      if (on) await run('sh', [this.sys.gpsScript, 'start'], 30000);
+      if (on) { await run('sh', [this.sys.gpsScript, 'start'], 30000); this.sys.gps?.listen(); }
       else {
+        // end the fix session at the chip first (killing the daemon leaves it streaming, which
+        // keeps the shared radio busy and strangles WiFi), then stop the daemon
+        await this.sys.gps?.stopSession();
+        this.sys.gps?.stopListening();
         await run('sh', [this.sys.gpsScript, 'stop'], 10000);
-        // the radio came up for GPS; put it back down unless Bluetooth is wanted at boot
         const btWanted = await fs.access(this.sys.btMarker).then(() => true, () => false);
-        if (!btWanted) await run('bluetoothctl', ['power', 'off']).catch(() => {});
+        if (!btWanted) {
+          await run('bluetoothctl', ['power', 'off']).catch(() => {});   // radio down powers the chip off
+          await run('hciconfig', ['hci0', 'down']).catch(() => {});      // belt and suspenders
+          await run('wpa_cli', ['-i', 'wlan0', 'reassociate']).catch(() => {});   // the coex rate stays pinned at 1 Mbit/s until a reassociate
+        }
       }
       this.running = on;
-      if (on) this.sys.gps?.listen(); else this.sys.gps?.stopListening();
       this.sys.logger?.info({ on }, 'gps');
       this.sys.ui.setStrip(`gps ${on ? 'on' : 'off'}`, { colour: on ? C.warn : C.ok, ms: 2000 });
     } catch (error) {

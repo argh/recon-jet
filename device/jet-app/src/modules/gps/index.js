@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Schema } from '@versionzero/module-manager';
-import { FifoRecords, Responses, basebandStart, fixStart, parseComplete, EVENT } from '../../lib/navl.js';
+import { FifoRecords, Responses, basebandStart, fixStart, fixStop, basebandStop, parseComplete, EVENT } from '../../lib/navl.js';
 import { NmeaState } from './nmea.js';
 
 const s = Schema.create;
@@ -72,7 +72,23 @@ export class Gps extends EventEmitter {
     this.#connect();
   }
 
+  /**
+   * Tell the chip to end the fix session, over the open command socket, and wait for it to go
+   * quiet. The chip streams reports on its own once a fix starts; killing the daemon does not
+   * stop it, and a chip left fixing keeps the shared radio busy and strangles WiFi. Call this
+   * before the daemon is stopped. Safe to call with no socket (resolves at once).
+   */
+  async stopSession() {
+    if (!this.#sock || this.#sock.destroyed) return;
+    try {
+      this.#sock.write(fixStop());
+      this.#sock.write(basebandStop());
+      await new Promise((r) => setTimeout(r, 600));
+    } catch { /* the socket went away: the daemon is already gone */ }
+  }
+
   stopListening() {
+
     if (!this.listening) return;
     this.listening = false;
     clearTimeout(this.#retry); this.#retry = null;

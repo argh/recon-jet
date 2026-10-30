@@ -23,6 +23,11 @@ async function make({ calibrated = false, glanceRaw = 150, extra = {} } = {}) {
   setRaw(glanceRaw);
   fs.mkdirSync(path.join(dir, 'net', 'wlan0'), { recursive: true }); fs.mkdirSync(path.join(dir, 'net', 'usb0'));
   fs.writeFileSync(path.join(dir, 'gps.sh'), '#!/bin/sh\necho "$1" >> "$(dirname "$0")/gps-calls"\n');
+  for (const name of ['bluetoothctl', 'hciconfig', 'wpa_cli']) {
+    fs.writeFileSync(path.join(dir, name), '#!/bin/sh\necho ' + name + ' "$@" >> "$(dirname "$0")/ran"\n');
+    fs.chmodSync(path.join(dir, name), 0o755);
+  }
+  fs.chmodSync(path.join(dir, 'gps.sh'), 0o755);
   fs.writeFileSync(path.join(dir, 'brightness'), '208\n'); fs.writeFileSync(path.join(dir, 'thr_x'), '20\n'); fs.writeFileSync(path.join(dir, 'thr_y'), '20\n');
   const link = fakeLink();
   const ui = Object.assign(new EventEmitter(), { renders: 0, strips: [], requestRender() { this.renders++; }, setStrip(t) { this.strips.push(t); }, surface: { width: 428, height: 240 } });
@@ -141,7 +146,9 @@ test('system: the menu opens every screen; brightness rear reverts; Status repai
 });
 
 test('system: Location toggles GPS through the bring-up script; "enable gps" goes to the same switch', async () => {
-  const { sys, ui, dir } = await make({ calibrated: true });
+  const gps = { listened: 0, sessionStopped: 0, listen() { this.listened++; }, stopListening() {}, async stopSession() { this.sessionStopped++; }, on() {}, state: {}, goodFix() { return null; } };
+  const { sys, ui, dir } = await make({ calibrated: true, extra: { gps } });
+  const old = process.env.PATH; process.env.PATH = `${dir}:${old}`;
   sys.enter(); sys.open('location');
   await until(() => sys.screens.location.running === false, 'probed');
   assert.equal(sys.onGesture('press:front'), true);
@@ -150,6 +157,11 @@ test('system: Location toggles GPS through the bring-up script; "enable gps" goe
   sys.onGesture('press:tap');
   await until(() => ui.strips.includes('gps off'), 'stopped');
   assert.equal(fs.readFileSync(path.join(dir, 'gps-calls'), 'utf8'), 'start\nstop\n');
+  assert.equal(gps.sessionStopped, 1, 'the fix session was ended before the daemon');
+  const ran = fs.readFileSync(path.join(dir, 'ran'), 'utf8');
+  assert.match(ran, /wpa_cli -i wlan0 reassociate/, 'wifi rate recovered on gps off');
+  assert.match(ran, /hciconfig hci0 down/);
+  process.env.PATH = old;
   sys.screens.location.render({ fillRect() {}, text() {}, line() {}, strokeRect() {}, width: 428, height: 240, fonts: { main: { height: 20 }, small: { height: 12 } } });
   // the spoken switch: same screen, and a dead script surfaces as a thrown error for the error phrase
   sys.gpsScript = path.join(dir, 'missing.sh');
