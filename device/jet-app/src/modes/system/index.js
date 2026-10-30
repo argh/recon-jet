@@ -1,5 +1,7 @@
-// System mode: a chooser-style menu of the device's own screens: Status, Pad calibration,
-// Glance calibration, Brightness, Power, Network, Bluetooth, About. Front press opens the selected screen,
+// System mode: a chooser-style menu of the device's own screens. Status is display-only and
+// carries everything worth reading (power, network, radios, sensors, versions); every other
+// item controls something settable - Pad calibration, Glance calibration, Brightness, Wear,
+// Bluetooth, Location (GPS) - and shows its own detail. Front press opens the selected screen,
 // rear press returns to the menu (and does nothing at the menu: that is the mode's root).
 //
 // First use: when the pad or glance calibration file is missing on userdata, `firstUse()` tells
@@ -18,15 +20,13 @@ import { writeIfPresent } from '../../lib/sysfs.js';
 import { ofmArgs, glanceFile, BACKLIGHT } from './calibration.js';
 
 /** What the ASR makes of a screen's name when it gets it wrong, back to the screen. */
-const SCREEN_ALIAS = { stages: 'status', glands: 'glance', where: 'wear', ware: 'wear', networks: 'network' };
+const SCREEN_ALIAS = { stages: 'status', glands: 'glance', where: 'wear', ware: 'wear' };
 import { StatusScreen } from './status.js';
 import { PadCalScreen } from './pad-cal.js';
 import { GlanceCalScreen } from './glance-cal.js';
 import { BrightnessScreen } from './brightness.js';
-import { PowerScreen } from './power.js';
-import { NetworkScreen } from './network.js';
 import { BluetoothScreen } from './bluetooth.js';
-import { AboutScreen } from './about.js';
+import { LocationScreen } from './location.js';
 import { WearScreen } from './wear.js';
 
 const s = Schema.create;
@@ -42,8 +42,9 @@ export class SystemMode {
       .property('iioDir', s('string').default('/sys/bus/iio/devices').meta('description', 'where the tmd2771 proximity channel is looked for'))
       .property('backlightFile', s('string').default('/android-data/mainline/backlight').meta('description', 'saved backlight level'))
       .property('backlightSysfs', s('string').default('/sys/class/backlight/kopin-a230/brightness').meta('description', 'backlight control'))
-      .property('netDir', s('string').default('/sys/class/net').meta('description', 'interfaces listed on the Network screen'))
+      .property('netDir', s('string').default('/sys/class/net').meta('description', 'interfaces the Status screen lists'))
       .property('btMarker', s('string').default('/android-data/mainline/bt').meta('description', 'exists = init powers the Bluetooth radio on at boot'))
+      .property('gpsScript', s('string').default('/opt/jet-app/scripts/gps.sh').meta('description', 'the GPS bring-up script the Location screen runs (start|stop)'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer, where System screens persist settings'))
       .property('modes', s('Modes').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
@@ -56,7 +57,7 @@ export class SystemMode {
       .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; deviceConfig; modes; ui; input; power; sensors; wear; deviceLink; sounds; actions; logger;
+  ofmArgsFile; ofmSysfs; glanceFile; iioDir; backlightFile; backlightSysfs; netDir; btMarker; gpsScript; deviceConfig; modes; ui; input; power; sensors; wear; deviceLink; sounds; actions; logger;
 
   id = 'system'; label = 'System'; spoken = ['settings'];
   /** @type {Chooser} */ menu;
@@ -70,27 +71,27 @@ export class SystemMode {
     this.modes.register(this);   // before any await: registration order is the switcher's order
     const version = await fs.readFile(path.join(appRoot, 'package.json'), 'utf8').then((t) => JSON.parse(t).version, () => '?');
     this.screens = {
-      status: new StatusScreen(this), pad: new PadCalScreen(this), glance: new GlanceCalScreen(this), brightness: new BrightnessScreen(this), wear: new WearScreen(this),
-      power: new PowerScreen(this), network: new NetworkScreen(this), bluetooth: new BluetoothScreen(this), about: new AboutScreen(this, version),
+      status: new StatusScreen(this, version), pad: new PadCalScreen(this), glance: new GlanceCalScreen(this), brightness: new BrightnessScreen(this), wear: new WearScreen(this),
+      bluetooth: new BluetoothScreen(this), location: new LocationScreen(this),
     };
     this.menu = new Chooser({ title: 'SYSTEM', items: [
       { id: 'status', label: 'Status' }, { id: 'pad', label: 'Pad calibration' }, { id: 'glance', label: 'Glance calibration' },
-      { id: 'brightness', label: 'Brightness' }, { id: 'wear', label: 'Wear' }, { id: 'power', label: 'Power' }, { id: 'network', label: 'Network' }, { id: 'bluetooth', label: 'Bluetooth' }, { id: 'about', label: 'About' },
+      { id: 'brightness', label: 'Brightness' }, { id: 'wear', label: 'Wear' }, { id: 'bluetooth', label: 'Bluetooth' }, { id: 'location', label: 'Location' },
     ], hint: 'swipe: move   front: open' });
     this.input.on('motion', (m) => { if (this.#current && this.screen === this.screens.pad) this.screens.pad.onMotion(m); });
     this.power.on('update', () => { if (this.#current && this.screen === this.screens.status && this.screens.status.onPower()) this.ui.requestRender(); });
     this.backlight.level = await this.#readBacklight();
-    // "heya jet, open network": come here and show the screen (the Modes "open" declines names
+    // "heya jet, open bluetooth": come here and show the screen (the Modes "open" declines names
     // that are no mode, so this gets them whatever the start order); the nouns the ASR has been
     // heard to bend ("stages", "where") are accepted as aliases
-    this.actions?.register('open screen', /^open (?:the )?(status|stages|pad|glance|glands|brightness|wear|where|ware|power|network|networks|bluetooth|about)$/, (m) => {
+    this.actions?.register('open screen', /^open (?:the )?(status|stages|pad|glance|glands|brightness|wear|where|ware|bluetooth|location)$/, (m) => {
       if (this.modes.current !== this) this.modes.switchTo(this.id);
       this.wizard = null; this.open(SCREEN_ALIAS[m[1]] ?? m[1]);
     });
     // "heya jet, enable bluetooth" / "disable wear": a setting's switch, from any mode (the ASR
     // sometimes hears the past tense, hence the optional d)
-    this.actions?.register('setting', /^(enabled?|disabled?) (bluetooth|wear|where|ware|dark)$/, (m) => {
-      const on = m[1].startsWith('enable'), screen = m[2] === 'bluetooth' ? this.screens.bluetooth : this.screens.wear;
+    this.actions?.register('setting', /^(enabled?|disabled?) (bluetooth|wear|where|ware|dark|gps|location)$/, (m) => {
+      const on = m[1].startsWith('enable'), screen = m[2] === 'bluetooth' ? this.screens.bluetooth : m[2] === 'gps' || m[2] === 'location' ? this.screens.location : this.screens.wear;
       return screen.set(on);
     });
   }

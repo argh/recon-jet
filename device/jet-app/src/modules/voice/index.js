@@ -22,7 +22,8 @@
 //
 // Debug: `voice.debugPort` (JET_VOICE_DEBUG_PORT) serves POST /talk (start a turn, as the
 // Assistant mode's front press would), POST /cancel, POST /say {text} (TTS round trip to the
-// speaker), POST /phrases (render the missing phrases), POST /look {question?} (a camera snapshot
+// speaker), POST /phrases (render the missing phrases), POST /action {text} (route a
+// transcript to the command registry, no mic involved), POST /look {question?} (a camera snapshot
 // through the vision model, as the Demo mode's front press), GET /state, GET /screen.png?scale=N (the
 // framebuffer as a PNG: what the panel shows).
 import { EventEmitter } from 'node:events';
@@ -57,7 +58,7 @@ export class Voice extends EventEmitter {
       .property('wake', s('boolean').default(true).meta('description', 'hands-free: jetd listens for the wake word (needs mainline/wake.tflite on the device) and a hit starts a turn'))
       .property('wakeCutoff', s('number').default(0.97).meta('description', 'detection probability cutoff, from the model manifest'))
       .property('wakeWindow', s('number').default(5).meta('description', 'probabilities averaged for a detection'))
-      .property('debugPort', s('number').default(0).meta('description', 'debug HTTP port (POST /talk, /cancel, /say, /phrases, /look; GET /state, /screen.png?scale=N); 0 = off'))
+      .property('debugPort', s('number').default(0).meta('description', 'debug HTTP port (POST /talk, /cancel, /say, /phrases, /look, /action; GET /state, /screen.png?scale=N); 0 = off'))
       .property('llm', s('Llm').meta('internal', true))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
@@ -400,6 +401,10 @@ export class Voice extends EventEmitter {
           if (req.method === 'POST' && req.url === '/cancel') return reply(200, { cancelled: this.cancel() });
           if (req.method === 'POST' && req.url === '/say') return run(this.say(String(json.text ?? 'hello')));
           if (req.method === 'POST' && req.url === '/phrases') return run(this.renderPhrases());
+          if (req.method === 'POST' && req.url === '/action') {   // a spoken command without the mic: { text: "open status" }
+            const a = this.actions?.match(String(json.text ?? ''));
+            return a ? run(a.run().then(() => ({ matched: a.name }))) : reply(200, { matched: null });
+          }
           if (req.method === 'POST' && req.url === '/look') return run(this.#snapshotLook(String(json.question ?? 'Describe what is in front of me in one short sentence.')));
           reply(404, { error: 'no such route' });
         } catch (e) { reply(400, { error: e.message }); }

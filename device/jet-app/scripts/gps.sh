@@ -29,7 +29,10 @@ case "$1" in
     pgrep -a navd || { echo "navd did not start (run it with --log_to_stdout to see why)"; exit 1; }
     ;;
   stop)
-    pkill navd
+    # navd traps TERM and keeps running; escalate
+    pkill navd; sleep 1
+    pgrep navd >/dev/null && pkill -9 navd
+    true
     ;;
   status)
     grep tigps /proc/misc || echo "no /dev/tigps"

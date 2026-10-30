@@ -4,5 +4,5 @@ set -e
 cd "$(dirname "$0")/.."
 npm ci --omit=dev --silent
 mkdir -p ../../work
-tar czf ../../work/jet-app.tgz package.json package-lock.json README.md src assets config deploy test node_modules
+tar czf ../../work/jet-app.tgz package.json package-lock.json README.md src assets config deploy scripts test node_modules
 ls -la ../../work/jet-app.tgz

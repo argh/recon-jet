@@ -3,8 +3,8 @@
 // every final transcript before it goes to the chat model, so a command runs offline and at once
 // while anything else is a question for the persona. The vocabulary is one verb per tier and one
 // noun after it, no synonyms on the verbs (docs/jet-app.md "Spoken commands"):
-//   open <screen>            navigation: a mode or a System screen ("open settings", "open network")
-//   enable|disable <setting> a toggle ("enable bluetooth", "disable wear")
+//   open <screen>            navigation: a mode or a System screen ("open settings", "open status")
+//   enable|disable <setting> a toggle ("enable bluetooth", "disable wear", "enable gps")
 //   run <app>                the app tier ("run analysis", "run doom")
 //   stop | cancel            end the turn, nothing asked
 // Nouns carry aliases only where the ASR has been heard to mishear them ("run doom" comes back

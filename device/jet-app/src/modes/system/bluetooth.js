@@ -57,6 +57,8 @@ export class BluetoothScreen {
     this.busy = true; this.sys.ui.requestRender();
     let failed = null;
     try {
+      // GPS rides this radio: powering it off takes the GPS daemon down first (Location shows it off)
+      if (!on && this.sys.screens.location?.running) await run('sh', [this.sys.gpsScript, 'stop']).then(() => { this.sys.screens.location.running = false; this.sys.logger?.info('gps stopped for radio off'); }, () => {});
       await run('bluetoothctl', ['power', on ? 'on' : 'off']);
       if (on) await fs.writeFile(this.sys.btMarker, 'bluetooth radio on at boot (System > Bluetooth)\n');
       else await fs.rm(this.sys.btMarker, { force: true });

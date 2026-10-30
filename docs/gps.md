@@ -24,7 +24,7 @@ hci_ll.c (+ GPS channel 9) ── /dev/tigps ──> navd ──┬── /data/
   the next packet's size, `TCFLSH` purges, unknown ioctls succeed. The chip is powered and its
   firmware loaded by `hci0 up`, so GPS needs hci0 up for as long as it runs.
 - **navd**: the stock system partition is mounted read-only into a chroot with `/data`, `/dev`
-  and `/proc` bound; `device/gps/gps.sh start` does all of it. navd opens `/dev/tigps`, uploads
+  and `/proc` bound; `scripts/gps.sh start` (deployed at /opt/jet-app/scripts/) does all of it. navd opens `/dev/tigps`, uploads
   `wl128x_sp11p97_128.ce` (the chip's GPS patch, from the stock partition, visible in dmesg as a
   burst of ~140-byte channel-9 writes), reads its config and aiding files from
   `/android-data/gps/`, and serves clients.
@@ -46,9 +46,9 @@ On-device, from this repo: install the module tree (`hci_uart.ko` from `kernel/b
 into `/android-data/mainline/modules/.../bluetooth/`), then
 
 ```sh
-device/gps/gps.sh start       # mounts, hci0 up, navd
+/opt/jet-app/scripts/gps.sh start       # mounts, hci0 up, navd
 node tools/gps-probe.js 40    # from device/jet-app, copied to the device: baseband + fix session
-device/gps/gps.sh status      # shows the live NMEA tail
+/opt/jet-app/scripts/gps.sh status      # shows the live NMEA tail
 ```
 
 Verified end to end indoors: baseband start and fix start both complete with result 0, the

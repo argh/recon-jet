@@ -22,6 +22,7 @@ async function make({ calibrated = false, glanceRaw = 150 } = {}) {
   const setRaw = (v) => fs.writeFileSync(proximity, `${v}\n`);
   setRaw(glanceRaw);
   fs.mkdirSync(path.join(dir, 'net', 'wlan0'), { recursive: true }); fs.mkdirSync(path.join(dir, 'net', 'usb0'));
+  fs.writeFileSync(path.join(dir, 'gps.sh'), '#!/bin/sh\necho "$1" >> "$(dirname "$0")/gps-calls"\n');
   fs.writeFileSync(path.join(dir, 'brightness'), '208\n'); fs.writeFileSync(path.join(dir, 'thr_x'), '20\n'); fs.writeFileSync(path.join(dir, 'thr_y'), '20\n');
   const link = fakeLink();
   const ui = Object.assign(new EventEmitter(), { renders: 0, strips: [], requestRender() { this.renders++; }, setStrip(t) { this.strips.push(t); }, surface: { width: 428, height: 240 } });
@@ -31,7 +32,7 @@ async function make({ calibrated = false, glanceRaw = 150 } = {}) {
     ofmArgsFile: path.join(dir, 'mainline', 'ofm-args'), ofmSysfs: dir, glanceFile: path.join(dir, 'mainline', 'glance'), iioDir: path.join(dir, 'iio'),
     backlightFile: path.join(dir, 'mainline', 'backlight'), backlightSysfs: path.join(dir, 'brightness'), netDir: path.join(dir, 'net'),
     modes, ui, input, power, sensors: { glance: null, view: null, worn: null }, deviceLink: link, sounds: fakeSounds(),
-    deviceConfig: path.join(dir, 'mainline', 'jet-app.json'), wear: { enabled: false, lit: true, calls: [], setEnabled(on) { this.enabled = on; this.calls.push(on); } } });
+    deviceConfig: path.join(dir, 'mainline', 'jet-app.json'), gpsScript: path.join(dir, 'gps.sh'), btMarker: path.join(dir, 'mainline', 'bt'), wear: { enabled: false, lit: true, calls: [], setEnabled(on) { this.enabled = on; this.calls.push(on); } } });
   if (calibrated) { fs.mkdirSync(path.join(dir, 'mainline')); fs.writeFileSync(sys.ofmArgsFile, 'thr_x=41 thr_y=38\n'); fs.writeFileSync(sys.glanceFile, '180 197\n'); }
   await sys.start();
   return { sys, dir, link, ui, input, power, modes, setRaw, read: (f) => fs.readFileSync(path.join(dir, f), 'utf8') };
@@ -112,9 +113,9 @@ test('system: the menu opens every screen; brightness rear reverts; Status repai
   const { sys, power, ui, read } = await make({ calibrated: true });
   sys.enter();
   const ids = sys.menu.items.map((i) => i.id);
-  assert.deepEqual(ids, ['status', 'pad', 'glance', 'brightness', 'wear', 'power', 'network', 'bluetooth', 'about']);
+  assert.deepEqual(ids, ['status', 'pad', 'glance', 'brightness', 'wear', 'bluetooth', 'location']);
   for (const id of ids) { sys.open(id); assert.equal(sys.screen, sys.screens[id]); assert.equal(sys.onGesture('press:rear'), true); assert.equal(sys.screen, null); }
-  sys.onGesture('swipe:up'); assert.equal(sys.menu.item.id, 'about', 'wraps');
+  sys.onGesture('swipe:up'); assert.equal(sys.menu.item.id, 'location', 'wraps');
   sys.open('brightness');
   sys.onGesture('swipe:up'); assert.equal(sys.screens.brightness.level, 256);
   assert.equal(sys.onGesture('press:rear'), true);
@@ -137,6 +138,23 @@ test('system: the menu opens every screen; brightness rear reverts; Status repai
     text(x, y, str) { drawn.push(str); }, line() {}, fillRect() {}, strokeRect() {}, icon() {} };
   status.render(s);
   assert.ok(drawn.includes('192.168.1.9') && drawn.includes('no address'), drawn.join('|'));
+});
+
+test('system: Location toggles GPS through the bring-up script; "enable gps" goes to the same switch', async () => {
+  const { sys, ui, dir } = await make({ calibrated: true });
+  sys.enter(); sys.open('location');
+  await until(() => sys.screens.location.running === false, 'probed');
+  assert.equal(sys.onGesture('press:front'), true);
+  await until(() => ui.strips.includes('gps on'), 'started');
+  assert.equal(sys.screens.location.running, true);
+  sys.onGesture('press:tap');
+  await until(() => ui.strips.includes('gps off'), 'stopped');
+  assert.equal(fs.readFileSync(path.join(dir, 'gps-calls'), 'utf8'), 'start\nstop\n');
+  sys.screens.location.render({ fillRect() {}, text() {}, line() {}, strokeRect() {}, width: 428, height: 240, fonts: { main: { height: 20 }, small: { height: 12 } } });
+  // the spoken switch: same screen, and a dead script surfaces as a thrown error for the error phrase
+  sys.gpsScript = path.join(dir, 'missing.sh');
+  await assert.rejects(sys.screens.location.set(true), /missing\.sh/);
+  assert.equal(ui.strips.at(-1), 'gps off', 'no strip for the failure');
 });
 
 test('system: Wear toggles the off-head behaviour live and persists it into the per-device config layer', async () => {
