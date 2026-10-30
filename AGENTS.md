@@ -8,7 +8,7 @@ is private and not in the repo. Keep docs to known truths and explicit open ques
 
 ## Docs
 `docs/status.md` (executive summary of the current state), `docs/hardware.md`, `docs/boot.md`, `docs/kernel.md`, `docs/jetd.md`, `docs/power.md`,
-`docs/audio.md`, `docs/networking.md`, `docs/open-questions.md`.
+`docs/audio.md`, `docs/networking.md`, `docs/gps.md`, `docs/open-questions.md`.
 
 ## Layout
 - `kernel/`   mainline build: `build.sh` (Docker, source in a named volume), `jet.config`

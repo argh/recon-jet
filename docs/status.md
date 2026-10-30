@@ -16,8 +16,9 @@ camera, WiFi, Bluetooth (LE keyboard paired), speaker, microphones, IMU, baromet
 "glance" sensor, board temperature, charger and fuel gauge, power LED, watchdog, RTC. The wake
 word ("heya jet", a microWakeWord model trained on the Mac, `agent/wake`) runs on the device
 beside jetd for under 2 % of a core. Not ported:
-GPS and FM (closed protocol / removed driver), the Apple MFi coprocessor, and the speaker's DSP
-tuning. A small static C daemon (`jetd`) owns the panel and inputs and speaks a line protocol on
+FM (removed driver), the Apple MFi coprocessor, and the speaker's DSP tuning; GPS works
+through the stock TI daemon in a chroot (docs/gps.md).
+A small static C daemon (`jetd`) owns the panel and inputs and speaks a line protocol on
 a local socket; a Node application (`jet-app`) on the device owns the user interface as a set of
 mode plugins. The device is a thin I/O peripheral: vision, speech recognition, language models
 and speech synthesis run on an inference server reached over WiFi.
@@ -69,7 +70,8 @@ reset on purpose because warm resets hang in the stock bootloader about one time
 | Wake word ("heya jet") | working: `agent/wake/jetwake` (tflite-micro + the TFLite audio frontend, static), jetd `D 1` listen mode, hands-free look / question / switch-mode / bluetooth verified from the speaker loop and from rg's recorded voice | microWakeWord model trained with `agent/wake/train/` (piper positives spelled so espeak says "hey-uh jet" the way it is spoken, two sets of hard negatives, rg's own recordings as extra positives), judged on real mic recordings with `realtest.sh`; `agent/wake/models/heya_jet.tflite` is round 6 | <2 % of a core; cutoff 0.5, window 5 on the device; the first rounds were trained on "heya" as espeak says it ("hee-ya"), which nobody says, so they heard piper and not rg; the DMICs take seconds to settle after loud speech, so the VAD also ends a turn at 8 % of the speech peak; needs `mainline/wake.tflite` on userdata |
 | WiFi (WL1283) | working: ~81/67 Mbit/s, auto-join at ~6 s | wlcore built in, linux-firmware blobs, stock NVS | power save must stay off (init re-disables every 30 s) or rx collapses to 1 Mbit/s; the PMIC 32 kHz output must be forced on or the card never initialises after a power cycle; stock firmware blobs are API 4 and unusable |
 | Bluetooth (WL1283, HCI-LL on UART2) | working: controller, bluetoothd, LE HID keyboard paired and auto-reconnecting | `hci_uart` serdev, bluez 5.66, `uhid` (added to the config: omap2plus omits it) | **coexistence is untuned: hci0 up pins WiFi rx at 1 Mbit/s.** The radio is therefore off at boot unless a marker file says otherwise, and a menu toggle flips it live. bluetoothd needs ~5 s on this CPU before the controller exists |
-| GPS, FM | not ported | TI shared transport (`ti-st`, removed from mainline but carriable) | GPS speaks a closed "AI2" protocol to stock user space; it would need a black-box capture under open sky. FM needs the removed `wl128x` fmdrv |
+| GPS | working: NMEA at 1 Hz from a fix session (indoor bring-up; outdoor fix untested) | GPS channel 9 added to mainline hci_ll (`/dev/tigps`, the stock contract), TI's closed navd runs from the stock partition in a chroot (`device/gps/gps.sh`, docs/gps.md) | the chip computes fixes itself; hci0 must be up (powers the chip), which pins WiFi rx at ~1 Mbit/s until coex is tuned |
+| FM | not ported | the removed `wl128x` fmdrv is carriable; firmware is on the device | no use case yet |
 | Speaker (TFA9895 on McBSP2 I2S) | working, audible, untuned | tfa989x + simple-audio-card; McBSP overlay derives a bit-clock divider the generic card never sets | 48 kHz stereo S16 only: a mono stream silences the amp. Android loaded NXP's DSP tuning with a closed tool; mainline is a plain I2S bypass |
 | Microphones (OMAP4 DMIC) | working | omap-dmic + dmic-codec; overlay derives the mic clock | 96 or 192 kHz S32 only; downmix/decimate in software |
 | IMU (LSM9DS0 accel/mag/gyro), barometer (LPS25H) | working (IIO) | st_sensors | never read the raw sysfs attributes in a UI loop (50 ms power-up per read); use the IIO buffer; ldo2/3/4 must be always-on or the bus dies at 30 s |
