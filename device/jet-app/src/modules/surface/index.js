@@ -92,6 +92,7 @@ export class Surface extends EventEmitter {
   clear(colour) { this.raster?.clear(colour); }
   fillRect(x, y, w, h, colour) { this.raster?.fillRect(x, y, w, h, colour); }
   strokeRect(x, y, w, h, colour, options) { this.raster?.strokeRect(x, y, w, h, colour, options); }
+  fillCircle(cx, cy, r, colour) { this.raster?.fillCircle(cx, cy, r, colour); }
   line(x0, y0, x1, y1, colour) { this.raster?.line(x0, y0, x1, y1, colour); }
   text(x, y, str, options) { return this.raster?.text(x, y, str, { font: this.fonts.main, ...options }); }
   measureText(str, options) { return this.raster?.measureText(str, { font: this.fonts.main, ...options }); }

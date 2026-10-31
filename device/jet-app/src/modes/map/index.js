@@ -1,7 +1,10 @@
-// Map mode: a basic OSM slippy map centred on the GPS fix, for "heya jet, check my location".
-// Raster tiles (tile.openstreetmap.org, 256 px PNG) are fetched over WiFi, decoded on the device
+// Map mode: a basic slippy map centred on the GPS fix, for "heya jet, check my location".
+// Raster tiles (OpenStreetMap standard, 256 px PNG) are fetched over WiFi, decoded on the device
 // and blitted into the panel; a disk cache keeps a revisited area offline and light on the tile
-// server. The glasses buttons zoom (front in, rear out); pad swipes pan, bounded to the area
+// server. OSM is keyless and holds up best here; the dark CARTO styles that need a key looked
+// worse on the panel. For a keyed provider later, set tileUrl to its template and mapMode.tileKey
+// in the per-device config layer (it is appended as ?key= and never committed); the cache is
+// keyed by style so a swap stays clean. Data/tiles (c) OpenStreetMap contributors. The glasses buttons zoom (front in, rear out); pad swipes pan, bounded to the area
 // around the fix so the map stays local and the fetch stays small; a tap recentres and follows
 // the fix again. hold:front opens the switcher to leave, as everywhere. Not a persisted start
 // mode: it needs a position. While GPS is on WiFi is slow (coex), so first paint can take a
@@ -22,9 +25,10 @@ export class MapMode {
   static moduleInfo = {
     name: 'map-mode',
     schema: s()
-      .property('tileUrl', s('string').default('https://tile.openstreetmap.org/{z}/{x}/{y}.png').meta('description', 'OSM raster tile template'))
+      .property('tileUrl', s('string').default('https://tile.openstreetmap.org/{z}/{x}/{y}.png').meta('description', 'raster tile template; OpenStreetMap standard by default (keyless)'))
+      .property('tileKey', s('string').default('').meta('description', 'tile-server API key for a keyed provider, appended as ?key=; set per-device, never committed'))
       .property('userAgent', s('string').default('recon-jet-hud/1.0 (personal; v0.net)').meta('description', 'the tile server wants an identifying User-Agent'))
-      .property('cacheDir', s('string').default('/android-data/mainline/map-tiles').meta('description', 'on-disk tile cache (revisits are offline)'))
+      .property('cacheDir', s('string').default('/android-data/mainline/map-tiles').meta('description', 'on-disk tile cache (revisits are offline); subfoldered by style'))
       .property('zoom', s('number').default(16).meta('description', 'initial zoom (streets)'))
       .property('minZoom', s('number').default(10).meta('description'))
       .property('maxZoom', s('number').default(18).meta('description', 'OSM has tiles to 19'))
@@ -36,7 +40,7 @@ export class MapMode {
       .property('sounds', s('Sounds').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  tileUrl; userAgent; cacheDir; zoom; minZoom; maxZoom; maxTiles; modes; ui; surface; gps; sounds; logger;
+  tileUrl; tileKey; userAgent; cacheDir; zoom; minZoom; maxZoom; maxTiles; modes; ui; surface; gps; sounds; logger;
 
   id = 'map'; label = 'Map'; transient = true;
   /** @type {{lat: number, lon: number}|null} the view centre */ center = null;
@@ -119,15 +123,17 @@ export class MapMode {
       if (tile?.state === 'ready') sfc.blitImage(tile.img, Math.round(t.sx), Math.round(t.sy));
       else { sfc.fillRect(Math.round(t.sx), Math.round(t.sy), TILE, TILE, C.panel); if (tile?.state !== 'error') sfc.text(Math.round(t.sx) + 8, Math.round(t.sy) + 8, '...', { font: small, colour: C.faint }); }
     }
-    // the GPS fix marker (may differ from centre if panned); else the centre crosshair
+    // the GPS fix marker (may differ from centre if panned); the centre crosshair shows only when
+    // panned away from the fix (while following, the fix marker sits at centre already).
+    const g = this.gps?.state;
     const fix = this.gps?.goodFix();
     if (fix) {
       const fp = project(fix.lat, fix.lon, this.zoom);
-      this.#marker(sfc, fp.x - left, fp.y - top, C.title);
+      const course = g && g.speedKmh != null && g.speedKmh >= 3 ? g.courseDeg : null;   // only when moving
+      this.#fixMarker(sfc, fp.x - left, fp.y - top, course);
     }
-    this.#marker(sfc, W / 2, H / 2, this.follow && fix ? null : C.ok);   // crosshair at view centre
+    if (!(this.follow && fix)) this.#crosshair(sfc, W / 2, H / 2, C.ok);
     // overlay: zoom, position, fix quality
-    const g = this.gps?.state;
     const where = fix ? `${fix.lat.toFixed(5)} ${fix.lon.toFixed(5)}` : g?.lat != null ? `~${g.lat.toFixed(4)} ${g.lon.toFixed(4)}` : 'acquiring';
     this.#label(sfc, MARGIN, TOP, `z${this.zoom}`);
     this.#label(sfc, MARGIN, TOP + small.height + 2, where);
@@ -142,11 +148,30 @@ export class MapMode {
     sfc.text(x, y, text, { font: small, colour: C.white });
   }
 
-  #marker(sfc, x, y, colour) {
+  /** The position dot: a dark halo, a white ring and a bright core, so it reads over any tile; a
+   *  bright needle (dark-cased) points along `course` when we are moving. */
+  #fixMarker(sfc, x, y, course) {
+    x = Math.round(x); y = Math.round(y);
+    if (x < -8 || x > sfc.width + 8 || y < -8 || y > sfc.height + 8) return;
+    if (course != null) {   // draw the needle under the dot so the dot caps its base
+      const a = (course - 90) * Math.PI / 180, r1 = 15;
+      const x1 = x + r1 * Math.cos(a), y1 = y + r1 * Math.sin(a);
+      const px = Math.round(Math.cos(a + Math.PI / 2)), py = Math.round(Math.sin(a + Math.PI / 2));
+      sfc.line(x + px, y + py, x1 + px, y1 + py, C.black);   // 1 px dark casing either side
+      sfc.line(x - px, y - py, x1 - px, y1 - py, C.black);
+      sfc.line(x, y, x1, y1, C.title);
+    }
+    sfc.fillCircle(x, y, 7, C.black);   // halo lifts it off the map
+    sfc.fillCircle(x, y, 6, C.white);   // contrast ring (reads on dark and light)
+    sfc.fillCircle(x, y, 4, C.ok);      // bright core
+  }
+
+  /** A plain crosshair marking the view centre when panned off the fix. */
+  #crosshair(sfc, x, y, colour) {
     x = Math.round(x); y = Math.round(y);
     if (x < 0 || x > sfc.width || y < 0 || y > sfc.height) return;
-    if (colour === null) return;   // following a fix: the fix marker already shows here
-    sfc.line(x - 5, y, x + 5, y, colour); sfc.line(x, y - 5, x, y + 5, colour);
+    sfc.line(x - 6, y, x - 2, y, colour); sfc.line(x + 2, y, x + 6, y, colour);
+    sfc.line(x, y - 6, x, y - 2, colour); sfc.line(x, y + 2, x, y + 6, colour);
   }
 
   // ---- tiles ----------------------------------------------------------------------------------
@@ -161,8 +186,12 @@ export class MapMode {
     return entry;
   }
 
+  /** A filesystem-safe slug for the current tile style (everything up to the {z} placeholder), so
+   *  swapping tileUrl does not serve another style's cached tiles. */
+  get #style() { return (this.tileUrl.split('{z}')[0] || 'tiles').replace(/^https?:\/\//, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase(); }
+
   async #load(x, y, z, key, entry) {
-    const file = path.join(this.cacheDir, `${z}`, `${x}`, `${y}.png`);
+    const file = path.join(this.cacheDir, this.#style, `${z}`, `${x}`, `${y}.png`);
     try {   // disk cache first: offline and kind to the tile server
       const buf = await fsp.readFile(file);
       entry.img = decodePng(buf); entry.state = 'ready'; this.#repaint(key); return;
@@ -170,8 +199,9 @@ export class MapMode {
     // a small concurrency cap so a zoom change does not open dozens of sockets at once
     if (this.#inflight >= 4) { setTimeout(() => { if (this.#tiles.get(key) === entry && entry.state === 'loading') this.#load(x, y, z, key, entry); }, 150); return; }
     this.#inflight++;
-    const url = this.tileUrl.replace('{z}', z).replace('{x}', x).replace('{y}', y);
-    https.get(url, { headers: { 'User-Agent': this.userAgent }, timeout: 15000 }, (res) => {
+    const url = this.tileUrl.replace('{z}', z).replace('{x}', x).replace('{y}', y);   // keyless: used in logs
+    const req = this.tileKey ? url + (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(this.tileKey) : url;
+    https.get(req, { headers: { 'User-Agent': this.userAgent }, timeout: 15000 }, (res) => {
       if (res.statusCode !== 200) { res.resume(); this.#inflight--; entry.state = 'error'; this.logger?.warn({ url, status: res.statusCode }, 'map: tile http'); this.#repaint(key); return; }
       const chunks = []; res.on('data', (d) => chunks.push(d));
       res.on('end', () => {

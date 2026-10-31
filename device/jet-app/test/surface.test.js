@@ -78,9 +78,25 @@ test('raster primitives clip, track dirty bounds and honour pitch', () => {
   assert.equal(r.px[1], 0xffff); assert.equal(r.px[2 * 24 + 3], 0); assert.equal(r.px[3 * 24 + 4], 0xffff);
   r.icon(0, 0, parseIcon(['#.', '.#']), 0x0000ff);
   assert.equal(r.px[0], 0x001f); assert.equal(r.px[1], 0xffff); assert.equal(r.px[24 + 1], 0x001f);
+  r.clear(0);
+  r.fillCircle(5, 5, 3, 0xffffff);
+  assert.equal(r.px[5 * 24 + 5], 0xffff, 'centre filled');
+  assert.equal(r.px[5 * 24 + 8], 0xffff, 'horizontal extent reaches the radius');
+  assert.equal(r.px[2 * 24 + 2], 0, 'the corner of the bounding box is left clear');
   r.clear(0x101010);
   assert.deepEqual(r.takeDirty(), { x: 0, y: 0, w: 20, h: 10 });
   assert.equal(r.px[24 * 9 + 19], to565(0x101010));
+});
+
+test('surface forwards every drawing call the modes use to the raster (fillCircle was once missing)', () => {
+  const calls = new Set();
+  const s = Object.assign(new Surface(), { fonts: { main: {}, small: {} } });
+  s.raster = new Proxy({}, { get: (_t, m) => () => { calls.add(m); } });
+  for (const m of ['clear', 'fillRect', 'strokeRect', 'fillCircle', 'line', 'blitImage', 'icon', 'text']) {
+    assert.equal(typeof s[m], 'function', `Surface.${m} is defined`);
+    s[m](0, 0, 0, 0);   // a mode that calls a method the Surface does not forward would throw here on-device
+  }
+  for (const m of ['clear', 'fillRect', 'strokeRect', 'fillCircle', 'line', 'blitImage', 'icon']) assert.ok(calls.has(m), `Surface.${m} reaches the raster`);
 });
 
 test('text draws glyph ink inside its box, aligns and truncates', () => {

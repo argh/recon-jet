@@ -10,16 +10,22 @@ import { project, unproject, coverViewport, TILE } from '../src/lib/slippy.js';
 import { MapMode } from '../src/modes/map/index.js';
 import { tmpdir } from './helpers.js';
 
-/** Build a minimal PNG of a given colour type by hand, to prove the decoder's branches. */
-function makePng(width, height, colour, pixels, palette, trns) {
+/** Build a minimal PNG of a given colour type by hand, to prove the decoder's branches. At a
+ *  sub-byte `depth` (grayscale/palette only), `pixels` is one sample per pixel, packed MSB-first. */
+function makePng(width, height, colour, pixels, palette, trns, depth = 8) {
   const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const CRC = new Int32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c; });
   const crc = (b) => { let c = -1; for (const x of b) c = CRC[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ -1) >>> 0; };
   const chunk = (type, data) => { const o = Buffer.alloc(12 + data.length); o.writeUInt32BE(data.length, 0); o.write(type, 4, 'latin1'); data.copy(o, 8); o.writeUInt32BE(crc(o.subarray(4, 8 + data.length)), 8 + data.length); return o; };
-  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = colour;
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = depth; ihdr[9] = colour;
   const ch = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colour];
-  const raw = Buffer.alloc((width * ch + 1) * height);
-  for (let y = 0; y < height; y++) { raw[y * (width * ch + 1)] = 0; pixels.subarray(y * width * ch, (y + 1) * width * ch).copy(raw, y * (width * ch + 1) + 1); }
+  const stride = Math.ceil(width * ch * depth / 8);
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * (stride + 1)] = 0;   // filter: none
+    if (depth === 8) pixels.subarray(y * stride, (y + 1) * stride).copy(raw, y * (stride + 1) + 1);
+    else for (let x = 0; x < width; x++) { const bit = x * depth, o = y * (stride + 1) + 1 + (bit >> 3); raw[o] |= (pixels[y * width + x] & ((1 << depth) - 1)) << (8 - depth - (bit & 7)); }
+  }
   const parts = [sig, chunk('IHDR', ihdr)];
   if (palette) parts.push(chunk('PLTE', palette));
   if (trns) parts.push(chunk('tRNS', trns));
@@ -37,6 +43,19 @@ test('png decode: rgb, rgba, grayscale, palette with transparency', () => {
   img = decodePng(makePng(2, 1, 3, Buffer.from([0, 1]), Buffer.from([9, 8, 7, 6, 5, 4]), Buffer.from([100])));
   assert.deepEqual([...img.data], [9, 8, 7, 100, 6, 5, 4, 255], 'index 0 gets tRNS alpha, index 1 opaque');
   assert.throws(() => decodePng(Buffer.from('not a png')), /signature/);
+});
+
+test('png decode: sub-byte depths (CARTO tiles are 4-bit palette)', () => {
+  // 4-bit palette, 4 px: indices 0,1,2,15 pack two per byte -> bytes 0x01, 0x2f
+  const pal = Buffer.alloc(16 * 3); for (let i = 0; i < 16; i++) { pal[i * 3] = i * 16; pal[i * 3 + 1] = i; pal[i * 3 + 2] = 255 - i * 16; }
+  let img = decodePng(makePng(4, 1, 3, [0, 1, 2, 15], pal, null, 4));
+  assert.deepEqual([...img.data], [0, 0, 255, 255, 16, 1, 239, 255, 32, 2, 223, 255, 240, 15, 15, 255]);
+  // 2-bit grayscale scales the sample to 0..255: 0,1,2,3 -> 0,85,170,255
+  img = decodePng(makePng(4, 1, 0, [0, 1, 2, 3], null, null, 2));
+  assert.deepEqual([...img.data], [0, 0, 0, 255, 85, 85, 85, 255, 170, 170, 170, 255, 255, 255, 255, 255]);
+  // 1-bit grayscale, 3 px across a byte boundary stays row-aligned
+  img = decodePng(makePng(3, 1, 0, [1, 0, 1], null, null, 1));
+  assert.deepEqual([...img.data], [255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255]);
 });
 
 test('png decode: the Up and Sub filters reconstruct', () => {
@@ -98,10 +117,11 @@ test('map mode: centres on the fix, zoom clamps, pan is bounded, a cached tile b
   // seed the disk cache for the tiles this viewport needs, then render: they blit (no network)
   const p = project(map.center.lat, map.center.lon, 16), cov = coverViewport(p.x - 214, p.y - 120, 428, 240, 16);
   const tilePng = encodePng(new Uint8Array(TILE * TILE * 4).fill(200), TILE, TILE);
-  for (const t of cov.tiles) { const fp = path.join(dir, '16', `${t.x}`, `${t.y}.png`); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, tilePng); }
+  const style = '0-0-0-0';   // cacheDir is subfoldered by tile style (slug of tileUrl before {z})
+  for (const t of cov.tiles) { const fp = path.join(dir, style, '16', `${t.x}`, `${t.y}.png`); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, tilePng); }
   const blits = [];
   const sfc = { width: 428, height: 240, fonts: { main: { width: 10, height: 20 }, small: { width: 6, height: 12 } },
-    blitImage(img, x, y) { blits.push({ w: img.width, x, y }); }, fillRect() {}, text() {}, line() {} };
+    blitImage(img, x, y) { blits.push({ w: img.width, x, y }); }, fillRect() {}, fillCircle() {}, text() {}, line() {} };
   map.render(sfc);
   await new Promise((r) => setTimeout(r, 50));   // disk reads are async; let them land
   map.render(sfc);

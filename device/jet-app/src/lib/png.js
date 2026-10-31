@@ -47,9 +47,11 @@ export function rgb565ToRgba(buf, width, height, pitch = width) {
 }
 
 /**
- * Decode a PNG to RGBA, enough of the format for OSM raster tiles: 8-bit depth, colour types
- * grayscale (0), RGB (2), palette (3), grey+alpha (4) and RGBA (6), all five scanline filters,
- * no interlace. Returns the shape `blitImage` takes. Throws on anything it does not handle.
+ * Decode a PNG to RGBA, enough of the format for raster map tiles: bit depths 1/2/4/8, colour
+ * types grayscale (0), RGB (2), palette (3), grey+alpha (4) and RGBA (6), all five scanline
+ * filters, no interlace. (CARTO's dark tiles are 4-bit palette; OSM's are 8-bit.) Sub-byte depths
+ * apply to grayscale and palette only, per the spec. Returns the shape `blitImage` takes. Throws
+ * on anything it does not handle.
  * @param {Buffer|Uint8Array} buf @returns {{width: number, height: number, data: Uint8Array}}
  */
 export function decodePng(buf) {
@@ -70,34 +72,51 @@ export function decodePng(buf) {
     i += 12 + len;   // length + type + data + crc
   }
   if (!width || !height) throw new Error('png: no IHDR');
-  if (depth !== 8) throw new Error(`png: ${depth}-bit depth unsupported`);
+  if (![1, 2, 4, 8].includes(depth)) throw new Error(`png: ${depth}-bit depth unsupported`);
   if (interlace) throw new Error('png: interlaced unsupported');
   const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colour];
   if (!channels) throw new Error(`png: colour type ${colour} unsupported`);
+  if (depth < 8 && colour !== 0 && colour !== 3) throw new Error(`png: ${depth}-bit colour type ${colour} unsupported`);
   const raw = zlib.inflateSync(Buffer.concat(idat));
-  const stride = width * channels;
+  const bpp = channels * depth;                 // bits per pixel
+  const stride = Math.ceil(width * bpp / 8);     // bytes per scanline (padded to a whole byte)
+  const fbpp = Math.max(1, bpp >> 3);            // the filter's byte stride between pixels (>=1)
   if (raw.length < (stride + 1) * height) throw new Error('png: short pixel data');
   // unfilter in place: each scanline is 1 filter byte then `stride` bytes
   const px = Buffer.alloc(stride * height);
   for (let y = 0; y < height; y++) {
     const f = raw[y * (stride + 1)], src = y * (stride + 1) + 1, dst = y * stride, up = dst - stride;
     for (let x = 0; x < stride; x++) {
-      const a = x >= channels ? px[dst + x - channels] : 0, b = y > 0 ? px[up + x] : 0, c = x >= channels && y > 0 ? px[up + x - channels] : 0;
+      const a = x >= fbpp ? px[dst + x - fbpp] : 0, b = y > 0 ? px[up + x] : 0, c = x >= fbpp && y > 0 ? px[up + x - fbpp] : 0;
       let v = raw[src + x];
       if (f === 1) v += a; else if (f === 2) v += b; else if (f === 3) v += (a + b) >> 1;
       else if (f === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
       px[dst + x] = v & 0xff;
     }
   }
+  // a sub-byte depth packs several pixels per byte (MSB first, each row byte-aligned); unpack to
+  // one sample per byte so the expand below is the same as the 8-bit path. Palette keeps the raw
+  // index; grayscale scales up to 0..255.
+  let samples = px;
+  if (depth < 8) {
+    const max = (1 << depth) - 1;
+    samples = Buffer.alloc(width * height);   // channels is 1 here (grayscale or palette)
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const bit = x * depth, s = (px[y * stride + (bit >> 3)] >> (8 - depth - (bit & 7))) & max;
+        samples[y * width + x] = colour === 0 ? Math.round(s * 255 / max) : s;
+      }
+    }
+  }
   // expand to RGBA
   const out = new Uint8Array(width * height * 4);
   for (let p = 0, o = 0; p < width * height; p++, o += 4) {
     let r, g, b, alpha = 255;
-    if (colour === 3) { const idx = px[p]; r = palette[idx * 3]; g = palette[idx * 3 + 1]; b = palette[idx * 3 + 2]; if (trns && idx < trns.length) alpha = trns[idx]; }
-    else if (colour === 0) { r = g = b = px[p]; }
-    else if (colour === 4) { r = g = b = px[p * 2]; alpha = px[p * 2 + 1]; }
-    else if (colour === 2) { r = px[p * 3]; g = px[p * 3 + 1]; b = px[p * 3 + 2]; }
-    else { r = px[p * 4]; g = px[p * 4 + 1]; b = px[p * 4 + 2]; alpha = px[p * 4 + 3]; }
+    if (colour === 3) { const idx = samples[p]; r = palette[idx * 3]; g = palette[idx * 3 + 1]; b = palette[idx * 3 + 2]; if (trns && idx < trns.length) alpha = trns[idx]; }
+    else if (colour === 0) { r = g = b = samples[p]; }
+    else if (colour === 4) { r = g = b = samples[p * 2]; alpha = samples[p * 2 + 1]; }
+    else if (colour === 2) { r = samples[p * 3]; g = samples[p * 3 + 1]; b = samples[p * 3 + 2]; }
+    else { r = samples[p * 4]; g = samples[p * 4 + 1]; b = samples[p * 4 + 2]; alpha = samples[p * 4 + 3]; }
     out[o] = r; out[o + 1] = g; out[o + 2] = b; out[o + 3] = alpha;
   }
   return { width, height, data: out };

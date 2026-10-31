@@ -92,6 +92,16 @@ export class Raster {
     this.fillRect(x, y, width, h, colour); this.fillRect(x + w - width, y, width, h, colour);
   }
 
+  /** A filled disc of radius `r` centred on (cx, cy); spans are clipped like fillRect. */
+  fillCircle(cx, cy, r, colour) {
+    cx = Math.round(cx); cy = Math.round(cy); r = Math.round(r);
+    if (r <= 0) return;
+    for (let dy = -r; dy <= r; dy++) {
+      const dx = Math.floor(Math.sqrt(r * r - dy * dy));   // half-width of the span at this row
+      this.fillRect(cx - dx, cy + dy, 2 * dx + 1, 1, colour);
+    }
+  }
+
   /** Bresenham line, end points inclusive. */
   line(x0, y0, x1, y1, colour) {
     const c = to565(colour);
