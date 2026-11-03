@@ -8,10 +8,11 @@
 // persisted in the state file, then `ui.defaultMode`, then the first registered. Until then the
 // Log mode (always registered) is what the panel shows, so the boot log continues seamlessly.
 //
-// Gestures (raw keys through `input`): front hold opens the switcher, a chooser-style list over
-// the mode; swipe up/down moves, front press (or a pad tap) picks, rear press or another front
-// hold cancels. Everything else goes to the current mode's `onGesture`; rear press is "back"
-// inside the mode and does nothing at a mode's root. Nothing fires on a release.
+// Gestures (raw keys through `input`): one tree, rear ascends it. Rear press is "back" inside
+// the mode; at a mode's root (its `onGesture` does not consume it) rear opens the switcher, and
+// rear in the switcher returns to the mode — so rear-rear-rear always escapes anything. Front
+// hold is the shortcut straight to the switcher from anywhere (and closes it again); swipe
+// up/down moves, front press (or a pad tap) picks. Nothing fires on a release.
 import { EventEmitter } from 'node:events';
 import { Schema } from '@versionzero/module-manager';
 import { Chooser } from '../ui/chooser.js';
@@ -150,6 +151,7 @@ export class Modes extends EventEmitter {
       return;
     }
     const handled = this.current?.onGesture?.(gesture) ?? false;
+    if (!handled && gesture === 'press:rear') { this.openSwitcher(); return; }   // at the mode's root: ascend
     this.logger?.debug({ gesture, mode: this.current?.id, handled }, 'mode gesture');
   }
 

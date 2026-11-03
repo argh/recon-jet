@@ -98,9 +98,15 @@ test('modes: inside a mode every gesture but front hold goes to onGesture; rear 
   s.modes.register(log);
   await s.modes.begin();
   let now = 1000;
-  s.k.frontPress(now); now += 500; s.k.rearPress(now); now += 500; s.k.up(now); now += 500; s.k.left(now); now += 500; s.k.tap(now); now += 500;
-  assert.deepEqual(log.gestures, ['press:front', 'press:rear', 'swipe:up', 'swipe:left', 'press:front']);   // the tap code is also keyboard Enter: a front press
-  assert.equal(s.modes.switcher, null, 'plain presses never open the switcher');
+  s.k.frontPress(now); now += 500; s.k.up(now); now += 500; s.k.left(now); now += 500; s.k.tap(now); now += 500;
+  assert.deepEqual(log.gestures, ['press:front', 'swipe:up', 'swipe:left', 'press:front']);   // the tap code is also keyboard Enter: a front press
+  assert.equal(s.modes.switcher, null, 'consumed presses never open the switcher');
+  s.k.rearPress(now); now += 500;
+  assert.equal(log.gestures.at(-1), 'press:rear', 'the mode sees rear first');
+  assert.notEqual(s.modes.switcher, null, 'unconsumed rear at the root ascends to the switcher');
+  s.k.rearPress(now); now += 500;
+  assert.equal(s.modes.switcher, null, 'rear in the switcher returns to the mode');
+  assert.equal(log.gestures.filter((g) => g === 'press:rear').length, 1, 'the switcher consumed the second rear');
   s.key(86, 1, now); now += 300;
   assert.deepEqual(log.gestures.length, 5, 'nothing fires on a key down');
   s.key(86, 0, now); now += 500;
@@ -143,7 +149,10 @@ test('modes: a front press starts a voice turn in Assistant only; Demo looks, Sy
   s.k.rearPress(now); now += 500;
   assert.equal(system.screen, null, 'rear returns to the System menu');
   s.k.rearPress(now); now += 500;
-  assert.equal(s.modes.current, system, 'rear at the menu does nothing');
+  assert.equal(s.modes.current, system, 'rear at the menu stays in the mode');
+  assert.notEqual(s.modes.switcher, null, 'rear at the mode root ascends to the switcher');
+  s.k.rearPress(now); now += 500;
+  assert.equal(s.modes.switcher, null, 'rear again returns to the mode');
   s.modes.switchTo('demo'); await settle();
   assert.ok(s.surface.viewfinderRect, 'Demo runs the camera');
   s.k.frontPress(now); now += 500;

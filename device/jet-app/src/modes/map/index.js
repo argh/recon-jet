@@ -106,7 +106,7 @@ export class MapMode {
 
   #zoom(d) {
     const z = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoom + d));
-    if (z === this.zoom) return true;
+    if (z === this.zoom) return d > 0;   // zoom-out at minimum is unconsumed: rear ascends out of the map
     this.zoom = z; this.sounds?.play?.('ack'); this.ui.requestRender();
     return true;
   }
