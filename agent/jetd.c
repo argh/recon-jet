@@ -17,9 +17,10 @@
  *            scrollback; a Bluetooth (or USB) keyboard types into it, Ctrl+Alt+Enter toggles it from
  *            any mode, even while a client owns the UI (K 1); input devices appearing after boot are
  *            picked up live
- *   setup    pad calibration, glance calibration, brightness, power (live PMIC readout)
- * Hold the FRONT button ~1 s to open the mode chooser (swipe up/down, front or
- * tap to pick, rear to cancel). Short presses and swipes belong to the mode.
+ * Hold the FRONT button ~1 s: with a client owning the UI it returns to remote (the app's
+ * menu takes over); with no client it opens the dead-man chooser (log / shell / bluetooth /
+ * reboot) - the field escape hatch, not a menu system (the app owns every real menu).
+ * Short presses and swipes belong to the mode.
  * The REAR button's long hold is the PMIC power path: never rely on it.
  *
  * host -> jet (one command per line):
@@ -32,7 +33,7 @@
  *   F                 flush back buffer to the panel
  *   L <0-1023>        backlight
  *   P                 ping -> "p"
- *   M <mode>          switch mode (remote|log|shell|setup)
+ *   M <mode>          switch mode (remote|log|shell)
  *   I <text>          shell: write text to the pty (\n \t \\ escapes)
  *   S [w h [skip]]    camera snapshot: one UYVY frame from /dev/video0 (default 640x480, after
  *                     skipping 6 frames for exposure to settle; the media pipeline must already
@@ -46,7 +47,7 @@
  *   W <len> + bytes   queue 48 kHz stereo S16 PCM for the speaker; w = end of clip
  *   Y                 stop playback immediately and drop queued audio (barge-in) -> "w flushed"
  *   K <0|1>           raw keys: the client owns the UI: jetd stays in remote mode, forwards every
- *                     key down/up as it happens and its chooser/setup/log screens are off until
+ *                     key down/up as it happens and its chooser/log screens are off until
  *                     the last client disconnects (then the recovery chooser returns)
  *   E <0|1>           external surface: the client writes /dev/fb0 itself (reply "E w h bpp
  *                     line_length"); jetd draws nothing in remote mode, F pushes to the panel
@@ -190,7 +191,7 @@ static void fb_update(int x, int y, int w, int h) {
 /* ---- PSF fonts (two sizes, front button toggles in log/shell) ------------------- */
 struct font { const uint8_t *glyphs; unsigned gw, gh, gbytes, nglyph; };
 static struct font fonts[2]; static int fsel = 1;   /* 0 small, 1 normal */
-static int log_font = 0;                             /* font used by log/shell (front toggles); remote/setup use the normal one */
+static int log_font = 0;                             /* font used by log/shell (front toggles); remote uses the normal one */
 static const uint8_t *glyphs; static unsigned gw, gh, gbytes, nglyph;
 static const unsigned scale = 1;
 static uint32_t fg;
@@ -249,10 +250,6 @@ static void backlight_load(void) {
     FILE *f = fopen("/sys/class/backlight/kopin-a230/brightness", "r"); if (f) { int v; if (backlight_saved == 408 && fscanf(f, "%d", &v) == 1) backlight_level = backlight_saved = v; fclose(f); }
     set_backlight(backlight_level);
 }
-static void backlight_save(void) {
-    for (int i = 0; i < 2; i++) { FILE *f = fopen(backlight_paths[i], "w"); if (f) { fprintf(f, "%d\n", backlight_level); fclose(f); break; } }
-    backlight_saved = backlight_level;
-}
 
 /* ---- input ------------------------------------------------------------------- */
 #define MAXIN 12
@@ -297,8 +294,8 @@ static void input_hotplug(void) {
 }
 
 /* ---- mode state ------------------------------------------------------------------ */
-enum { M_REMOTE, M_LOG, M_CONSOLE, M_SETUP, M_COUNT };
-static const char *mode_names[M_COUNT] = { "remote", "log", "shell", "setup" };
+enum { M_REMOTE, M_LOG, M_CONSOLE, M_COUNT };
+static const char *mode_names[M_COUNT] = { "remote", "log", "shell" };
 static int mode = M_LOG;     /* boot in log mode: if boot stalls the log is what stays on the glass */
 static int auto_remote = 1;  /* switch to remote once the hub is up, the backlog replay is done and boot_hold_s passed */
 static int boot_hold_s = 20; /* keep the boot log on the glass at least this long after jetd starts */
@@ -314,13 +311,23 @@ static int raw_keys, ext_surface;   /* set by K / E: a client owns keys / pixels
  * receive every event (including binary payloads) and may all send commands. */
 #define MAXHUB 4
 struct hub { int fd; char inbuf[1024]; size_t inlen; size_t bin_need; int64_t stuck_since;
-             int mirror; unsigned mirror_y; };   /* N 1: tee panel pushes; mirror_y < H = full refresh in progress */
+             int mirror; unsigned mirror_y;      /* N 1: tee panel pushes; mirror_y < H = full refresh in progress */
+             int owns_keys, owns_surface; };     /* this client's K / E grants (raw_keys / ext_surface are ORs of these) */
 static struct hub hubs[MAXHUB]; static int nhubs;
 static struct hub *cur_hub;      /* the hub whose line is being handled (W payload accounting) */
 static int only_fd = -1;         /* when >= 0, sendf/send_all go to this hub only (hello + log replay) */
 static int turn_on, listen_on; static void turn_end(const char *why); static void listen_stop(const char *why);   /* voice section, below */
+/* K/E are per-client grants: when their owner drops (the app crashed) they must clear even while
+ * other clients (the live mirror, a debug session) stay connected, or the dead-man chooser is
+ * unreachable and the panel stays suppressed. */
+static void recompute_owners(void) {
+    int k = 0, e = 0;
+    for (int i = 0; i < nhubs; i++) { k |= hubs[i].owns_keys; e |= hubs[i].owns_surface; }
+    if (raw_keys != k || ext_surface != e) dirty = 1;
+    raw_keys = k; ext_surface = e;
+}
 /* no client: the recovery UI returns, the mic is released (a turn or the wake word has no one to serve) */
-static void hub_drop(int i) { close(hubs[i].fd); hubs[i] = hubs[--nhubs]; if (!nhubs) { raw_keys = 0; ext_surface = 0; dirty = 1; if (turn_on) turn_end("stop"); if (listen_on) listen_stop("off"); } }
+static void hub_drop(int i) { close(hubs[i].fd); hubs[i] = hubs[--nhubs]; recompute_owners(); if (!nhubs) { dirty = 1; if (turn_on) turn_end("stop"); if (listen_on) listen_stop("off"); } }
 static int hub_add(int fd) {
     if (nhubs == MAXHUB) hub_drop(0);
     struct hub *h = &hubs[nhubs++]; memset(h, 0, sizeof *h); h->fd = fd; return nhubs - 1;
@@ -779,8 +786,6 @@ static void render_console(void) {
     if (term_scroll) { fg = px(255, 200, 0); char s[32]; snprintf(s, sizeof s, "^%d", term_scroll); fill_rect(W - text_width(s) - 4, 0, text_width(s) + 4, gh, DEF_BG); draw_text(W - text_width(s) - 2, 0, s); }
 }
 
-enum { S_MENU, S_CAL, S_CAL_DONE, S_INFO, S_GLANCE, S_GLANCE_DONE, S_BRIGHT, S_POWER };   /* setup screens (used by glance_poll too) */
-static int setup_state, setup_sel;
 
 /* ---- glance sensor (APDS9900 via tsl2772 IIO, name tmd2771): polled 4 Hz, hysteresis ------
  * One reading, two classifications, each with 1 s of agreement before it changes:
@@ -808,20 +813,6 @@ static void glance_open(void) {
     for (int i = 0; i < 2; i++) { FILE *f = fopen(wpaths[i], "r"); if (!f) continue; if (fscanf(f, "%d %d", &wear_on_thr, &wear_off_thr) != 2 || wear_on_thr <= wear_off_thr) { wear_on_thr = 100; wear_off_thr = 60; } fclose(f); break; }
     if (glance_path[0]) fprintf(stderr, "jetd: glance sensor %s (glance on>=%d off<=%d, wear on>=%d off<=%d)\n", glance_path, glance_on_thr, glance_off_thr, wear_on_thr, wear_off_thr);
 }
-static int glance_read_avg(int n) {          /* n quick reads, ~20 ms apart; -1 if no sensor */
-    if (!glance_path[0]) return -1;
-    int sum = 0, cnt = 0;
-    for (int i = 0; i < n; i++) {
-        FILE *f = fopen(glance_path, "r"); int raw;
-        if (f) { if (fscanf(f, "%d", &raw) == 1) { sum += raw; cnt++; } fclose(f); }
-        usleep(20000);
-    }
-    return cnt ? sum / cnt : -1;
-}
-static void glance_save(void) {
-    const char *paths[] = { "/android-data/mainline/glance", "/mnt/data/mainline/glance" };
-    for (int i = 0; i < 2; i++) { FILE *f = fopen(paths[i], "w"); if (f) { fprintf(f, "%d %d\n", glance_on_thr, glance_off_thr); fclose(f); break; } }
-}
 static void glance_poll(void) {
     if (!glance_path[0] || now_ms() < glance_next) return;
     glance_next = now_ms() + 250;
@@ -831,7 +822,6 @@ static void glance_poll(void) {
     fclose(f);
     if (raw < 0) return;
     glance_raw = raw;
-    if (mode == M_SETUP && setup_state == S_GLANCE) dirty = 1;   /* live reading on the calibration screen */
     int wear = raw >= wear_on_thr ? 1 : raw <= wear_off_thr ? 0 : -1;
     if (wear < 0 || wear == wear_worn) wear_run = 0;
     else if (++wear_run >= 4) { wear_run = 0; wear_worn = wear; sendf("o %d %d\n", wear_worn, raw); }
@@ -844,7 +834,7 @@ static void glance_poll(void) {
     sendf("g %d %d\n", glance_worn, glance_raw);
 }
 
-/* ---- power (TWL6032 PMIC): battery/charger/USB state for the setup "Power" screen ---------
+/* ---- power (TWL6032 PMIC): battery/charger/USB state for the Q snapshot ---------
  * GPADC via IIO (twl6030_gpadc: ch18 VBAT, ch7 VSYS, ch10 VBUS, mV), fuel gauge and charger
  * registers via /dev/i2c-0 (PMIC "charger/FG" address 0x49): FG_REG_10/11 current sample
  * (14-bit signed, mA = raw*3100/8192, negative = discharging; FG enabled once via TOGGLE1),
@@ -894,129 +884,6 @@ static void power_read(void) {
 static void power_poll(void) {       /* 1 Hz refresh while the Power screen is up; also serves 'Q' */
     if (now_ms() < power_next) return;
     power_next = now_ms() + 1000;
-    if (mode == M_SETUP && setup_state == S_POWER) { power_read(); dirty = 1; }
-}
-
-/* ---- setup -------------------------------------------------------------------- */
-static int thr_x = 20, thr_y = 20;
-static int gl_step, gl_cal[4], gl_ok;
-static const char *gl_prompts[4] = { "look AT the display", "look FORWARD (away)", "look AT the display again", "look AWAY again" };
-static const char *setup_items[] = { "Pad calibration", "Glance calibration", "Brightness", "Power", "WiFi via QR code", "Back to remote" };
-#define SETUP_N 6
-static const char *cal_dirs[4] = { "RIGHT", "LEFT", "DOWN", "UP" };
-static int cal_step, cal_n, cal_sum[4][3];
-static const char *info_text[4];
-
-static void read_thresholds(void) {
-    FILE *f = fopen("/sys/module/jet_ofm/parameters/thr_x", "r"); if (f) { fscanf(f, "%d", &thr_x); fclose(f); }
-    f = fopen("/sys/module/jet_ofm/parameters/thr_y", "r"); if (f) { fscanf(f, "%d", &thr_y); fclose(f); }
-}
-
-static void write_thresholds(void) {
-    FILE *f = fopen("/sys/module/jet_ofm/parameters/thr_x", "w"); if (f) { fprintf(f, "%d\n", thr_x); fclose(f); }
-    f = fopen("/sys/module/jet_ofm/parameters/thr_y", "w"); if (f) { fprintf(f, "%d\n", thr_y); fclose(f); }
-    const char *paths[] = { "/android-data/mainline/ofm-args", "/mnt/data/mainline/ofm-args" };
-    for (int i = 0; i < 2; i++) { f = fopen(paths[i], "w"); if (f) { fprintf(f, "thr_x=%d thr_y=%d\n", thr_x, thr_y); fclose(f); break; } }
-}
-
-static int cmp_int(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
-
-static void cal_finish(void) {
-    /* median magnitude per direction; thresholds at half the weakest axis median, clamped */
-    int med[4];
-    for (int d = 0; d < 4; d++) { int v[3] = { abs(cal_sum[d][0]), abs(cal_sum[d][1]), abs(cal_sum[d][2]) }; qsort(v, 3, sizeof v[0], cmp_int); med[d] = v[1]; }
-    int mx = med[0] < med[1] ? med[0] : med[1], my = med[2] < med[3] ? med[2] : med[3];
-    thr_x = mx / 2; thr_y = my / 2;
-    if (thr_x < 8) thr_x = 8; if (thr_x > 60) thr_x = 60; if (thr_y < 8) thr_y = 8; if (thr_y > 60) thr_y = 60;
-    write_thresholds();
-    setup_state = S_CAL_DONE;
-}
-
-static void glance_cal_finish(void) {
-    /* stock flow: at / away / at / away. Thresholds at 60 % and 40 % of the span above the away level. */
-    /* Either polarity: on rg's pod "at" reads LOWER than "away" (610/644 vs 1023/720), so the
-     * thresholds may come out inverted (on < off) and glance_poll compares accordingly. */
-    int on = (gl_cal[0] + gl_cal[2]) / 2, off = (gl_cal[1] + gl_cal[3]) / 2, d = on - off;
-    gl_ok = abs(d) >= 40;
-    if (gl_ok) { glance_on_thr = off + d * 6 / 10; glance_off_thr = off + d * 4 / 10; glance_worn = -1; glance_save(); }
-    setup_state = S_GLANCE_DONE;
-}
-
-static void setup_rel(int dx, int dy) {
-    if (setup_state != S_CAL || abs(dx) + abs(dy) < 8) return;
-    int axis_x = cal_step < 2;
-    cal_sum[cal_step][cal_n++] = axis_x ? dx : dy;
-    if (cal_n == 3) { cal_n = 0; if (++cal_step == 4) cal_finish(); }
-    dirty = 1;
-}
-
-static void render_setup(void) {
-    clear_screen();
-    fg = px(255, 255, 0); draw_row_centred(0, "SETUP");
-    if (setup_state == S_MENU) {
-        read_thresholds();
-        for (int i = 0; i < SETUP_N; i++) {
-            char line[48]; snprintf(line, sizeof line, "%s", setup_items[i]);
-            fg = i == setup_sel ? px(0, 255, 128) : px(200, 200, 200);
-            draw_row(2 + i, i == setup_sel ? "> " : "  "); draw_text(2 * gw * scale, (2 + i) * gh * scale, line);
-        }
-        fg = px(120, 120, 120); draw_row(rows() - 1, "swipe: move  front: select  rear: back");
-    } else if (setup_state == S_CAL) {
-        char s[48]; fg = px(255, 255, 255);
-        snprintf(s, sizeof s, "swipe %s  (%d of 3)", cal_dirs[cal_step], cal_n + 1); draw_row_centred(3, s);
-        fg = px(160, 160, 160);
-        for (int i = 0; i < cal_n; i++) { snprintf(s, sizeof s, "got %d", cal_sum[cal_step][i]); draw_row_centred(5 + i, s); }
-        draw_row(rows() - 1, "rear: abort");
-    } else if (setup_state == S_POWER) {
-        struct power_state *q = &pstate; char t[64];
-        fg = px(255, 255, 255);
-        snprintf(t, sizeof t, "battery %4d mV  %+5d mA  %s", q->vbat, q->ma, q->ma > 15 ? "charging" : q->ma < -15 ? "draining" : "idle"); draw_row(2, t);
-        snprintf(t, sizeof t, "system  %4d mV  VBUS %4d mV%s", q->vsys, q->vbus, q->vbus > 4000 ? "" : "  (no USB power)"); draw_row(3, t);
-        int en = q->ctrl1 >= 0 && (q->ctrl1 & 0x10), lin = q->ctrl1 >= 0 && (q->ctrl1 & 0x20);
-        snprintf(t, sizeof t, "charger %s%s  lin-sts 0x%02x  stat1 0x%02x", en ? "on" : "OFF", lin ? "+cell" : " (no cell path)", q->lin & 0xff, q->stat1 & 0xff); draw_row(4, t);
-        int cin_ma = q->cin >= 0 && q->cin < 0x10 ? 50 + 50 * q->cin : -1;
-        if (cin_ma > 0) snprintf(t, sizeof t, "limits  in %d mA  charge %d mA  %d.%02d V", cin_ma, q->vichrg >= 0 ? 100 + 100 * (q->vichrg & 0xf) : -1, q->voreg >= 0 ? (3500 + 20 * (q->voreg & 0x3f)) / 1000 : 0, q->voreg >= 0 ? ((3500 + 20 * (q->voreg & 0x3f)) % 1000) / 10 : 0);
-        else snprintf(t, sizeof t, "limits  in code 0x%02x (unlimited)  charge %d mA", q->cin & 0xff, q->vichrg >= 0 ? 100 + 100 * (q->vichrg & 0xf) : -1);
-        draw_row(5, t);
-        snprintf(t, sizeof t, "usb     %s  asks %d mA  online %d", q->udc[0] ? q->udc : "no udc", q->maxpower, q->usb_online); draw_row(6, t);
-        if (q->temp_mc > -100000) { snprintf(t, sizeof t, "board   %d.%d C", q->temp_mc / 1000, (q->temp_mc % 1000) / 100); draw_row(7, t); }
-        fg = px(120, 120, 120); draw_row(rows() - 1, "live 1 Hz   rear: back");
-    } else if (setup_state == S_BRIGHT) {
-        char s[48]; fg = px(255, 255, 255);
-        snprintf(s, sizeof s, "backlight %d / 1023", backlight_level); draw_row_centred(3, s);
-        int w = (W - 40) * backlight_level / 1023; fill_rect(20, 5 * gh * scale, w, gh * scale - 2, px(0, 255, 128));
-        fg = px(160, 160, 160); snprintf(s, sizeof s, "saved: %d", backlight_saved); draw_row_centred(7, s);
-        fg = px(120, 120, 120); draw_row(rows() - 1, "swipe: adjust  front: save  rear: revert");
-    } else if (setup_state == S_GLANCE) {
-        char s[48]; fg = px(255, 255, 255);
-        snprintf(s, sizeof s, "%d of 4: %s", gl_step + 1, gl_prompts[gl_step]); draw_row_centred(3, s);
-        fg = px(0, 255, 128); draw_row_centred(4, "then press FRONT");
-        fg = px(160, 160, 160); snprintf(s, sizeof s, "sensor now: %d", glance_raw); draw_row_centred(6, s);
-        for (int i = 0; i < gl_step; i++) { snprintf(s, sizeof s, "step %d: %d", i + 1, gl_cal[i]); draw_row_centred(7 + i, s); }
-        draw_row(rows() - 1, "rear: abort");
-    } else if (setup_state == S_GLANCE_DONE) {
-        char s[48];
-        if (gl_ok) {
-            fg = px(0, 255, 128); draw_row_centred(3, "glance calibrated");
-            fg = px(255, 255, 255); snprintf(s, sizeof s, "at %d/%d  away %d/%d", gl_cal[0], gl_cal[2], gl_cal[1], gl_cal[3]); draw_row_centred(5, s);
-            snprintf(s, sizeof s, glance_on_thr >= glance_off_thr ? "worn >= %d   off <= %d" : "worn <= %d   off >= %d", glance_on_thr, glance_off_thr); draw_row_centred(6, s);
-            fg = px(160, 160, 160); draw_row_centred(7, "saved for next boot");
-        } else {
-            fg = px(255, 80, 80); draw_row_centred(3, "too little contrast");
-            fg = px(255, 255, 255); snprintf(s, sizeof s, "at %d/%d  away %d/%d", gl_cal[0], gl_cal[2], gl_cal[1], gl_cal[3]); draw_row_centred(5, s);
-            fg = px(160, 160, 160); draw_row_centred(6, "thresholds unchanged");
-        }
-        fg = px(120, 120, 120); draw_row(rows() - 1, "any button: menu");
-    } else if (setup_state == S_CAL_DONE) {
-        char s[48]; fg = px(0, 255, 128); draw_row_centred(3, "calibrated");
-        fg = px(255, 255, 255); snprintf(s, sizeof s, "thresholds: x %d  y %d", thr_x, thr_y); draw_row_centred(5, s);
-        fg = px(160, 160, 160); draw_row_centred(6, "saved for next boot");
-        fg = px(120, 120, 120); draw_row(rows() - 1, "any button: menu");
-    } else {
-        fg = px(255, 255, 255);
-        for (int i = 0; i < 4 && info_text[i]; i++) draw_row_centred(3 + i, info_text[i]);
-        fg = px(120, 120, 120); draw_row(rows() - 1, "any button: menu");
-    }
 }
 
 /* ---- chooser overlay + dispatch ------------------------------------------------ */
@@ -1025,17 +892,40 @@ static void set_mode(int m) {
     mode = m; dirty = 1;
     if (mode == M_CONSOLE) console_spawn();
     if (mode == M_LOG) log_scroll = 0;
-    if (mode == M_SETUP) { setup_state = S_MENU; setup_sel = 0; }
     sendf("m %s\n", mode_names[mode]);
     if (mode == M_REMOTE) { clear_screen(); fb_flush(); send_hello(); }
 }
 
+/* The dead-man chooser: shown only when no client owns the UI (the app is gone). Deliberately
+ * not a menu system - the app owns every real menu (docs/interaction-design.md); this is the
+ * field escape hatch: read the log, get a shell, power the Bluetooth radio for a keyboard,
+ * or reboot (which brings the app back). */
+#define CHOOSER_N 4
+/* userdata is /mnt/data in the initramfs (the flashed jetd) but /android-data when a dev build
+ * runs from an ssh session (dropbear lives in the chroot); same for reaching bluetoothctl */
+static const char *bt_marker_path(void) {
+    return access("/mnt/data/mainline", F_OK) == 0 ? "/mnt/data/mainline/bt" : "/android-data/mainline/bt";
+}
+static int bt_marker(void) { return access(bt_marker_path(), F_OK) == 0; }
+static void bt_toggle(void) {
+    int on = !bt_marker();
+    if (on) { FILE *f = fopen(bt_marker_path(), "w"); if (f) fclose(f); }
+    else unlink(bt_marker_path());
+    if (fork() == 0) {
+        if (access("/mnt/data/rootfs", F_OK) == 0)
+            execl("/bin/chroot", "chroot", "/mnt/data/rootfs", "/usr/bin/bluetoothctl", "power", on ? "on" : "off", (char *)0);
+        execl("/usr/bin/bluetoothctl", "bluetoothctl", "power", on ? "on" : "off", (char *)0);
+        _exit(127);
+    }
+}
 static void render_chooser(void) {
-    int bw = 22 * gw * scale, bh = (M_COUNT + 2) * gh * scale, bx = (W - bw) / 2, by = (H - bh) / 2;
+    int bw = 22 * gw * scale, bh = (CHOOSER_N + 2) * gh * scale, bx = (W - bw) / 2, by = (H - bh) / 2;
     fill_rect(bx - 2, by - 2, bw + 4, bh + 4, px(255, 255, 0)); fill_rect(bx, by, bw, bh, px(0, 0, 0));
-    fg = px(255, 255, 0); draw_text(bx + gw * scale, by, "MODE");
-    for (int i = 0; i < M_COUNT; i++) {
-        char s[32]; snprintf(s, sizeof s, "%s%s%s", i == chooser_sel ? "> " : "  ", mode_names[i], i == mode ? " *" : "");
+    fg = px(255, 255, 0); draw_text(bx + gw * scale, by, "RECOVERY");
+    const char *labels[CHOOSER_N] = { "log", "shell", bt_marker() ? "bluetooth: on" : "bluetooth: off", "reboot" };
+    int current = mode == M_LOG ? 0 : mode == M_CONSOLE ? 1 : -1;
+    for (int i = 0; i < CHOOSER_N; i++) {
+        char s[40]; snprintf(s, sizeof s, "%s%s%s", i == chooser_sel ? "> " : "  ", labels[i], i == current ? " *" : "");
         fg = i == chooser_sel ? px(0, 255, 128) : px(200, 200, 200);
         draw_text(bx + gw * scale, by + (i + 1) * gh * scale, s);
     }
@@ -1049,7 +939,6 @@ static void render(void) {
         font_select((mode == M_LOG || mode == M_CONSOLE) ? log_font : 1);
         if (mode == M_CONSOLE) render_console();
         else if (mode == M_LOG) render_log();
-        else if (mode == M_SETUP) render_setup();
         else clear_screen();
         if (chooser) { font_select(1); render_chooser(); }
         fb_flush();
@@ -1060,9 +949,13 @@ static void render(void) {
 /* short press of a pod button, a swipe key from the pad, or raw motion */
 static void dispatch_key(unsigned code) {
     if (chooser) {
-        if (code == KEY_UP) chooser_sel = (chooser_sel + M_COUNT - 1) % M_COUNT;
-        else if (code == KEY_DOWN) chooser_sel = (chooser_sel + 1) % M_COUNT;
-        else if (code == BTN_FRONT_CODE || code == KEY_ENTER) { chooser = 0; auto_remote = 0; set_mode(chooser_sel); }
+        if (code == KEY_UP) chooser_sel = (chooser_sel + CHOOSER_N - 1) % CHOOSER_N;
+        else if (code == KEY_DOWN) chooser_sel = (chooser_sel + 1) % CHOOSER_N;
+        else if (code == BTN_FRONT_CODE || code == KEY_ENTER) {
+            if (chooser_sel == 2) bt_toggle();                 /* toggles in place so the state shows */
+            else if (chooser_sel == 3) { if (fork() == 0) { execl("/bin/reboot2", "reboot2", (char *)0); _exit(127); } }
+            else { chooser = 0; auto_remote = 0; set_mode(chooser_sel == 0 ? M_LOG : M_CONSOLE); }
+        }
         else if (code == BTN_REAR_CODE) chooser = 0;
         dirty = 1;
         if (!chooser && mode == M_REMOTE) { clear_screen(); fb_flush(); send_hello(); }
@@ -1089,46 +982,12 @@ static void dispatch_key(unsigned code) {
         else if (code == BTN_REAR_CODE && pty_fd >= 0) write(pty_fd, "\003", 1);
         dirty = 1;
         break;
-    case M_SETUP:
-        if (setup_state == S_MENU) {
-            if (code == KEY_UP) setup_sel = (setup_sel + SETUP_N - 1) % SETUP_N;
-            else if (code == KEY_DOWN) setup_sel = (setup_sel + 1) % SETUP_N;
-            else if (code == BTN_REAR_CODE) set_mode(M_REMOTE);
-            else if (code == BTN_FRONT_CODE || code == KEY_ENTER) {
-                switch (setup_sel) {
-                case 0: setup_state = S_CAL; cal_step = cal_n = 0; break;
-                case 1:
-                    if (glance_path[0]) { setup_state = S_GLANCE; gl_step = 0; }
-                    else { setup_state = S_INFO; info_text[0] = "glance calibration"; info_text[1] = "no glance sensor found"; info_text[2] = "(tsl2772 / tmd2771 IIO)"; info_text[3] = NULL; }
-                    break;
-                case 2: setup_state = S_BRIGHT; break;
-                case 3: setup_state = S_POWER; power_read(); power_next = 0; break;
-                case 4: setup_state = S_INFO; info_text[0] = "WiFi via QR code"; info_text[1] = "needs the camera port"; info_text[2] = "to mainline first"; info_text[3] = NULL; break;
-                case 5: set_mode(M_REMOTE); break;
-                }
-            }
-        } else if (setup_state == S_CAL) {
-            if (code == BTN_REAR_CODE) setup_state = S_MENU;
-        } else if (setup_state == S_BRIGHT) {
-            if (code == KEY_UP || code == KEY_RIGHT) { backlight_level += 48; if (backlight_level > 1023) backlight_level = 1023; set_backlight(backlight_level); }
-            else if (code == KEY_DOWN || code == KEY_LEFT) { backlight_level -= 48; if (backlight_level < 16) backlight_level = 16; set_backlight(backlight_level); }
-            else if (code == BTN_FRONT_CODE || code == KEY_ENTER) { backlight_save(); setup_state = S_MENU; }
-            else if (code == BTN_REAR_CODE) { backlight_level = backlight_saved; set_backlight(backlight_level); setup_state = S_MENU; }
-        } else if (setup_state == S_GLANCE) {
-            if (code == BTN_REAR_CODE) setup_state = S_MENU;
-            else if (code == BTN_FRONT_CODE || code == KEY_ENTER) { gl_cal[gl_step] = glance_read_avg(8); if (++gl_step == 4) glance_cal_finish(); }
-        } else if (code == BTN_FRONT_CODE || code == BTN_REAR_CODE || code == KEY_ENTER) {
-            setup_state = S_MENU;
-        }
-        dirty = 1;
-        break;
     }
 }
 
 static void dispatch_rel(int dx, int dy) {
     if (chooser) return;
     if (mode == M_REMOTE) sendf("r %d %d\n", dx, dy);
-    else if (mode == M_SETUP) setup_rel(dx, dy);
 }
 
 /* ---- keyboard (BT/USB HID): types into the shell -------------------------------- */
@@ -1221,7 +1080,11 @@ static void raw_key(unsigned code, int value) {
 static void check_holds(void) {
     if (btn[0].down && !btn[0].consumed && now_ms() - btn[0].t >= HOLD_MS) {
         btn[0].consumed = 1;
-        chooser = !chooser; chooser_sel = mode; dirty = 1;
+        if (raw_keys && nhubs) {               /* the app owns the UI: its menu, never ours */
+            if (mode != M_REMOTE) set_mode(M_REMOTE);   /* shell/log hand back (remote holds were forwarded) */
+            return;
+        }
+        chooser = !chooser; chooser_sel = mode == M_CONSOLE ? 1 : 0; dirty = 1;
         if (!chooser && mode == M_REMOTE) { clear_screen(); fb_flush(); send_hello(); }
     }
 }
@@ -1750,10 +1613,10 @@ static void handle_line(char *l) {
         if (ext_surface) { if (sscanf(l + 1, "%d %d %d %d", &x, &y, &w, &h) == 4) fb_update(x, y, w, h); else fb_update(0, 0, W, H); }
         else fb_flush();
         break;
-    case 'E': ext_surface = atoi(l + 1) != 0; sendf("E %u %u %u %u\n", W, H, vinfo.bits_per_pixel, finfo.line_length); if (!ext_surface) dirty = 1; break;
+    case 'E': if (cur_hub) { cur_hub->owns_surface = atoi(l + 1) != 0; recompute_owners(); } sendf("E %u %u %u %u\n", W, H, vinfo.bits_per_pixel, finfo.line_length); if (!ext_surface) dirty = 1; break;
     case 'Z': { int fps = 10; if (sscanf(l + 1, "%d %d %d %d %d", &x, &y, &w, &h, &fps) >= 4) vf_start(x, y, w, h, fps); } break;
     case 'z': vf_stop(); break;
-    case 'K': raw_keys = atoi(l + 1) != 0; if (raw_keys) { chooser = 0; auto_remote = 0; if (mode != M_REMOTE) set_mode(M_REMOTE); dirty = 1; } break;   /* a client owns the UI */
+    case 'K': if (cur_hub) { cur_hub->owns_keys = atoi(l + 1) != 0; recompute_owners(); } if (raw_keys) { chooser = 0; auto_remote = 0; if (mode != M_REMOTE) set_mode(M_REMOTE); dirty = 1; } break;   /* a client owns the UI */
     case 'J': { int n = atoi(l + 1); if (n <= 0 || n > klog_n) n = klog_n; for (int i = klog_n - n; i < klog_n; i++) sendf("j %s\n", klog[(klog_head + i) % LROWS]); sendf("J %d\n", n); } break;   /* log backlog: last n lines */
     case 'U': { glance_worn = -1; wear_worn = -1; glance_open(); view_thresholds_load(); sendf("U %d %d %d %d\n", glance_on_thr, glance_off_thr, view_deg_thr, view_still_ms); } break;   /* re-read calibration files */
     case 'L': set_backlight(atoi(l + 1)); break;
@@ -1804,7 +1667,6 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN); signal(SIGCHLD, SIG_IGN);
     fg = px(255, 255, 255);
     input_open();
-    read_thresholds();
     kmsg_open(); pstore_load();
     listen_open(); glance_open(); backlight_load(); imu_open(); power_open();
     start_ms = now_ms();
@@ -1837,7 +1699,6 @@ int main(int argc, char **argv) {
         if (btn[0].down && !btn[0].consumed) { int rem = HOLD_MS - (int)(now_ms() - btn[0].t); timeout = rem < 1 ? 1 : rem; }
         if (glance_path[0] && timeout > 250) timeout = 250;
         if (imu_path[0][0] && timeout > 50) timeout = 50;
-        if (mode == M_SETUP && setup_state == S_POWER && timeout > 250) timeout = 250;
         if ((turn_on || play_pid > 0) && timeout > 100) timeout = 100;
         if (mirror_pending() && timeout > 50) timeout = 50;   /* an owed refresh drains as the socket empties */
         if (mirror_on() && timeout > 100) timeout = 100;      /* the dirty-scan fallback needs ticks (direct-fb writers) */

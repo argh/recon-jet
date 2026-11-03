@@ -27,7 +27,7 @@ to finish), `docs/recovery.md` (every way back; why nothing here bricks), `docs/
               `mkboot.sh` (boot images: `boot-mainline.img` for RAM boots, `boot-emmc.img` to
               flash), `boot.sh` (fastboot RAM boot).
 - `agent/`    `jetd.c`: the on-device daemon (framebuffer text UI, modes, touchpad/buttons,
-              camera snapshots, glance sensor, log viewer, setup menu). Static musl build via
+              camera snapshots, glance sensor, log viewer, dead-man recovery chooser). Static musl build via
               zig (`build.sh`). Line protocol over TCP 7777, documented at the top of jetd.c.
 - `device/doom/` Doom: doomgeneric's engine (fetched to `refs/doomgeneric`, pinned) + `doomgeneric_jet.c`
               (fb0 + panel update, keys from jetd), `i_jetsound.c` (sfx mixer into aplay), `opl_jet.c` (driver for

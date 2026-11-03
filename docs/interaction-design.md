@@ -14,9 +14,11 @@ the contract between jetd (device server), jet-app (application layer) and mode 
 | normal | jet-app | the last used mode (persisted) or the configured default |
 | jet-app gone (crash, upgrade) | jetd | log with a "jet-app down" banner; jetd's recovery chooser (front hold) returns |
 
-jetd keeps exactly two screens: the boot/fallback log and its recovery chooser, both only while no
-client owns the surface. Everything else (setup screens included) lives in jet-app; jetd's
-setup mode and `M setup` stay for recovery only (the Node System screens exist since phase 3).
+jetd keeps exactly two screens: the boot/fallback log and its dead-man chooser (RECOVERY:
+log / shell / bluetooth toggle / reboot), both only while no client owns the UI. Everything
+else lives in jet-app — jetd's setup mode is gone (the Node System screens own calibration,
+brightness and the radios), and with a client alive a front hold in jetd's shell or log hands
+straight back to the app's menu.
 
 ## Gesture vocabulary
 
@@ -25,7 +27,7 @@ Global, identical in every mode:
 | Gesture | Meaning |
 |---|---|
 | front hold (~1 s) | mode switcher (full-screen list, chooser style); hold again or rear closes it |
-| rear press | back: close the top overlay, go up one level, leave a sub-screen; at a mode's root, nothing |
+| rear press | back, ascending one tree: close the top overlay, leave a sub-screen; at a mode's root it opens the mode switcher, and in the switcher it returns to the mode — rear-rear-rear always escapes |
 | rear hold | never used (PMIC power path) |
 
 Inside a mode (the mode decides, but these defaults keep modes consistent):

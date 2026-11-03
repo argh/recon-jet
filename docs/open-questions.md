@@ -102,14 +102,8 @@ for working around a problem are in the other docs; this is the list of what is 
 
 ## Project
 
-- In the shell, a front hold opens jetd's own legacy chooser ("MODE remote/log/shell/setup" —
-  and its setup screens still carry placeholders like WiFi-via-QR) instead of jet-app's menu:
-  shell mode keeps keys local to jetd on purpose (`raw_key` forwards only outside M_CONSOLE),
-  so the escape hatch shows pre-jet-app UI. Wants a deliberate design pass: forward the hold to
-  jet-app when one owns the UI, or restyle/trim the jetd chooser to match the current system.
-
-- The mode chooser (front hold) has been exercised by the author but not by a second person; the
-  WiFi-via-QR setup item is a placeholder.
+- The navigation (rear ascends to the switcher, front hold jumps to it, jetd's dead-man chooser
+  when the app is gone) has been exercised by the author but not by a second person.
 - Personalisation vs generic client: device settings live in `mainline/jet-app.json` and flag
   files, host tools read env vars; a documented "bring your own services" path for a second
   person has not been exercised.

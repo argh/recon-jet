@@ -17,13 +17,12 @@ its host list only while no hub is connected. Loopback must be up (init does `ip
 | `remote` | the hub draws; every key/motion event is forwarded. Default once a hub connects |
 | `log` | live `/dev/kmsg` (600-line ring, timestamps) or the previous boot's pstore record (rear toggles). Boot mode: the kernel backlog is replayed at ~80 lines/s and held for `boot-log-seconds` (default 20) before auto-switching to remote |
 | `shell` | bash (login shell) inside the Debian rootfs on a pty, `TERM=linux`, rendered by a terminal emulator covering the Linux-console subset: cursor motion, erase/insert/delete line and char, scroll regions, SGR with 16/256/true colour, bold/dim/underline/reverse, autowrap, insert mode, alternate screen (1049), DSR/DA replies (`CSI ? n c` is the console cursor shape, not a request), UTF-8 to one cell. Grid = the font's cells (71x20 small, 42x12 normal; front toggles and resizes the pty), 400-line scrollback (pad swipes or Shift+PgUp/PgDn), rear = Ctrl-C. The hub types with `I` (`\n`/`\r` both send CR: bash's readline ignores a bare LF), a Bluetooth/USB keyboard types directly: **Ctrl+Alt+Enter** toggles the shell from any mode, even while a client owns the UI (`K 1`); arrows/Home/End/Ins/Del/PgUp/PgDn/F1-F12 send the linux terminfo sequences, Alt = Meta (ESC prefix), Ctrl makes control codes (Ctrl+Space NUL, Ctrl+/ ^_), Backspace = DEL, Shift+Tab = CSI Z, US layout; autorepeat is set to 600 ms / 16 per s on keyboard devices. Keyboards that appear after boot are picked up live (inotify on `/dev/input`); a keyboard's own trackpad (pointer without letter keys) is ignored. `JETD_PTYLOG=<file>` dumps the pty traffic; vi/vim, mg, less, nano verified |
-| `setup` | menu: Pad calibration, Glance calibration, Brightness, Power, WiFi via QR code (placeholder), Back to remote |
 
-- Hold FRONT ~1 s: mode chooser overlay (swipe up/down, front or tap picks, rear cancels).
+- Hold FRONT ~1 s: with a client owning the UI, shell/log hand back to remote (the app's menu). With none, the dead-man chooser: log / shell / bluetooth on|off / reboot — the field escape hatch, not a menu system.
   Short presses and swipes belong to the mode. The REAR long hold is the PMIC power path.
 - log/shell: swipes scroll (UP/DOWN 3 lines, LEFT/RIGHT 10 columns, left-most = oldest,
   right-most = follow); front toggles font. Fonts: 10x20 `ter-u20b` = 42x12 cells (remote,
-  setup, chooser; the hub grid is always 42x12) and 6x12 `Lat2-Terminus12x6` = 71x20 (log/shell
+  chooser; the hub grid is always 42x12) and 6x12 `Lat2-Terminus12x6` = 71x20 (log/shell
   default; `JETD_LOG_FONT=1` selects the big one). PSF1 and PSF2 are parsed; `ter-u16b` is PSF1.
 - Framebuffer: back buffer is always 0xRRGGBB, packed once at flush (RGB565 or 32-bit by
   `bits_per_pixel`), then `OMAPFB_UPDATE_WINDOW` on `/dev/graphics/fb0` or `/dev/fb0`.
@@ -43,7 +42,7 @@ host -> jet:
 | `F` | flush to the panel |
 | `L <0-1023>` | backlight |
 | `P` | ping -> `p` |
-| `M <remote\|log\|shell\|setup>` | switch mode |
+| `M <remote\|log\|shell>` | switch mode |
 | `I <text>` | type into the shell pty (`\n`/`\r` = Enter (CR), `\t`, `\e` = ESC, `\\`) |
 | `S [w h [skip]]` | camera snapshot (default 640x480, skip 6 frames for exposure/AWB) -> `f <w> <h> UYVY <len>\n` + bytes, or `e <msg>` |
 | `V [max_s]` / `v` | start / stop voice capture (a turn: 16 kHz chunks until silence, max_s or `v`) |
@@ -80,19 +79,6 @@ jet -> host:
 Binary payloads: after an `S` the hub must read `<len>` bytes after the `f` line; after a `W`
 line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
 
-## Setup menu
-
-- **Pad calibration**: 3 swipes per direction; thresholds = half the weakest axis median,
-  clamped 8..60; written to the jet-ofm sysfs params and persisted as `mainline/ofm-args`.
-- **Glance calibration**: at / away / at / away (away = looking forward with the pod on), 8
-  reads averaged per press, thresholds at 60 % / 40 % of the span, saved as `mainline/glance`
-  "on off"; either polarity accepted (on < off means inverted); a 40-count contrast check
-  rejects a flat run. With the 25 mA IR current the calibrated values were roughly worn ~130-150,
-  away ~230. Glance is an **event** (`g`, hub `GET /glance`), not display automation.
-- **Brightness**: kopin-a230 backlight 16..1023 in steps of 48 with a bar; front saves to
-  `mainline/backlight` (applied at start), rear reverts. 208 is the saved default.
-- **Power**: 1 Hz readout of battery mV/mA, VSYS, VBUS, charger state, limits, VOREG, UDC state,
-  gadget MaxPower (only visible when running from the initramfs), board temp. See power.md.
 
 ## Sensors it polls
 
@@ -151,7 +137,7 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
   is 428x240, 16 bpp RGB565, stride 856). jetd stops drawing in remote mode; the client writes
   `/dev/fb0` directly (plain `write` at row offsets works, no mmap needed) and sends `F` to push
   the whole screen or `F x y w h` to push one rectangle (OMAPFB_UPDATE_WINDOW). `E 0` returns
-  drawing to jetd. Other modes (log, shell, setup) still draw over the surface; redraw after the
+  drawing to jetd. Other modes (log, shell) still draw over the surface; redraw after the
   next hello/mode event.
 - `Z x y w h [fps]` streams the camera (640x480 UYVY, one open V4L2 stream) scaled
   nearest-neighbour into that rectangle at up to `fps` (default 10) and pushes only that rectangle;
