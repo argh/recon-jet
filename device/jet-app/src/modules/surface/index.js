@@ -50,7 +50,9 @@ export class Surface extends EventEmitter {
     this.fonts = { main: load(this.mainFont), small: load(this.smallFont) };
     this.deviceLink.on('connected', () => this.#acquire());
     this.deviceLink.on('hello', () => this.invalidate());
-    this.deviceLink.on('disconnected', () => { this.raster = null; this.geometry = null; this.viewfinderRect = null; this.#vf = null; this.active = false; });
+    // a drop (jetd restart included) resets the streaming state but keeps #vf — the rect the
+    // owning mode still wants — so #acquire can re-arm it once the geometry is back
+    this.deviceLink.on('disconnected', () => { this.raster = null; this.geometry = null; this.viewfinderRect = null; this.active = false; });
     if (this.deviceLink.connected) this.#acquire();
     // modules stop in dependency order (the link first), so the panel is handed back at abort time
     abort?.signal.addEventListener('abort', () => this.#release(), { once: true });
@@ -78,6 +80,9 @@ export class Surface extends EventEmitter {
       catch (error) { this.logger?.error({ error: error.message, device: this.device }, 'framebuffer open failed; nothing will be drawn'); }
       this.logger?.info({ ...g, device: this.device }, 'surface acquired');
       this.emit('ready', g);
+      // re-arm a viewfinder that a drop interrupted, now that the geometry is real again —
+      // but let the owning mode's own request win: it re-renders on hello with fresh coordinates
+      if (this.#vf && !this.viewfinderPaused) this.#stream().catch((error) => this.logger?.warn({ error: error.message }, 'viewfinder re-arm'));
     } catch (error) {
       this.logger?.warn({ error: error.message }, 'surface request failed');
     }
@@ -154,6 +159,9 @@ export class Surface extends EventEmitter {
 
   /** jetd starts streaming the wanted rectangle; a stop or pause that raced the reply wins. */
   async #stream() {
+    // no geometry yet (reconnect in progress): park; #acquire re-arms once the surface is back.
+    // Streaming now would use a caller rect computed from width 0 — off-panel garbage.
+    if (!this.ready) { this.logger?.info('viewfinder parked (no surface yet)'); return null; }
     const p = this.#vf;
     const src = await this.deviceLink.viewfinder(p.x, p.y, p.w, p.h, p.fps);
     if (this.#vf !== p || this.viewfinderPaused) { this.deviceLink.viewfinderStop(); return null; }
