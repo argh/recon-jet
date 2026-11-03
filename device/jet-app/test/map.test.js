@@ -128,3 +128,33 @@ test('map mode: centres on the fix, zoom clamps, pan is bounded, a cached tile b
   assert.ok(blits.length >= cov.tiles.length, `tiles blitted (${blits.length})`);
   assert.ok(blits.every((b) => b.w === TILE));
 });
+
+test('map mode: opens on the last known fix and marks it stale until a live one lands', async () => {
+  const dir = tmpdir('jet-map-stale-');
+  const lastFixFile = path.join(dir, 'last.json');
+  fs.writeFileSync(lastFixFile, JSON.stringify({ lat: 37.6000, lon: -122.3000, at: Date.now() - 12 * 60 * 1000 }));
+  // gps is on but has no position yet (cold, indoors): nothing good, still acquiring
+  const gps = { listening: true, snap: { good: false, lat: null, lon: null, satsUsed: 0, satsInView: 5 },
+    get state() { return this.snap; }, goodFix() { return null; }, listen() {}, on() {} };
+  const ui = { renders: 0, requestRender() { this.renders++; } };
+  const map = Object.assign(new MapMode(), { tileUrl: 'https://0.0.0.0/{z}/{x}/{y}.png', cacheDir: dir, lastFixFile, saveMs: 60000,
+    zoom: 16, minZoom: 10, maxZoom: 18, maxTiles: 50, modes: { current: null, register() {} }, ui, surface: { width: 428, height: 240 }, gps, sounds: { play() {} }, logger: null });
+  map.modes.current = map;
+  await map.start();
+  map.enter();
+  assert.deepEqual(map.center, { lat: 37.6000, lon: -122.3000 }, 'cold open centres on the cached fix');
+  assert.equal(map.follow, true);
+  // seed the cache so the render needs no network (keeps the marker assertions deterministic)
+  const p = project(map.center.lat, map.center.lon, 16), cov = coverViewport(p.x - 214, p.y - 120, 428, 240, 16);
+  const tilePng = encodePng(new Uint8Array(TILE * TILE * 4).fill(200), TILE, TILE), style = '0-0-0-0';
+  for (const t of cov.tiles) { const fp = path.join(dir, style, '16', `${t.x}`, `${t.y}.png`); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, tilePng); }
+  const texts = [], circles = [];
+  const sfc = { width: 428, height: 240, fonts: { main: { width: 10, height: 20 }, small: { width: 6, height: 12 } },
+    blitImage() {}, fillRect() {}, fillCircle(cx, cy, r, colour) { circles.push({ r, colour }); }, text(x, y, str) { texts.push(str); }, line() {} };
+  map.render(sfc);
+  await new Promise((r) => setTimeout(r, 50));   // let the async disk reads land before the test ends
+  map.render(sfc);
+  assert.ok(texts.some((t) => /^last fix \d+m ago$/.test(t)), `stale age shown (${texts.join(' | ')})`);
+  assert.ok(circles.some((c) => c.r === 6 && c.colour === 0xffa000), 'the stale marker is an amber ring');
+  assert.ok(!circles.some((c) => c.colour === 0x00ff80), 'no live green dot while the fix is stale');
+});

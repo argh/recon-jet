@@ -4,7 +4,10 @@
 // server. OSM is keyless and holds up best here; the dark CARTO styles that need a key looked
 // worse on the panel. For a keyed provider later, set tileUrl to its template and mapMode.tileKey
 // in the per-device config layer (it is appended as ?key= and never committed); the cache is
-// keyed by style so a swap stays clean. Data/tiles (c) OpenStreetMap contributors. The glasses buttons zoom (front in, rear out); pad swipes pan, bounded to the area
+// keyed by style so a swap stays clean. Data/tiles (c) OpenStreetMap contributors.
+// The last good fix is kept on disk, so a cold open indoors still centres somewhere; until a live
+// fix lands the position reads as stale (a hollow amber ring, "last fix N ago") not current (a
+// solid green dot). The glasses buttons zoom (front in, rear out); pad swipes pan, bounded to the area
 // around the fix so the map stays local and the fetch stays small; a tap recentres and follows
 // the fix again. hold:front opens the switcher to leave, as everywhere. Not a persisted start
 // mode: it needs a position. While GPS is on WiFi is slow (coex), so first paint can take a
@@ -29,6 +32,8 @@ export class MapMode {
       .property('tileKey', s('string').default('').meta('description', 'tile-server API key for a keyed provider, appended as ?key=; set per-device, never committed'))
       .property('userAgent', s('string').default('recon-jet-hud/1.0 (personal; v0.net)').meta('description', 'the tile server wants an identifying User-Agent'))
       .property('cacheDir', s('string').default('/android-data/mainline/map-tiles').meta('description', 'on-disk tile cache (revisits are offline); subfoldered by style'))
+      .property('lastFixFile', s('string').default('/android-data/mainline/map-last-fix.json').meta('description', 'last good position, so the map opens before a fix lands'))
+      .property('saveMs', s('number').default(60000).meta('description', 'minimum interval between last-fix writes to flash'))
       .property('zoom', s('number').default(16).meta('description', 'initial zoom (streets)'))
       .property('minZoom', s('number').default(10).meta('description'))
       .property('maxZoom', s('number').default(18).meta('description', 'OSM has tiles to 19'))
@@ -40,11 +45,13 @@ export class MapMode {
       .property('sounds', s('Sounds').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  tileUrl; tileKey; userAgent; cacheDir; zoom; minZoom; maxZoom; maxTiles; modes; ui; surface; gps; sounds; logger;
+  tileUrl; tileKey; userAgent; cacheDir; lastFixFile; saveMs; zoom; minZoom; maxZoom; maxTiles; modes; ui; surface; gps; sounds; logger;
 
   id = 'map'; label = 'Map'; transient = true;
   /** @type {{lat: number, lon: number}|null} the view centre */ center = null;
   /** @type {{lat: number, lon: number}|null} the fix the map is anchored to (pan is bounded to it) */ anchor = null;
+  /** @type {{lat: number, lon: number, at: number}|null} last good fix, in memory and on disk */ #lastFix = null;
+  #savedAt = 0;
   follow = true;
   /** @type {Map<string, {img?: object, state: 'loading'|'ready'|'error'}>} "z/x/y" -> tile */ #tiles = new Map();
   #order = [];   // LRU of tile keys
@@ -52,12 +59,31 @@ export class MapMode {
 
   async start() {
     this.modes.register(this);
-    this.gps?.on('update', (snap) => { if (this.modes.current === this && this.follow && snap.good) { this.center = { lat: snap.lat, lon: snap.lon }; this.anchor = this.center; this.ui.requestRender(); } });
+    try {   // the last position from a previous run, so a cold open has somewhere to go
+      const saved = JSON.parse(fs.readFileSync(this.lastFixFile, 'utf8'));
+      if (saved?.lat != null && saved?.lon != null) this.#lastFix = { lat: saved.lat, lon: saved.lon, at: saved.at || 0 };
+    } catch { /* none yet */ }
+    this.gps?.on('update', (snap) => {
+      if (snap.good) this.#remember(snap);
+      if (this.modes.current === this && this.follow && snap.good) { this.center = { lat: snap.lat, lon: snap.lon }; this.anchor = this.center; this.ui.requestRender(); }
+    });
   }
 
-  /** Centre on the best position we have; a hint to a fix we pass in wins (the check flow). */
+  /** Keep the freshest good fix in memory, and write it back to flash at most every `saveMs`. */
+  #remember(snap) {
+    this.#lastFix = { lat: snap.lat, lon: snap.lon, at: snap.at || Date.now() };
+    if (Date.now() - this.#savedAt < (this.saveMs ?? 60000)) return;
+    this.#savedAt = Date.now();
+    if (this.lastFixFile) fsp.writeFile(this.lastFixFile, JSON.stringify(this.#lastFix)).catch(() => {});
+  }
+
+  /** Centre on the best position we have; a hint to a fix we pass in wins (the check flow). The
+   *  last good fix from disk is the final fallback, so the map still opens before a live fix. */
   enter({ lat, lon } = {}) {
-    const fix = (lat != null && lon != null) ? { lat, lon } : this.gps?.goodFix() ?? (this.gps?.state.lat != null ? { lat: this.gps.state.lat, lon: this.gps.state.lon } : null);
+    const fix = (lat != null && lon != null) ? { lat, lon }
+      : this.gps?.goodFix()
+      ?? (this.gps?.state.lat != null ? { lat: this.gps.state.lat, lon: this.gps.state.lon } : null)
+      ?? this.#lastFix;
     this.center = fix ? { lat: fix.lat, lon: fix.lon } : this.center;
     this.anchor = fix ? { lat: fix.lat, lon: fix.lon } : this.anchor;
     this.follow = true;
@@ -86,7 +112,7 @@ export class MapMode {
   }
 
   #recenter() {
-    const fix = this.gps?.goodFix() ?? (this.gps?.state.lat != null ? { lat: this.gps.state.lat, lon: this.gps.state.lon } : null);
+    const fix = this.gps?.goodFix() ?? (this.gps?.state.lat != null ? { lat: this.gps.state.lat, lon: this.gps.state.lon } : null) ?? this.#lastFix;
     if (fix) { this.center = { lat: fix.lat, lon: fix.lon }; this.anchor = { lat: fix.lat, lon: fix.lon }; }
     this.follow = true; this.ui.requestRender();
   }
@@ -123,36 +149,71 @@ export class MapMode {
       if (tile?.state === 'ready') sfc.blitImage(tile.img, Math.round(t.sx), Math.round(t.sy));
       else { sfc.fillRect(Math.round(t.sx), Math.round(t.sy), TILE, TILE, C.panel); if (tile?.state !== 'error') sfc.text(Math.round(t.sx) + 8, Math.round(t.sy) + 8, '...', { font: small, colour: C.faint }); }
     }
-    // the GPS fix marker (may differ from centre if panned); the centre crosshair shows only when
-    // panned away from the fix (while following, the fix marker sits at centre already).
+    // the position marker (may differ from centre if panned): a live good fix reads current (solid
+    // green), the last-known fix reads stale (hollow amber). The centre crosshair shows only when
+    // panned away from the marker (while following, the marker sits at centre already).
     const g = this.gps?.state;
-    const fix = this.gps?.goodFix();
-    if (fix) {
-      const fp = project(fix.lat, fix.lon, this.zoom);
-      const course = g && g.speedKmh != null && g.speedKmh >= 3 ? g.courseDeg : null;   // only when moving
-      this.#fixMarker(sfc, fp.x - left, fp.y - top, course);
+    const m = this.#marker();
+    if (m) {
+      const mp = project(m.lat, m.lon, this.zoom);
+      const course = m.live && g && g.speedKmh != null && g.speedKmh >= 3 ? g.courseDeg : null;   // only when moving
+      this.#fixMarker(sfc, mp.x - left, mp.y - top, course, m.live);
     }
-    if (!(this.follow && fix)) this.#crosshair(sfc, W / 2, H / 2, C.ok);
-    // overlay: zoom, position, fix quality
-    const where = fix ? `${fix.lat.toFixed(5)} ${fix.lon.toFixed(5)}` : g?.lat != null ? `~${g.lat.toFixed(4)} ${g.lon.toFixed(4)}` : 'acquiring';
+    if (!(this.follow && m)) this.#crosshair(sfc, W / 2, H / 2, C.ok);
+    // overlay: zoom, position, and whether it is current or stale
     this.#label(sfc, MARGIN, TOP, `z${this.zoom}`);
-    this.#label(sfc, MARGIN, TOP + small.height + 2, where);
-    if (!fix) this.#label(sfc, MARGIN, TOP + 2 * (small.height + 2), g ? `${g.satsUsed}/${g.satsInView} sats` : 'no gps');
+    let ly = TOP + small.height + 2;
+    if (m?.live) {
+      this.#label(sfc, MARGIN, ly, `${m.lat.toFixed(5)} ${m.lon.toFixed(5)}`);
+    } else if (m) {   // a cached position, with no live fix: say how old, and that we are still trying
+      this.#label(sfc, MARGIN, ly, `last fix ${this.#ago(m.at)}`, C.warn); ly += small.height + 2;
+      this.#label(sfc, MARGIN, ly, `${m.lat.toFixed(5)} ${m.lon.toFixed(5)}`, C.dim); ly += small.height + 2;
+      this.#label(sfc, MARGIN, ly, g ? `acquiring ${g.satsUsed}/${g.satsInView}` : 'no gps', C.dim);
+    } else {
+      this.#label(sfc, MARGIN, ly, g ? `acquiring ${g.satsUsed}/${g.satsInView}` : 'acquiring', C.dim);
+    }
     hint(sfc, this.follow ? 'front/rear: zoom   pad: pan' : 'front/rear: zoom   tap: recentre');
   }
 
   /** A small filled label with a dark backing so it reads over the map. */
-  #label(sfc, x, y, text) {
+  #label(sfc, x, y, text, colour = C.white) {
     const { small } = sfc.fonts;
     sfc.fillRect(x - 2, y, text.length * small.width + 4, small.height, C.black);
-    sfc.text(x, y, text, { font: small, colour: C.white });
+    sfc.text(x, y, text, { font: small, colour });
+  }
+
+  /** The position to mark and whether it is a live good fix: a live fix wins, else the last known
+   *  one (shown stale). @returns {{lat:number, lon:number, at?:number, live:boolean}|null} */
+  #marker() {
+    const fix = this.gps?.goodFix();
+    if (fix) return { lat: fix.lat, lon: fix.lon, at: fix.at, live: true };
+    if (this.#lastFix) return { ...this.#lastFix, live: false };
+    return null;
+  }
+
+  /** A terse age for a stale fix: `45s`, `12m`, `3h`, `2d`. */
+  #ago(at) {
+    if (!at) return 'a while ago';
+    const sec = Math.max(0, Math.round((Date.now() - at) / 1000));
+    if (sec < 90) return `${sec}s ago`;
+    const min = Math.round(sec / 60);
+    if (min < 90) return `${min}m ago`;
+    const hr = Math.round(min / 60);
+    return hr < 48 ? `${hr}h ago` : `${Math.round(hr / 24)}d ago`;
   }
 
   /** The position dot: a dark halo, a white ring and a bright core, so it reads over any tile; a
-   *  bright needle (dark-cased) points along `course` when we are moving. */
-  #fixMarker(sfc, x, y, course) {
+   *  bright needle (dark-cased) points along `course` when we are moving. A stale (last-known) fix
+   *  is instead a hollow amber ring, with no heading, to read as "not current". */
+  #fixMarker(sfc, x, y, course, live = true) {
     x = Math.round(x); y = Math.round(y);
     if (x < -8 || x > sfc.width + 8 || y < -8 || y > sfc.height + 8) return;
+    if (!live) {
+      sfc.fillCircle(x, y, 7, C.black);   // halo
+      sfc.fillCircle(x, y, 6, C.warn);    // amber
+      sfc.fillCircle(x, y, 3, C.black);   // hollow centre: a ring, clearly not the live dot
+      return;
+    }
     if (course != null) {   // draw the needle under the dot so the dot caps its base
       const a = (course - 90) * Math.PI / 180, r1 = 15;
       const x1 = x + r1 * Math.cos(a), y1 = y + r1 * Math.sin(a);
