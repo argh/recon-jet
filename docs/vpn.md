@@ -19,7 +19,7 @@ file on the Jet's userdata, so a clone works the same once you drop in your own 
 - `kernel/initramfs/init` arms the hook with `wpa_cli -a` right after `wpa_supplicant`, but only
   when a tunnel conf is present — so a device without one is unaffected.
 
-## What you provide (per-device, never committed)
+## What you provide (per-device, never committed; `./setup.sh` generates all three and `./install.sh` pushes them)
 
 On the Jet's userdata, under `/android-data/mainline/wireguard/`:
 

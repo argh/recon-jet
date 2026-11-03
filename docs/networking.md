@@ -50,7 +50,7 @@ avahi in the chroot (`host-name=jet`, usb0 + wlan0, no dbus), started by init: t
   with `echo wl12xx.2.auto > /sys/bus/platform/drivers/wl12xx_driver/{unbind,bind}`.
 - Expected log line: "firmware booted (Rev 7.3.10.0.142)"; association ~6 s after boot.
 - Init runs `wpa_supplicant` + `udhcpc` in the chroot if `/etc/wpa_supplicant/wpa_supplicant.conf`
-  exists there (copied from `work/`, never committed).
+  exists there (written by `./setup.sh`, pushed by `./install.sh`; never committed).
 - The PMIC CLK32KG output must be on (DT `regulator-fixed-clock`); without it the card never
   initialises after a real power cycle. See boot.md.
 - **Rule: WiFi power save must stay off.** The wl1283 re-enables it on (re)association, after
