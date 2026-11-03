@@ -1,7 +1,8 @@
 // Shell mode: a switcher entry for jetd's own shell screen (a pty on the panel, typed into by a
 // Bluetooth/USB keyboard or the hub's `I`). Entering sends `M shell`; jetd then owns the panel and
-// the ui stops drawing. jetd comes back to remote on the keyboard's Ctrl+Alt+Enter or via its own
-// front-hold chooser, and this mode then returns the app to the mode that was showing before.
+// the ui stops drawing. jetd hands back to remote on the keyboard's Ctrl+Alt+Enter, a front hold
+// or a rear press; this mode then returns to the previous mode with the switcher open (leaving
+// the shell is an ascent).
 // Never persisted as the start mode (a reboot must not land in the shell).
 import { Schema } from '@versionzero/module-manager';
 import { C, TOP, heading, hint, paragraph } from '../../modules/ui/style.js';
@@ -42,6 +43,7 @@ export class ShellMode {
     const id = this.previous && this.previous !== this.id ? this.previous : this.returnTo;
     this.logger?.info({ to: id }, 'shell closed');
     if (!this.modes.switchTo(id)) this.modes.switchTo(this.modes.list.find((m) => m !== this)?.id);
+    this.modes.openSwitcher();   // leaving the shell is an ascent: land on the menu (rear or a pick dismisses)
   }
 
   onGesture() { return true; }   // jetd has the keys while its shell shows; nothing to do here
@@ -50,6 +52,6 @@ export class ShellMode {
   render(s) {
     heading(s, 'shell');
     paragraph(s, 6, TOP + 30, s.width - 12, 120, this.deviceLink.connected ? 'jetd is drawing its shell.' : 'jetd is not connected.', { colour: C.dim });
-    hint(s, 'Ctrl+Alt+Enter or front hold > remote: back');
+    hint(s, 'Ctrl+Alt+Enter, front hold or rear: back');
   }
 }

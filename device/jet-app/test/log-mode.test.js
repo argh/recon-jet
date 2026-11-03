@@ -45,7 +45,7 @@ test('log buffer: the backlog replay replaces what the automatic 60 lines starte
 test('log mode: J on connect and on enter, live lines render only while current, gestures', async () => {
   const klog = Array.from({ length: 80 }, (_, i) => `[${i}] boot`);
   const link = fakeLink({ klog });
-  const ui = { renders: 0, requestRender() { this.renders++; }, surface: { height: 240, width: 428, fonts: { small: { width: 6, height: 12 } } } };
+  const ui = { renders: 0, requestRender() { this.renders++; }, surface: { height: 240, width: 428, fonts: { small: { width: 6, height: 12 }, main: { width: 10, height: 20 } } } };
   const modes = { registered: [], register(m) { this.registered.push(m.id); } };
   const mode = Object.assign(new LogMode(), { lines: 2000, modes, ui, deviceLink: link });
   await mode.start();
@@ -66,7 +66,8 @@ test('log mode: J on connect and on enter, live lines render only while current,
   assert.ok(mode.buffer.offset > 0);
   assert.equal(mode.onGesture('swipe:right'), true); assert.equal(mode.buffer.hoff, 10);
   assert.equal(mode.onGesture('press:rear'), true); assert.equal(mode.buffer.following, true); assert.equal(mode.buffer.hoff, 0);
-  assert.equal(mode.onGesture('press:front'), false);
+  assert.equal(mode.onGesture('press:front'), true, 'front toggles the font size');
+  assert.equal(mode.onGesture('press:front'), true);
   link.emit('connected'); await settle();
   assert.equal(link.sent.at(-1), 'J', 'reconnect reloads');
 });

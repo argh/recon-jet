@@ -2,7 +2,8 @@
 // On connect (and whenever this mode is entered) the whole ring is requested with `J`, so the
 // view continues from jetd's own boot log without a gap; live lines keep arriving whether or
 // not the mode is showing. Swipe up/down scroll by a page, swipe left/right pan by 10 columns,
-// rear press returns to following the tail (and does nothing when already following).
+// front press toggles the font size (the optics blur the small font's bottom rows for some
+// eyes), rear press returns to following the tail (and does nothing when already following).
 // This is also what the panel shows until the start mode is entered.
 import { Schema } from '@versionzero/module-manager';
 import { C, MARGIN, STRIP_H, hint } from '../../modules/ui/style.js';
@@ -50,8 +51,13 @@ export class LogMode {
       .finally(() => { this.#loading = false; this.ui.requestRender(); });
   }
 
-  /** Rows and columns of the small-font grid under the strip (one row kept for the hint). */
-  #grid(s) { const { small } = s.fonts; return { rows: Math.floor((s.height - STRIP_H - small.height) / small.height), cols: Math.floor((s.width - 2 * MARGIN) / small.width) }; }
+  #big = false;
+
+  /** Rows and columns of the log grid under the strip (one small row kept for the hint). */
+  #grid(s) {
+    const { small } = s.fonts, font = this.#big ? s.fonts.main : small;
+    return { font, rows: Math.floor((s.height - STRIP_H - small.height) / font.height), cols: Math.floor((s.width - 2 * MARGIN) / font.width) };
+  }
 
   onGesture(g) {
     const { rows } = this.#grid(this.ui.surface);
@@ -60,6 +66,7 @@ export class LogMode {
       case 'swipe:down': this.buffer.scroll(-(rows - 1), rows); break;
       case 'swipe:left': this.buffer.pan(-PAN); break;
       case 'swipe:right': this.buffer.pan(PAN); break;
+      case 'press:front': this.#big = !this.#big; break;
       case 'press:rear': if (this.buffer.following && this.buffer.hoff === 0) return false; this.buffer.follow(); break;
       default: return false;
     }
@@ -68,9 +75,9 @@ export class LogMode {
   }
 
   render(s) {
-    const { small } = s.fonts, { rows, cols } = this.#grid(s), b = this.buffer;
-    b.visible(rows, cols).forEach((line, i) => s.text(MARGIN, STRIP_H + i * small.height, line, { font: small, colour: C.white }));
+    const { font, rows, cols } = this.#grid(s), b = this.buffer;
+    b.visible(rows, cols).forEach((line, i) => s.text(MARGIN, STRIP_H + i * font.height, line, { font, colour: C.white }));
     const scrolled = !b.following || b.hoff > 0;
-    hint(s, scrolled ? `^${b.offset} >${b.hoff}   rear: follow` : `${b.length} lines${this.#loading ? '  loading' : ''}   swipe: scroll / pan`, scrolled ? C.title : C.dim);
+    hint(s, scrolled ? `^${b.offset} >${b.hoff}   rear: follow` : `${b.length} lines${this.#loading ? '  loading' : ''}   swipe: scroll / pan   front: size`, scrolled ? C.title : C.dim);
   }
 }

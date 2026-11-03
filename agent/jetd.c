@@ -979,7 +979,10 @@ static void dispatch_key(unsigned code) {
         if (code == KEY_UP) term_scroll += 3;
         else if (code == KEY_DOWN) term_scroll -= 3;
         else if (code == BTN_FRONT_CODE) { log_font = !log_font; vt_geometry_for_font(log_font); }
-        else if (code == BTN_REAR_CODE && pty_fd >= 0) write(pty_fd, "\003", 1);
+        else if (code == BTN_REAR_CODE) {   /* rear exits (ascend); a keyboard's Ctrl+C interrupts */
+            if (raw_keys && nhubs) set_mode(M_REMOTE);
+            else { chooser = 1; chooser_sel = 1; }
+        }
         dirty = 1;
         break;
     }
