@@ -179,4 +179,4 @@ socket; new functionality is a Node module, not a change to the C daemon.
 3. Bluetooth/WiFi coexistence: the two radios are effectively mutually exclusive today.
 4. One unexplained death of jetd at a Bluetooth keyboard reconnect, not reproduced since a poll
    ordering fix; a fatal-signal logger and an unstripped build (`agent/jetd.dbg`) stay in place.
-5. GPS and FM unported; speaker untuned; no on-device wake word.
+5. FM unported; speaker untuned
