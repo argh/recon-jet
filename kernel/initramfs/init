@@ -100,6 +100,8 @@ if [ -n "$UDC" ] && mkdir -p $G; then
     log "rootfs $(readlink -f $A)"
     mount -o rbind /dev $A/dev; mount -t proc proc $A/proc; mount -t sysfs sys $A/sys   # rbind: devpts too (jetd console)
     mount -t tmpfs tmpfs $A/tmp; mount -t tmpfs tmpfs $A/run
+    # the minimal /dev has no fd/std* nodes; bash process substitution (wg-quick) needs /dev/fd
+    ln -sf /proc/self/fd $A/dev/fd; ln -sf /proc/self/fd/0 $A/dev/stdin; ln -sf /proc/self/fd/1 $A/dev/stdout; ln -sf /proc/self/fd/2 $A/dev/stderr
     mkdir -p $A/android-data; mount -o bind /mnt/data $A/android-data
     chroot $A /bin/sh -c 'mkdir -p /var/lib/misc; touch /var/lib/misc/udhcpd.leases;
       printf "interface usb0\nstart '$USBNET'.10\nend '$USBNET'.20\nlease_file /var/lib/misc/udhcpd.leases\noption subnet 255.255.255.0\n" > /tmp/udhcpd.conf;
@@ -110,9 +112,14 @@ if [ -n "$UDC" ] && mkdir -p $G; then
     if [ -s $A/etc/wpa_supplicant/wpa_supplicant.conf ]; then
       ( for i in 1 2 3 4 5 6 7 8 9 10; do [ -d /sys/class/net/wlan0 ] && break; sleep 1; done
         ip link set wlan0 up || { log "wlan0 up FAILED"; exit 1; }
+        # wpa_cli -a arms the WireGuard auto-VPN hook (docs/vpn.md): it toggles the tunnel per SSID.
+        # Opt-in: the hook no-ops unless the user dropped a tunnel conf on userdata, so this is inert
+        # on a device without one. Same chroot invocation, after wpa_supplicant's ctrl socket exists.
         chroot $A /bin/sh -c 'wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant/wpa_supplicant.conf >/dev/null 2>&1 </dev/null;
-          udhcpc -i wlan0 -b -q -t 20 -x hostname:'$HOSTNAME' -s /usr/share/udhcpc/default.script >/dev/null 2>&1 </dev/null'
-        log "wifi: wpa_supplicant + udhcpc started on wlan0" ) &
+          udhcpc -i wlan0 -b -q -t 20 -x hostname:'$HOSTNAME' -s /usr/share/udhcpc/default.script >/dev/null 2>&1 </dev/null;
+          [ -s /android-data/mainline/wireguard/wg0.conf ] && wpa_cli -B -i wlan0 -a /etc/wireguard/on-wifi.sh >/dev/null 2>&1 </dev/null'
+        log "wifi: wpa_supplicant + udhcpc started on wlan0"
+        [ -s $A/android-data/mainline/wireguard/wg0.conf ] && log "wireguard: ssid-gated auto-vpn armed" ) &
     fi
   else
     log "no rootfs on userdata: no DHCP/telnet/ssh (serial console only)"

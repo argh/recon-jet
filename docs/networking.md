@@ -60,6 +60,12 @@ avahi in the chroot (`host-name=jet`, usb0 + wlan0, no dbus), started by init: t
   jetd a few ms (120-180 ms with power save on, which makes the hub feel sluggish).
 - Raw 640x480 UYVY at 30 fps (147 Mbit/s) does not fit over WiFi; 15 fps or JPEG/tiles do.
 
+## Off-home VPN
+
+Off home WiFi the Jet raises a WireGuard tunnel automatically so it still reaches home services;
+on a trusted (home) SSID it stays down. The glue is generic and in the repo; the tunnel conf and
+trusted-SSID list are per-device files on userdata, never committed. See `docs/vpn.md`.
+
 ## Bluetooth (modules on userdata)
 
 - `hci_uart` with TI HCI-LL over uart2 (`ti,wl1283-st`, enable gpio 46); powering hci0 loads

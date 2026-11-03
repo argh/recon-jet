@@ -31,3 +31,9 @@ device/doom/build/
 *.WAD
 # IDE
 .idea/
+
+# per-device WireGuard config lives on the Jet's userdata, never in the repo (only the *.example)
+kernel/rootfs/wireguard/wg0.conf
+kernel/rootfs/wireguard/trusted
+kernel/rootfs/wireguard/routes
+kernel/rootfs/wireguard/resolv.bak

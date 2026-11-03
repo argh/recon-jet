@@ -7,7 +7,9 @@ case "$1" in
     ip addr flush dev "$interface" 2>/dev/null
     ip addr add "$ip/${mask:-24}" dev "$interface"
     [ -n "$router" ] && { ip route del default dev "$interface" 2>/dev/null; for r in $router; do ip route add default via "$r" dev "$interface" && break; done; }
-    [ -n "$dns" ] && { : > /etc/resolv.conf.udhcpc; for d in $dns; do echo "nameserver $d" >> /etc/resolv.conf.udhcpc; done; mv /etc/resolv.conf.udhcpc /etc/resolv.conf; }
+    # leave resolv.conf to the WireGuard hook while a full tunnel is up (its DNS is the only one
+    # reachable then); the physical link's DNS is irrelevant until the tunnel drops
+    [ -n "$dns" ] && ! wg show wg0 >/dev/null 2>&1 && { : > /etc/resolv.conf.udhcpc; for d in $dns; do echo "nameserver $d" >> /etc/resolv.conf.udhcpc; done; mv /etc/resolv.conf.udhcpc /etc/resolv.conf; }
     ;;
 esac
 exit 0

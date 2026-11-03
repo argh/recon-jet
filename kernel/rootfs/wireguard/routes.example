@@ -1,0 +1,5 @@
+# Networks to route through the tunnel (split tunnel): one CIDR per line. Only traffic to these
+# prefixes enters wg0; everything else stays on the local link. Copy to the device as
+# /android-data/mainline/wireguard/routes. If this file is absent, the hook routes just the tunnel
+# address's own /24. Put your home networks here (the ones serving DNS and the services you need).
+10.0.0.0/16

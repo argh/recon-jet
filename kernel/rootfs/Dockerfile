@@ -8,13 +8,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       busybox dropbear-bin wpasupplicant iw wireless-tools iproute2 ethtool i2c-tools alsa-utils \
       bluez avahi-daemon libnss-mdns v4l-utils evtest curl ca-certificates xz-utils procps \
-      kmod file less nano vim-tiny mg libatomic1 libstdc++6 openssh-client \
+      kmod file less nano vim-tiny mg libatomic1 libstdc++6 openssh-client wireguard-tools \
     && rm -rf /var/lib/apt/lists/*
 # busybox applets the initramfs init calls inside the chroot (Debian's busybox has no telnetd), and
 # the udhcpc lease hook Debian does not ship
 RUN for a in udhcpd udhcpc; do ln -sf /bin/busybox /usr/sbin/$a; done && mkdir -p /var/lib/misc /usr/share/udhcpc
 COPY udhcpc-default.script /usr/share/udhcpc/default.script
 RUN chmod 755 /usr/share/udhcpc/default.script
+# the WireGuard auto-VPN hook (docs/vpn.md); init arms it with `wpa_cli -a` when a tunnel conf exists
+COPY wireguard/on-wifi.sh /etc/wireguard/on-wifi.sh
+RUN chmod 755 /etc/wireguard/on-wifi.sh
 # Node 22 (official armv7l build) in /usr/local
 RUN curl -fsSL "https://nodejs.org/dist/latest-v22.x/${NODE_TAR}" -o /tmp/node.tar.xz \
     && tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz && rm /tmp/node.tar.xz \

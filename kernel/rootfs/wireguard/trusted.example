@@ -1,0 +1,4 @@
+# Trusted WiFi networks: while associated with any SSID listed here (one per line, matched exactly)
+# the tunnel stays DOWN, because you are already on a LAN that reaches home. Everywhere else the
+# tunnel comes up. Copy to the device as /android-data/mainline/wireguard/trusted.
+My Home WiFi

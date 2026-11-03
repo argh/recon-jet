@@ -1,0 +1,22 @@
+# WireGuard tunnel for the Jet's off-home auto-VPN (docs/vpn.md). This is an EXAMPLE with
+# placeholders. Copy it to the device, filled in with your own keys and endpoint, as
+#   /android-data/mainline/wireguard/wg0.conf
+# and list your home SSID(s) in a sibling `trusted` file and the home networks to tunnel in a
+# `routes` file. The real conf is private (it holds a private key and your endpoint) and is never
+# committed; its presence on the device enables the feature. Standard wg-quick format, as most
+# servers export it: DNS is honoured (applied to /etc/resolv.conf while up) and MTU is honoured if
+# present (default 1280, which clears the smaller path MTU over a phone hotspot).
+# The tunnel is split, not full: what routes through it is the `routes` file, not AllowedIPs
+# (AllowedIPs is only the peer's crypto scope). Leaving AllowedIPs at 0.0.0.0/0 is fine.
+[Interface]
+PrivateKey = <your-client-private-key>
+Address = 10.0.0.2/32
+DNS = 10.0.0.1
+# MTU = 1280
+
+[Peer]
+PublicKey = <server-public-key>
+AllowedIPs = 0.0.0.0/0
+Endpoint = vpn.example.net:51820
+# keep the handshake alive through the hotspot's carrier-grade NAT (most server exports omit this)
+PersistentKeepalive = 25
