@@ -177,17 +177,28 @@ function emit(a) {
   // SSH
   save(W('ssh', 'authorized_keys'), fs.readFileSync(expand(a.sshKey), 'utf8'), 0o600);
 
-  // App config: device layer (pushed to /android-data/mainline/jet-app.json) ...
-  const dev = {};
+  // App config: device layer (pushed to /android-data/mainline/jet-app.json). The wizard owns
+  // only the keys it asks about (llm.*, the map User-Agent); anything else already in the file —
+  // a voice persona, power calibration, wear, ports — is preserved, so re-running setup never
+  // strips per-device tuning.
+  const merge = (into, from) => {
+    for (const k of Object.keys(from))
+      into[k] = from[k] && typeof from[k] === 'object' && !Array.isArray(from[k])
+        ? merge(typeof into[k] === 'object' && into[k] ? into[k] : {}, from[k]) : from[k];
+    return into;
+  };
+  const dev = load(W('device', 'jet-app.json')) ?? {};
   if (a.llm.base) {
-    dev.llm = { base: a.llm.base };
+    const llm = { base: a.llm.base };
     for (const k of ['asrModel', 'chatModel', 'ttsModel', 'ttsVoice', 'visionModel'])
-      if (a.llm[k]) dev.llm[k] = a.llm[k];
+      if (a.llm[k]) llm[k] = a.llm[k];
+    merge(dev, { llm });
   }
-  if (a.tileAgent) dev.mapMode = { userAgent: a.tileAgent };
+  if (a.tileAgent) merge(dev, { mapMode: { userAgent: a.tileAgent } });
   save(W('device', 'jet-app.json'), JSON.stringify(dev, null, 2) + '\n');
   // ... and the host-side personal layer (running jet-app on the Mac against the device)
-  const personal = { deviceLink: { host: a.jetHost }, ...(a.llm.base ? { llm: { base: a.llm.base } } : {}) };
+  const personal = load(path.join(root, 'device', 'jet-app', 'personal', 'jet-app.json')) ?? {};
+  merge(personal, { deviceLink: { host: a.jetHost }, ...(a.llm.base ? { llm: { base: a.llm.base } } : {}) });
   save(path.join(root, 'device', 'jet-app', 'personal', 'jet-app.json'), JSON.stringify(personal, null, 2) + '\n');
 
   // WireGuard
