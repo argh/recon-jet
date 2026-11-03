@@ -74,7 +74,10 @@ export class JetClient extends EventEmitter {
         this.#buf = this.#buf.subarray(this.#pending.len);
         const p = this.#pending; this.#pending = null;
         if (p.kind === 'f') this.#resolve('f', { ...p.header, data }, 'frame');
-        continue;   // `a` capture chunks are dropped: this CLI never starts one
+        else if (p.kind === 'b') this.emit('blit', { ...p.header, data });      // mirror rect (N 1)
+        else if (p.kind === 'u') this.emit('speaker', data);                    // speaker tee, 48 kHz stereo S16
+        else if (p.kind === 'a') this.emit('mic', data);                        // capture chunk, 16 kHz mono S16
+        continue;
       }
       const nl = this.#buf.indexOf(10);
       if (nl < 0) return;
@@ -90,6 +93,9 @@ export class JetClient extends EventEmitter {
     switch (t) {
       case 'f': this.#pending = { kind: 'f', header: { w: +a[0], h: +a[1], fmt: a[2] }, len: +a[3] }; return;
       case 'a': this.#pending = { kind: 'a', len: +a[0] }; return;
+      case 'b': this.#pending = { kind: 'b', header: { x: +a[0], y: +a[1], w: +a[2], h: +a[3] }, len: +a[4] }; return;
+      case 'u': this.#pending = { kind: 'u', len: +a[0] }; return;
+      case 'N': return this.#resolve('N', { w: +a[0], h: +a[1], bpp: +a[2], lineLength: +a[3] }, 'mirror');
       case 'h': this.hello = { w: +a[0], h: +a[1], cols: +a[2], rows: +a[3] }; this.mode ??= 'remote'; return this.emit('hello', this.hello);
       case 'k': return this.emit('key', { code: +a[0], value: +a[1] });
       case 'r': return this.emit('touch', { dx: +a[0], dy: +a[1] });

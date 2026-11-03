@@ -1,0 +1,177 @@
+<!doctype html>
+<!-- jet live: served by `jet live` (host/modules/live.js), which bridges jetd's protocol over a
+     WebSocket: JSON text events, binary payloads (mirror rects, speaker tee, mic chunks). This
+     page renders the glass, plays its audio, and injects input back (H k / H r / V). -->
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jet live</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+         justify-content: center; gap: 14px; background: #101216; color: #cfd6e4;
+         font: 13px/1.5 ui-monospace, Menlo, monospace; }
+  #glass { image-rendering: pixelated; background: #000; border: 1px solid #2a2f3a;
+           border-radius: 4px; touch-action: none; cursor: crosshair; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  button { font: inherit; color: inherit; background: #1b2029; border: 1px solid #343b49;
+           border-radius: 5px; padding: 6px 16px; cursor: pointer; }
+  button:active, button.held { background: #2f5a3a; border-color: #4a8a5a; }
+  button.ptt:active { background: #5a2f2f; border-color: #8a4a4a; }
+  label { display: flex; gap: 5px; align-items: center; cursor: pointer; }
+  #status { color: #8a93a6; min-height: 1.2em; }
+  #events { width: 640px; max-width: 92vw; height: 7em; overflow: hidden; color: #5f6878;
+            white-space: pre; font-size: 11px; }
+  .hint { color: #5f6878; font-size: 11px; }
+</style>
+<canvas id="glass" width="428" height="240"></canvas>
+<div class="row">
+  <button id="front">FRONT</button>
+  <button id="rear">REAR</button>
+  <button id="ptt" class="ptt">HOLD TO TALK</button>
+  <label><input type="checkbox" id="sound"> sound</label>
+  <label><input type="checkbox" id="micmon"> monitor mic</label>
+  <label><input type="checkbox" id="kbd"> keyboard</label>
+</div>
+<div id="status">connecting…</div>
+<div class="hint" id="hint">drag on the glass = pad swipe · click = front tap · Enter/Backspace = front/rear (hold works) · arrows = swipes</div>
+<div id="events"></div>
+<script>
+const canvas = document.getElementById('glass'), ctx = canvas.getContext('2d');
+const status = document.getElementById('status'), events = document.getElementById('events');
+let fmt = { w: 428, h: 240, bpp: 16 };
+let pending = null;               // header waiting for its binary message
+const scale = Math.max(1, Math.min(3, Math.floor(innerWidth / 460)));
+canvas.style.width = `${428 * Math.max(2, scale)}px`;
+
+const ws = new WebSocket(`ws://${location.host}/ws`);
+ws.binaryType = 'arraybuffer';
+const send = (line) => { if (ws.readyState === 1) ws.send(line); };
+
+const evlog = (() => { const lines = []; return (s) => {
+  lines.push(s); if (lines.length > 6) lines.shift(); events.textContent = lines.join('\n');
+}; })();
+
+ws.onopen = () => { status.textContent = 'bridge up, waiting for the glass…'; };
+ws.onclose = () => { status.textContent = 'bridge closed — restart `jet live` and reload'; };
+ws.onmessage = (e) => {
+  if (typeof e.data === 'string') {
+    const m = JSON.parse(e.data);
+    if (m.t === 'fmt') { fmt = m; canvas.width = m.w; canvas.height = m.h; status.textContent = `mirroring ${m.w}x${m.h} @ ${m.bpp} bpp`; }
+    else if (m.t === 'b' || m.t === 'u' || m.t === 'a') pending = m;
+    else if (m.t === 'line') { const l = m.line; if (l[0] === 'm') status.textContent = `mode: ${l.slice(2)}`; if ('kmrxwdgon'.includes(l[0])) evlog(l); }
+    else if (m.t === 'gone') status.textContent = 'link to the glass lost — reconnecting… (the device itself is fine)';
+    return;
+  }
+  const p = pending; pending = null;
+  if (!p) return;
+  if (p.t === 'b') blit(p, new DataView(e.data));
+  else if (p.t === 'u') play(e.data, 48000, 2);
+  else if (p.t === 'a' && micmon.checked) play(e.data, 16000, 1);
+};
+
+function blit(r, dv) {
+  const img = ctx.createImageData(r.w, r.h), px = img.data, bytes = fmt.bpp / 8;
+  for (let i = 0, n = r.w * r.h; i < n; i++) {
+    let R, G, B;
+    if (bytes === 2) { const v = dv.getUint16(i * 2, true); R = (v >> 8) & 0xf8; G = (v >> 3) & 0xfc; B = (v << 3) & 0xf8; }
+    else { const v = dv.getUint32(i * 4, true); R = (v >> 16) & 255; G = (v >> 8) & 255; B = v & 255; }
+    px[i * 4] = R; px[i * 4 + 1] = G; px[i * 4 + 2] = B; px[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(img, r.x, r.y);
+}
+
+/* ---- audio: schedule each S16 chunk on a rolling cursor; AudioBuffers resample themselves -- */
+const sound = document.getElementById('sound'), micmon = document.getElementById('micmon');
+let actx = null; const cursor = { 48000: 0, 16000: 0 };
+sound.onchange = () => { if (sound.checked && !actx) actx = new AudioContext(); actx?.resume(); };
+function play(ab, rate, channels) {
+  if (!sound.checked || !actx) return;
+  const s16 = new Int16Array(ab), frames = s16.length / channels;
+  if (!frames) return;
+  const buf = actx.createBuffer(channels, frames, rate);
+  for (let c = 0; c < channels; c++) {
+    const ch = buf.getChannelData(c);
+    for (let i = 0; i < frames; i++) ch[i] = s16[i * channels + c] / 32768;
+  }
+  const src = actx.createBufferSource(); src.buffer = buf; src.connect(actx.destination);
+  const at = Math.max(actx.currentTime + 0.03, cursor[rate]);
+  src.start(at); cursor[rate] = at + frames / rate;
+}
+
+/* ---- input: surrogate pod controls; real press/release so holds work. One exception: a long
+   REAR hold is the hardware power path (PMIC), so injected rear presses auto-release well before
+   that — a remote page must not be able to power the device off. ---------------------------- */
+const FRONT = 86, REAR = 107;    // BTN_FRONT_CODE / BTN_REAR_CODE (agent/jetd.c)
+const REAR_CAP_MS = 800;
+let rearTimer = null;
+function press(code) { send(`H k ${code} 1`); if (code === REAR) rearTimer = setTimeout(() => release(code, true), REAR_CAP_MS); }
+function release(code, capped) {
+  if (code === REAR) { if (!rearTimer) return; clearTimeout(rearTimer); rearTimer = null;
+    if (capped) status.textContent = 'rear auto-released (long rear hold is the hardware power switch)'; }
+  send(`H k ${code} 0`);
+}
+function bindButton(el, code) {
+  el.addEventListener('pointerdown', () => { el.classList.add('held'); press(code); });
+  const up = () => { if (!el.classList.contains('held')) return; el.classList.remove('held'); release(code); };
+  el.addEventListener('pointerup', up); el.addEventListener('pointerleave', up);
+}
+bindButton(document.getElementById('front'), FRONT);
+bindButton(document.getElementById('rear'), REAR);
+
+const ptt = document.getElementById('ptt');
+ptt.addEventListener('pointerdown', () => { ptt.classList.add('held'); send('V 15'); });
+ptt.addEventListener('pointerup', () => { ptt.classList.remove('held'); send('v'); });
+
+let drag = null;
+canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointerup', (e) => {
+  if (!drag) return;
+  const k = canvas.width / canvas.getBoundingClientRect().width;      // CSS px -> panel px
+  const dx = Math.round((e.clientX - drag.x) * k), dy = Math.round((e.clientY - drag.y) * k);
+  drag = null;
+  if (Math.abs(dx) < 4 && Math.abs(dy) < 4) { send(`H k ${FRONT} 1`); send(`H k ${FRONT} 0`); }  // tap
+  else send(`H r ${dx} ${dy}`);                                        // one summed gesture, like the pad driver
+});
+
+/* ---- keyboard: two interpretations of the same keys, picked by the toggle.
+   OFF (default): a few local shortcuts stand in for the pod controls.
+   ON: every key is sent as a real keyboard event (`H t`, the BT-keyboard path on the device:
+   type into the shell, Ctrl+Alt+Enter toggles it, modifiers included). ------------------- */
+const kbd = document.getElementById('kbd'), hint = document.getElementById('hint');
+const HINTS = {
+  off: 'drag on the glass = pad swipe · click = front tap · Enter/Backspace = front/rear (hold works) · arrows = swipes',
+  on: 'keyboard passes through to the device (shell typing, Ctrl+Alt+Enter, arrows as menu keys) — untick to get the front/rear shortcuts back',
+};
+kbd.onchange = () => {
+  hint.textContent = HINTS[kbd.checked ? 'on' : 'off'];
+  kbd.blur();                     // or Space while typing toggles the checkbox again
+  release(FRONT); release(REAR);  // a shortcut held across the switch must not stick (ups are safe no-ops)
+};
+
+// KeyboardEvent.code -> Linux evdev KEY_* (input-event-codes.h); enough for a US BT keyboard
+const EV = { Escape: 1, Digit1: 2, Digit2: 3, Digit3: 4, Digit4: 5, Digit5: 6, Digit6: 7, Digit7: 8, Digit8: 9, Digit9: 10, Digit0: 11,
+  Minus: 12, Equal: 13, Backspace: 14, Tab: 15, KeyQ: 16, KeyW: 17, KeyE: 18, KeyR: 19, KeyT: 20, KeyY: 21, KeyU: 22, KeyI: 23, KeyO: 24, KeyP: 25,
+  BracketLeft: 26, BracketRight: 27, Enter: 28, ControlLeft: 29, KeyA: 30, KeyS: 31, KeyD: 32, KeyF: 33, KeyG: 34, KeyH: 35, KeyJ: 36, KeyK: 37, KeyL: 38,
+  Semicolon: 39, Quote: 40, Backquote: 41, ShiftLeft: 42, Backslash: 43, KeyZ: 44, KeyX: 45, KeyC: 46, KeyV: 47, KeyB: 48, KeyN: 49, KeyM: 50,
+  Comma: 51, Period: 52, Slash: 53, ShiftRight: 54, AltLeft: 56, Space: 57, ControlRight: 97, AltRight: 100,
+  Home: 102, ArrowUp: 103, PageUp: 104, ArrowLeft: 105, ArrowRight: 106, End: 107, ArrowDown: 108, PageDown: 109, Insert: 110, Delete: 111 };
+
+const KEYS = { Enter: FRONT, Backspace: REAR };
+addEventListener('keydown', (e) => {
+  if (e.repeat || e.metaKey) return;                       // Cmd combos stay the browser's
+  if (kbd.checked) {
+    const code = EV[e.code];
+    if (code !== undefined) { e.preventDefault(); send(`H t ${code} 1`); }
+    return;
+  }
+  if (KEYS[e.key] !== undefined) { e.preventDefault(); press(KEYS[e.key]); }
+  const sw = { ArrowUp: '0 -40', ArrowDown: '0 40', ArrowLeft: '-40 0', ArrowRight: '40 0' }[e.key];
+  if (sw) { e.preventDefault(); send(`H r ${sw}`); }
+});
+addEventListener('keyup', (e) => {
+  if (kbd.checked) { const code = EV[e.code]; if (code !== undefined && !e.metaKey) send(`H t ${code} 0`); return; }
+  if (KEYS[e.key] !== undefined) release(KEYS[e.key]);
+});
+</script>
+</html>

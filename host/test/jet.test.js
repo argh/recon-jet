@@ -134,8 +134,59 @@ test('raw sends lines verbatim and prints the replies', () => withFake(async (fa
   assert.match(stdout, /^q 3812 /m);
 }));
 
-test('live is a stub that exits nonzero without touching the device', async () => {
-  const { code, stderr } = await run(['--host', '127.0.0.1', '--port', '1', 'live']);
-  assert.notEqual(code, 0);
-  assert.match(stderr, /mirror mode/);
-});
+test('live serves the page, bridges mirror rects over WS, and round-trips an injection', () => withFake(async (fake, flags) => {
+  let url = null, child = null;
+  const done = run([...flags, 'live', '--open', 'false', '--http-port', '0'], {
+    onStdout: (all, c) => { child = c; url ??= all.match(/http:\/\/127\.0\.0\.1:\d+\//)?.[0]; },
+  });
+  while (!url) await new Promise((r) => setTimeout(r, 25));
+
+  const page = await (await fetch(url)).text();
+  assert.match(page, /<title>jet live<\/title>/);
+
+  // a minimal WS client (mirrors what the page does): expect fmt, a rect header + its binary
+  // payload, and our H r injection coming back as a device event
+  const { createHash, randomBytes } = await import('node:crypto');
+  const net = await import('node:net');
+  const port = +url.match(/:(\d+)/)[1];
+  const got = await new Promise((resolve, reject) => {
+    const key = randomBytes(16).toString('base64');
+    const sock = net.connect(port, '127.0.0.1');
+    const state = { fmt: null, rect: null, rectBytes: 0, echo: false };
+    let buf = Buffer.alloc(0), shaken = false, header = null;
+    const frame = (op, p) => { const m = randomBytes(4), b = Buffer.from(p); for (let i = 0; i < b.length; i++) b[i] ^= m[i & 3]; return Buffer.concat([Buffer.from([0x80 | op, 0x80 | b.length]), m, b]); };
+    sock.on('connect', () => sock.write(`GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`));
+    sock.on('error', reject);
+    const timer = setTimeout(() => resolve(state), 4000);
+    sock.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (!shaken) {
+        const end = buf.indexOf('\r\n\r\n'); if (end < 0) return;
+        assert.ok(buf.toString().includes(createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')));
+        buf = buf.subarray(end + 4); shaken = true;
+        sock.write(frame(1, 'H r 9 -4'));
+      }
+      for (;;) {
+        if (buf.length < 2) return;
+        const op = buf[0] & 15; let len = buf[1] & 0x7f, off = 2;
+        if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); off = 4; }
+        if (buf.length < off + len) return;
+        const payload = buf.subarray(off, off + len); buf = buf.subarray(off + len);
+        if (op === 1) {
+          const m = JSON.parse(payload.toString());
+          if (m.t === 'fmt') state.fmt = m;
+          else if (m.t === 'b') header = m;
+          else if (m.t === 'line' && m.line === 'r 9 -4') state.echo = true;
+        } else if (op === 2 && header) { state.rect = header; state.rectBytes = payload.length; header = null; }
+        if (state.fmt && state.rect && state.echo) { clearTimeout(timer); sock.destroy(); return resolve(state); }
+      }
+    });
+  });
+
+  assert.deepEqual({ w: got.fmt.w, h: got.fmt.h, bpp: got.fmt.bpp }, { w: 428, h: 240, bpp: 16 });
+  assert.equal(got.rectBytes, got.rect.w * got.rect.h * 2);   // header matches payload
+  assert.ok(got.echo, 'H r injection came back as a device event');
+  child.kill('SIGINT');
+  const { code } = await done;
+  assert.equal(code, 0);
+}));

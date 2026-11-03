@@ -8,7 +8,7 @@ install and on-device helpers.
 
 `jet.js` is a one-shot client of jetd's line protocol (TCP 7777, spec at the top of
 `agent/jetd.c`): connect, do one thing, exit. It opens no ports and is inert by default —
-attaching to a live device never disturbs jet-app; only `mode`/`backlight`/`console` send
+attaching to a live device never disturbs jet-app; only `mode`/`backlight`/`console` (and `live`'s user-driven injections) send
 anything that changes device state, because that is what you asked for.
 
 ```
@@ -21,7 +21,7 @@ node jet.js console $'uname -a\n'  # type into the on-device shell pty
 node jet.js mode <remote|log|shell|setup>
 node jet.js backlight <0-1023>
 node jet.js raw P Q              # protocol lines verbatim (power-user escape hatch)
-node jet.js live                 # stub: needs a jetd mirror mode (docs/open-questions.md)
+node jet.js live                 # the glass in a browser: mirror + audio + controls (docs/live.md)
 ```
 
 `JET_HOST` / `--host` pick the device (default `jet.local`; `. work/env.sh` sets it), `JET_PORT`

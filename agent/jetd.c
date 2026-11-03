@@ -57,6 +57,16 @@
  *   U                 re-read the calibration files (glance, wear, view thresholds) -> "U on off deg still"
  *   G / O             current glance / wear state -> "g <at> <raw>" / "o <worn> <raw>"
  *   Q                 power snapshot -> "q vbat vsys vbus mA ctrl1 stat1 linsts cinlimit vichrg udc maxpower"
+ *   N <0|1>           mirror the panel to this client (docs/live.md): reply "N w h bpp line_length",
+ *                     then a full refresh and a "b" rect for every panel push (post-composition,
+ *                     so the viewfinder and external-surface drawing are included). Also tees
+ *                     speaker audio to this client as "u" chunks. Never blocks the UI: a rect is
+ *                     sent only when it wholly fits the socket's free space; an overflowed client
+ *                     self-heals with a banded full refresh from the live framebuffer.
+ *   H k <code> <val> / H r <dx> <dy> / H t <code> <val>   inject input: a pod button / a pad
+ *                     gesture / a keyboard key (the kbd path, like the BT keyboard: shell typing,
+ *                     modifiers, Ctrl+Alt+Enter) — same dispatch as evdev, so holds, the chooser
+ *                     and k/r forwarding all behave
  * jet -> host:
  *   h <w> <h> <cols> <rows>     hello (also sent when remote mode is re-entered)
  *   k <code> <value>            key event (evdev code, 1=down 0=up)
@@ -71,6 +81,8 @@
  *   d <avg> <max>               wake word heard (probabilities 0..255); a capture follows
  *   x <on|off|error ...>        listening state
  *   w <done|timeout|error|idle> playback finished
+ *   b <x> <y> <w> <h> <len> + bytes   mirror rect (packed rows, fb pixel format per the N reply)
+ *   u <len> + bytes             mirror tee of queued speaker audio (48 kHz stereo S16)
  */
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -100,6 +112,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -142,6 +155,8 @@ static inline uint32_t fbpack(uint32_t c) {
     return (r << vinfo.red.offset) | (g << vinfo.green.offset) | (b << vinfo.blue.offset);
 }
 
+static void mirror_tee(int x, int y, int w, int h);   /* defined with the hub machinery below */
+
 static void fb_flush(void) {
     for (unsigned y = 0; y < H; y++) {
         const uint32_t *src = back + y * W;
@@ -158,6 +173,7 @@ static void fb_flush(void) {
     }
     struct omapfb_update_window uw = { 0, 0, W, H, 0, 0, 0, W, H, {0} };
     ioctl(fbfd, OMAPFB_UPDATE_WINDOW, &uw);
+    mirror_tee(0, 0, W, H);
 }
 /* External surface: a client owns the framebuffer pixels (writes /dev/fb0 itself) and asks jetd
  * only to push rectangles to the panel. jetd then draws nothing in remote mode except the live
@@ -168,6 +184,7 @@ static void fb_update(int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) return;
     struct omapfb_update_window uw = { x, y, w, h, 0, 0, 0, w, h, {0} };
     ioctl(fbfd, OMAPFB_UPDATE_WINDOW, &uw);
+    mirror_tee(x, y, w, h);
 }
 
 /* ---- PSF fonts (two sizes, front button toggles in log/shell) ------------------- */
@@ -296,7 +313,8 @@ static int raw_keys, ext_surface;   /* set by K / E: a client owns keys / pixels
 /* Hubs: up to MAXHUB connected clients (the on-device app, the host hub, debug sessions) all
  * receive every event (including binary payloads) and may all send commands. */
 #define MAXHUB 4
-struct hub { int fd; char inbuf[1024]; size_t inlen; size_t bin_need; int64_t stuck_since; };
+struct hub { int fd; char inbuf[1024]; size_t inlen; size_t bin_need; int64_t stuck_since;
+             int mirror; unsigned mirror_y; };   /* N 1: tee panel pushes; mirror_y < H = full refresh in progress */
 static struct hub hubs[MAXHUB]; static int nhubs;
 static struct hub *cur_hub;      /* the hub whose line is being handled (W payload accounting) */
 static int only_fd = -1;         /* when >= 0, sendf/send_all go to this hub only (hello + log replay) */
@@ -1232,6 +1250,91 @@ static int send_all(const void *buf, size_t len) {     /* binary payloads go to 
     return rc;
 }
 
+/* ---- mirror (N): tee panel pushes and speaker audio to subscribed clients -------------------
+ * The panel is manual-update, so every change already names its rectangle: mirroring is a tee of
+ * fbmem bytes at the two push sites above, no encoding (428x240 is small enough raw). Unlike
+ * send_fd_all this must never block the UI loop, so a rect is written only when it wholly fits
+ * the socket's free space (SO_SNDBUF - TIOCOUTQ); otherwise the client is marked for a banded
+ * full refresh, which reads the live framebuffer and therefore converges on current content no
+ * matter what was dropped. A short write would tear the framing, so it ends the mirror. */
+#define MIRROR_BAND 32   /* refresh band: 32 rows = 27 KB at 16 bpp, fits a default send buffer */
+static int mirror_fit(int fd, size_t need) {
+    int queued = 0, sndbuf = 0; socklen_t sl = sizeof sndbuf;
+    if (ioctl(fd, TIOCOUTQ, &queued) < 0 || getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sl) < 0) return 0;
+    return sndbuf - queued > (int)need + 64;
+}
+static int mirror_rect(struct hub *hb, int x, int y, int w, int h) {   /* 0 sent, -1 no room, -2 dead */
+    unsigned bpp = vinfo.bits_per_pixel / 8;
+    size_t rowlen = (size_t)w * bpp, len = rowlen * h;
+    char hdr[64]; int hl = snprintf(hdr, sizeof hdr, "b %d %d %d %d %zu\n", x, y, w, h, len);
+    if (!mirror_fit(hb->fd, hl + len)) return -1;
+    struct iovec iov[1 + 256]; int niov = 0;
+    iov[niov++] = (struct iovec){ hdr, (size_t)hl };
+    for (int r = 0; r < h; r++) iov[niov++] = (struct iovec){ fbmem + (size_t)(y + r) * finfo.line_length + (size_t)x * bpp, rowlen };
+    ssize_t wr = writev(hb->fd, iov, niov);
+    if (wr == (ssize_t)(hl + len)) return 0;
+    hb->mirror = 0;                               /* short write after the fit check: framing torn */
+    return -2;
+}
+static void mirror_bands(struct hub *hb) {        /* continue a full refresh while there is room */
+    while (hb->mirror && hb->mirror_y < H) {
+        int rows = H - hb->mirror_y < MIRROR_BAND ? (int)(H - hb->mirror_y) : MIRROR_BAND;
+        if (mirror_rect(hb, 0, hb->mirror_y, W, rows) != 0) return;
+        hb->mirror_y += rows;
+    }
+}
+static int64_t mirror_last_tee;
+static void mirror_tee(int x, int y, int w, int h) {
+    mirror_last_tee = now_ms();
+    for (int i = 0; i < nhubs; i++) {
+        struct hub *hb = &hubs[i];
+        if (!hb->mirror) continue;
+        if (hb->mirror_y < H) { mirror_bands(hb); continue; }   /* refreshing: bands read live pixels anyway */
+        if (mirror_rect(hb, x, y, w, h) == -1) hb->mirror_y = 0;   /* no room: owe a full refresh */
+    }
+}
+static int mirror_pending(void) {
+    for (int i = 0; i < nhubs; i++) if (hubs[i].mirror && hubs[i].mirror_y < H) return 1;
+    return 0;
+}
+static int mirror_on(void) {
+    for (int i = 0; i < nhubs; i++) if (hubs[i].mirror) return 1;
+    return 0;
+}
+/* Direct-framebuffer writers (Doom pushes its own update windows; fbfill; anything run from the
+ * shell) never pass the tee above. Fallback: while mirrors are subscribed and no tee has fired
+ * recently, checksum the framebuffer in bands and tee the ones that changed — a few MB/s of
+ * reads at worst, ~7 fps of mirror for a 35 fps game, zero cost while the normal tee flows. */
+static uint32_t mirror_band_sum[(240 + MIRROR_BAND - 1) / MIRROR_BAND];
+static uint32_t band_checksum(unsigned y, unsigned rows) {
+    uint32_t s = 2166136261u;
+    for (unsigned r = 0; r < rows; r++) {
+        const uint32_t *p = (const uint32_t *)(fbmem + (size_t)(y + r) * finfo.line_length);
+        for (unsigned i = 0; i < W * (vinfo.bits_per_pixel / 8) / 4; i++) s = (s ^ p[i]) * 16777619u;
+    }
+    return s;
+}
+static void mirror_scan(void) {
+    if (!mirror_on() || now_ms() - mirror_last_tee < 150) return;
+    for (unsigned b = 0, y = 0; y < H; b++, y += MIRROR_BAND) {
+        unsigned rows = H - y < MIRROR_BAND ? H - y : MIRROR_BAND;
+        uint32_t s = band_checksum(y, rows);
+        if (s == mirror_band_sum[b]) continue;
+        mirror_band_sum[b] = s;
+        mirror_tee(0, y, W, rows);
+    }
+}
+static void mirror_audio(const void *buf, size_t len) {   /* tee of queued speaker PCM; chunks drop, never block */
+    for (int i = 0; i < nhubs; i++) {
+        struct hub *hb = &hubs[i];
+        if (!hb->mirror) continue;
+        char hdr[32]; int hl = snprintf(hdr, sizeof hdr, "u %zu\n", len);
+        if (!mirror_fit(hb->fd, hl + len)) continue;
+        struct iovec iov[2] = { { hdr, (size_t)hl }, { (void *)buf, len } };
+        if (writev(hb->fd, iov, 2) != (ssize_t)(hl + len)) hb->mirror = 0;
+    }
+}
+
 static void cam_snapshot(unsigned w, unsigned h, unsigned skip) {
     struct v4l2_format f = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
     struct v4l2_requestbuffers rb = { .count = 3, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP };
@@ -1287,6 +1390,11 @@ static void vf_stop(void) {
 }
 static void vf_start(int x, int y, int w, int h, int fps) {
     vf_stop();
+    /* clamp to the panel: vf_draw only clamps the far edges, and a negative origin (a client
+     * asking before it knows the geometry) would scribble fbmem outside the rectangle */
+    if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)W) w = W - x; if (y + h > (int)H) h = H - y;
+    if (w <= 0 || h <= 0) { sendf("e viewfinder: empty rectangle\n"); return; }
     struct v4l2_format f = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
     struct v4l2_requestbuffers rb = { .count = 3, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP };
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE; const char *err = NULL;
@@ -1655,6 +1763,19 @@ static void handle_line(char *l) {
     case 'V': turn_begin(atoi(l + 1), 0); break;
     case 'D': { int on = 0; char rest[64] = ""; sscanf(l + 1, "%d %63[^\n]", &on, rest); if (on) listen_start(rest); else listen_stop("off"); } break;
     case 'Q': power_read(); sendf("q %d %d %d %d 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x %s %d\n", pstate.vbat, pstate.vsys, pstate.vbus, pstate.ma, pstate.ctrl1 & 0xff, pstate.stat1 & 0xff, pstate.lin & 0xff, pstate.cin & 0xff, pstate.vichrg & 0xff, pstate.udc[0] ? pstate.udc : "-", pstate.maxpower); break;
+    case 'N': if (cur_hub) {                                   /* mirror on/off for THIS client */
+            cur_hub->mirror = atoi(l + 1) != 0; cur_hub->mirror_y = H;
+            if (cur_hub->mirror) {
+                int sb = 1 << 20; setsockopt(cur_hub->fd, SOL_SOCKET, SO_SNDBUF, &sb, sizeof sb);
+                only_fd = cur_hub->fd; sendf("N %u %u %u %u\n", W, H, vinfo.bits_per_pixel, finfo.line_length); only_fd = -1;
+                cur_hub->mirror_y = 0; mirror_bands(cur_hub);  /* full refresh starts immediately */
+            }
+        } break;
+    case 'H': { char t; int a = 0, v = 0; int got = sscanf(l + 1, " %c %d %d", &t, &a, &v);   /* inject input */
+            if (t == 'k' && got == 3) raw_key(a, v);
+            else if (t == 'r' && got == 3) dispatch_rel(a, v);
+            else if (t == 't' && got == 3) { if (!kbd_key(a, v)) raw_key(a, v); }   /* like an inkbd device event */
+        } break;
     case 'v': turn_end("stop"); break;
     case 'W': if (cur_hub) cur_hub->bin_need = strtoul(l + 1, NULL, 10); break;   /* payload bytes follow the line */
     case 'w': if (play_pid > 0) { play_end = 1; play_drain(); } else sendf("w idle\n"); break;
@@ -1718,6 +1839,8 @@ int main(int argc, char **argv) {
         if (imu_path[0][0] && timeout > 50) timeout = 50;
         if (mode == M_SETUP && setup_state == S_POWER && timeout > 250) timeout = 250;
         if ((turn_on || play_pid > 0) && timeout > 100) timeout = 100;
+        if (mirror_pending() && timeout > 50) timeout = 50;   /* an owed refresh drains as the socket empties */
+        if (mirror_on() && timeout > 100) timeout = 100;      /* the dirty-scan fallback needs ticks (direct-fb writers) */
         static int64_t prof_last_report; static int prof_on = -1; static int prof_max[8]; static const char *prof_name[8] = { "sock", "pty", "kmsg", "cap", "play", "input", "holds+glance+imu", "render" };
         if (prof_on < 0) prof_on = getenv("JETD_PROF") != NULL;
         int64_t prof_t0 = now_ms();
@@ -1735,6 +1858,7 @@ int main(int argc, char **argv) {
                 if (h->bin_need) {                                    /* W payload: PCM for the speaker */
                     size_t take = h->inlen < h->bin_need ? h->inlen : h->bin_need;
                     play_queue((unsigned char *)h->inbuf, take);
+                    mirror_audio(h->inbuf, take);                     /* mirror clients hear what the speaker gets */
                     memmove(h->inbuf, h->inbuf + take, h->inlen - take); h->inlen -= take; h->bin_need -= take;
                     if (h->bin_need) break;
                     continue;
@@ -1783,6 +1907,8 @@ int main(int argc, char **argv) {
             if (reveal >= klog_n) reveal = -1;
         }
         if (auto_remote && nhubs && reveal < 0 && now_ms() - start_ms >= boot_hold_s * 1000LL) { auto_remote = 0; set_mode(M_REMOTE); }
+        for (int i = 0; i < nhubs; i++) if (hubs[i].mirror && hubs[i].mirror_y < H) mirror_bands(&hubs[i]);
+        mirror_scan();
         render();
         PROF(7);
         if (prof_on && now_ms() - prof_last_report > 5000) {

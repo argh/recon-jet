@@ -51,6 +51,8 @@ host -> jet:
 | `W <len>` + bytes / `w` | queue 48 kHz stereo S16 PCM; `w` ends the clip |
 | `Q` | power snapshot -> `q vbat vsys vbus mA ctrl1 stat1 linsts cinlimit vichrg udc maxpower` |
 | `G` / `O` | current glance / wear state -> `g <at> <raw>` / `o <worn> <raw>` |
+| `N <0|1>` | mirror the panel to this client (`docs/live.md`): reply `N w h bpp line_length`, a full refresh, then a `b` rect per panel push (post-composition) and a `u` tee of speaker audio. Never blocks the UI: rects are sent only when they fit the socket; an overflowed client self-heals with a banded refresh |
+| `H k <code> <val>` / `H r <dx> <dy>` / `H t <code> <val>` | inject input: a pod button (real press/release, so holds work) / one summed pad gesture / a keyboard key (the BT-keyboard path: shell typing, modifiers, Ctrl+Alt+Enter) — same dispatch as evdev, so screens and k/r forwarding behave identically |
 
 Drawing commands are ignored unless remote mode is showing; the hub gets a fresh hello whenever
 remote comes back and must redraw (the hub re-sends its last screen on hello).
@@ -72,6 +74,8 @@ jet -> host:
 | `x <on\|off\|error ...>` | wake word listening state (`error no model`: put a model at `/android-data/mainline/wake.tflite`, e.g. `scp -O agent/wake/models/heya_jet.tflite root@jet.local:/android-data/mainline/wake.tflite`) |
 | `w <done\|timeout\|error\|idle>` | playback finished |
 | `p`, `q ...` | pong, power snapshot |
+| `b <x> <y> <w> <h> <len>` + bytes | mirror rect (packed rows, fb pixel format from the `N` reply) |
+| `u <len>` + bytes | mirror tee of queued speaker audio (48 kHz stereo S16) |
 
 Binary payloads: after an `S` the hub must read `<len>` bytes after the `f` line; after a `W`
 line jetd reads `<len>` bytes before parsing lines again (`bin_need`).

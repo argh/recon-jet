@@ -97,7 +97,7 @@ trusted-SSID list are per-device files on userdata, never committed. See `docs/v
 ## The `jet` CLI (host/, Node)
 
 A one-shot client of jetd's line protocol on TCP **7777** (`host/README.md`): `jet
-state|snapshot|log|events|console|mode|backlight|raw`, device picked by `JET_HOST`/`--host`.
+state|snapshot|log|events|console|mode|backlight|raw|live`, device picked by `JET_HOST`/`--host`.
 Inert by default — attaching never disturbs jet-app — and never in the runtime path: the device
 talks to the inference server itself. It replaced the standing hub server (`jet-hub.js`, git
 history), which existed because the device once dialed out to a Mac-side brain; jetd still

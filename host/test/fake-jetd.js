@@ -27,6 +27,12 @@ export function startFakeJetd() {
         else if (t === 'O') sock.write('o 1 210\n');
         else if (t === 'J') { const n = a[0] ? Math.min(+a[0], LOG_LINES.length) : LOG_LINES.length; for (const l of LOG_LINES.slice(LOG_LINES.length - n)) sock.write(l + '\n'); sock.write(`J ${n}\n`); }
         else if (t === 'S') { const w = +a[0] || 640, h = +a[1] || 480; const bytes = Buffer.alloc(w * h * 2, 0x80); sock.write(`f ${w} ${h} UYVY ${bytes.length}\n`); sock.write(bytes); }
+        else if (t === 'N' && a[0] === '1') {            // mirror on: format reply + one full refresh rect
+          sock.write('N 428 240 16 856\n');
+          const rect = Buffer.alloc(428 * 8 * 2, 0x1f);
+          sock.write(`b 0 0 428 8 ${rect.length}\n`); sock.write(rect);
+        }
+        else if (t === 'H' && a[0] === 'r') sock.write(`r ${a[1]} ${a[2]}\n`);   // inject echoes like the device in remote mode
       }
     });
   });
