@@ -38,7 +38,7 @@ test('network parsers', () => {
   ]);
   assert.deepEqual(parseIpAddr(json), { lo: ['127.0.0.1/8'], usb0: ['10.42.0.1/24'], wlan0: [] });
   assert.deepEqual(parseIpAddr(''), {});
-  assert.deepEqual(parseIwLink('Connected to e2:63:da:22:3a:15 (on wlan0)\n\tSSID: fire swamp\n\tfreq: 2412\n\tsignal: -48 dBm\n'), { ssid: 'fire swamp', freq: '2412', signal: '-48 dBm' });
+  assert.deepEqual(parseIwLink('Connected to 02:00:00:aa:bb:cc (on wlan0)\n\tSSID: example net\n\tfreq: 2412\n\tsignal: -48 dBm\n'), { ssid: 'example net', freq: '2412', signal: '-48 dBm' });
   assert.equal(parseIwLink('Not connected.\n'), null);
   assert.equal(parseIwLink(''), null);
 });

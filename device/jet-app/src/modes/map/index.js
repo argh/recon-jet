@@ -30,7 +30,7 @@ export class MapMode {
     schema: s()
       .property('tileUrl', s('string').default('https://tile.openstreetmap.org/{z}/{x}/{y}.png').meta('description', 'raster tile template; OpenStreetMap standard by default (keyless)'))
       .property('tileKey', s('string').default('').meta('description', 'tile-server API key for a keyed provider, appended as ?key=; set per-device, never committed'))
-      .property('userAgent', s('string').default('recon-jet-hud/1.0 (personal; v0.net)').meta('description', 'the tile server wants an identifying User-Agent'))
+      .property('userAgent', s('string').default('recon-jet-hud/1.0 (github.com/argh/recon-jet)').meta('description', 'the tile server wants an identifying User-Agent; tile policies prefer a contact, so setup.sh offers a personalised one'))
       .property('cacheDir', s('string').default('/android-data/mainline/map-tiles').meta('description', 'on-disk tile cache (revisits are offline); subfoldered by style'))
       .property('lastFixFile', s('string').default('/android-data/mainline/map-last-fix.json').meta('description', 'last good position, so the map opens before a fix lands'))
       .property('saveMs', s('number').default(60000).meta('description', 'minimum interval between last-fix writes to flash'))
