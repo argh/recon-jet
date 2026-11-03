@@ -15,6 +15,7 @@ TOOLS=""; for t in tools/reboot2/reboot2 tools/regdump/regdump device/doom/doom;
 scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR work/rootfs-debian.tar work/jet-app.tgz $TOOLS "root@$HOST:/android-data/"
 $SSH 'set -e; D=/android-data/debian
   rm -rf $D; mkdir -p $D; tar -C $D -xf /android-data/rootfs-debian.tar; rm /android-data/rootfs-debian.tar
+  grep -q "127.0.1.1 jet" $D/etc/hosts 2>/dev/null || echo "127.0.1.1 jet" >> $D/etc/hosts   # Docker cannot bake this (its /etc/hosts is a build-time mount)
   cp /etc/wpa_supplicant/wpa_supplicant.conf $D/etc/wpa_supplicant/ 2>/dev/null || true
   cp /root/.ssh/authorized_keys $D/root/.ssh/ 2>/dev/null || true
   cp /etc/dropbear/dropbear_* $D/etc/dropbear/ 2>/dev/null || true

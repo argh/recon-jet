@@ -23,9 +23,11 @@ RUN curl -fsSL "https://nodejs.org/dist/latest-v22.x/${NODE_TAR}" -o /tmp/node.t
     && tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz && rm /tmp/node.tar.xz \
     && ln -sf /usr/local/bin/node /usr/bin/node && ln -sf /usr/local/bin/npm /usr/bin/npm && node --version
 # mDNS: jet.local on usb0 + wlan0, no dbus needed with the daemon alone
+# /etc/hosts is Docker-managed (a read-only mount during newer Docker builds) and docker export
+# would not carry it anyway: the installers append '127.0.1.1 jet' when they extract the tar
 RUN sed -i 's/^#host-name=.*/host-name=jet/; s/^#allow-interfaces=.*/allow-interfaces=wlan0,usb0/; s/^use-ipv6=yes/use-ipv6=no/; s/^#enable-dbus=.*/enable-dbus=no/; s/^enable-dbus=.*/enable-dbus=no/' /etc/avahi/avahi-daemon.conf \
     && mkdir -p /etc/wpa_supplicant /root/.ssh /etc/dropbear /android-data /opt && chmod 700 /root/.ssh \
-    && echo jet > /etc/hostname && echo '127.0.1.1 jet' >> /etc/hosts
+    && echo jet > /etc/hostname
 # the Bluetooth radio stays down until asked (coex: hci0 up degrades WiFi rx); init / jet-app power it
 RUN sed -i 's/^#\?AutoEnable=.*/AutoEnable=false/' /etc/bluetooth/main.conf && grep -q '^AutoEnable=false' /etc/bluetooth/main.conf
 # the init mounts /proc /sys /dev /tmp /run and binds userdata at /android-data; nothing else runs at boot
