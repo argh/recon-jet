@@ -1,25 +1,34 @@
-# host/: remote developer tools (nothing here runs the glasses)
+# host/: the `jet` CLI (nothing here runs the glasses)
 
 The Jet is self-sufficient: jetd and `device/jet-app` run on the device, and every heavy request
 (ASR, chat, TTS, vision, map tiles) goes from the device to outbound services (`llm.base` in the
-device config; `docs/networking.md`). Nothing on a Mac is in that path, and nothing in this
-directory is required for the glasses to work.
+device config; `docs/networking.md`). Nothing on a Mac is in that path. What lives here reaches
+**into** the device for development and debugging — as opposed to `tools/`, which is build,
+install and on-device helpers.
 
-What lives here is the other direction: tools that reach **into** the device from a workstation
-for development and debugging — as opposed to `tools/`, which is build, install and on-device
-helpers. No dependencies; plain Node.
+`jet.js` is a one-shot client of jetd's line protocol (TCP 7777, spec at the top of
+`agent/jetd.c`): connect, do one thing, exit. It opens no ports and is inert by default —
+attaching to a live device never disturbs jet-app; only `mode`/`backlight`/`console` send
+anything that changes device state, because that is what you asked for.
 
-| tool | what it is |
-|---|---|
-| `jet-hub.js` | live remote view/drive of the glass: jetd protocol client/acceptor on 7777 plus an HTTP control API on 7778 (`/screen`, `/raw`, `/mode`, `/console`, `/snapshot[.jpg\|.uyvy]`, `/look`, `/glance`, `/log`, `/state`); `--look`, `--ptt`, `--live`. Draws only while no jet-app holds the surface (`E`), so attaching to a running device is read-mostly by default |
-| `vision.js` | the VLM call behind the hub's `/look` (`LLM_BASE`, sends `enable_thinking: false` or the VLM burns its budget thinking) |
+```
+cd host && npm install           # @versionzero/module-manager + configurator + schema (public npm)
+node jet.js state                # hello geometry, pong RTT, glance, wear, power snapshot (--json)
+node jet.js snapshot [out.png]   # camera frame -> PNG (the glass as shown: tools/jetshot.sh)
+node jet.js log [-n N] [--follow]
+node jet.js events               # stream key/motion/mode/glance/wear/view events (Ctrl-C exits)
+node jet.js console $'uname -a\n'  # type into the on-device shell pty
+node jet.js mode <remote|log|shell|setup>
+node jet.js backlight <0-1023>
+node jet.js raw P Q              # protocol lines verbatim (power-user escape hatch)
+node jet.js live                 # stub: needs a jetd mirror mode (docs/open-questions.md)
+```
 
-Pointed at the device with `JET_HOST` (default `jet.local`), at the inference server with
-`LLM_BASE` / `LLM_*_MODEL` — `. work/env.sh` (written by `./setup.sh`) sets all of it.
-One-shot equivalents without the hub: `tools/jetshot.sh` (screenshot via jet-app, or the
-framebuffer over ssh), `tools/jsh.sh` (ssh with a hard timeout), `tools/postmortem.sh` (pull
-crash/boot records).
+`JET_HOST` / `--host` pick the device (default `jet.local`; `. work/env.sh` sets it), `JET_PORT`
+and `--timeout-ms` exist for odd setups. The code is structured with `@versionzero/module-manager`
+(each command is a module in `modules/`, selected by the app schema — the command pattern from
+`docs.v0.net/configurator/guide/commands`); `lib/client.js` owns the socket, framing and parsing.
+`npm test` runs an offline suite against a fake jetd (`test/fake-jetd.js`).
 
-The retired host-side voice path (the Mac ran ASR/LLM/TTS and streamed audio over a WebSocket)
-was removed when the loop moved on-device; it lives in git history with its per-stage latency
-harness (`host/voice-session.js`, `host/voice-client.js`, pre-2026-11 trees).
+The retired predecessors — `jet-hub.js` (a standing server from the era when the device dialed
+out to a Mac-side brain) and the host-side voice path — live in git history (pre-2026-11 trees).

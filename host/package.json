@@ -1,9 +1,21 @@
 {
   "name": "@versionzero/jet-host",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Mac-side developer tools for the Recon Jet (remote view/drive, debugging)",
+  "description": "Mac-side developer tools for the Recon Jet (jet CLI, vision helper)",
+  "type": "module",
+  "bin": {
+    "jet": "./jet.js"
+  },
   "engines": {
     "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@versionzero/configurator": "^1.0.0",
+    "@versionzero/module-manager": "^1.0.0",
+    "@versionzero/schema": "^1.4.2"
   }
 }

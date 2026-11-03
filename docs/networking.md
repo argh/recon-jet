@@ -92,19 +92,16 @@ trusted-SSID list are per-device files on userdata, never committed. See `docs/v
   the server is a proxy ACL, not TLS). mDNS does not cross VLANs: from the Mac on the main VLAN
   `jet.local` resolves only over USB, so without USB use the Jet's IoT address
   (`JET_HOST=<address>` for `tools/jsh.sh` and the deploy scripts; the lease can change).
-- Avahi, `apk`/`apt` and the deploy `scp` as before; the hub below is optional.
+- Avahi, `apk`/`apt` and the deploy `scp` as before.
 
-## Hub (`host/jet-hub.js`, Node, no dependencies)
+## The `jet` CLI (host/, Node)
 
-- TCP **7777**: jetd protocol (listen for the Jet dialling in, or dial the Jet:
-  `node host/jet-hub.js <jet address or jet.local> [--look] [--ptt] [--live]`).
-- HTTP **7778**: control API (`/screen`, `/raw`, `/mode`, `/console`, `/snapshot[.jpg|.uyvy]`,
-  `/look`, `/glance`, `/listen`, `/say`, `/converse`, `/state`, `/log`).
-- `HUB_JET_PORT` / `HUB_HTTP_PORT` override the ports so a second hub can run beside another.
-- `LLM_BASE` etc. point at the local LLM server (OpenAI-compatible); `host/vision.js` sends
-  `chat_template_kwargs: {enable_thinking: false}` to the VLM or it burns its budget thinking.
-- The hub is a developer tool (`host/README.md`), never in the runtime path: the device talks
-  to the inference server itself. The retired host voice path was removed from `host/`.
+A one-shot client of jetd's line protocol on TCP **7777** (`host/README.md`): `jet
+state|snapshot|log|events|console|mode|backlight|raw`, device picked by `JET_HOST`/`--host`.
+Inert by default — attaching never disturbs jet-app — and never in the runtime path: the device
+talks to the inference server itself. It replaced the standing hub server (`jet-hub.js`, git
+history), which existed because the device once dialed out to a Mac-side brain; jetd still
+accepts up to 4 clients, so the CLI, jet-app and a debug session coexist.
 
 ## Known link problems (see open-questions.md)
 

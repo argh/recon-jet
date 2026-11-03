@@ -102,6 +102,10 @@ for working around a problem are in the other docs; this is the list of what is 
 
 ## Project
 
+- `jet live` (a continuous remote view of the glass from a workstation) is a stub: doing it
+  properly wants a mirror mode in jetd — the panel's back buffer streamed to a client on flush,
+  not polled snapshots — plus whatever viewer pops up on the host. Dedicated-branch follow-up;
+  the one-shot `jet snapshot`/`tools/jetshot.sh` cover the need meanwhile.
 - The mode chooser (front hold) has been exercised by the author but not by a second person; the
   WiFi-via-QR setup item is a placeholder.
 - Personalisation vs generic client: device settings live in `mainline/jet-app.json` and flag

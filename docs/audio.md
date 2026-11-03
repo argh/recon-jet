@@ -41,14 +41,12 @@ Modules: `snd-soc-tfa989x`, `snd-soc-omap-mcbsp`, `snd-soc-dmic`, `snd-soc-omap-
 | Piece | Where | Does |
 |---|---|---|
 | `V`/`a`/`A` | jetd | capture with energy VAD, 16 kHz mono S16 chunks (see jetd.md) |
-| `POST /listen {maxSeconds}` | hub | reassembles chunks, builds a WAV in memory, sends to the local LLM server's ASR model (qwen3-asr was used) -> `{text, seconds, reason}` |
-| `POST /say {text}` | hub | TTS (kokoro was used; returns 24 kHz mono) -> ffmpeg to 48 kHz stereo S16 -> `W` chunks + `w`; resolves on `w done` |
-| `POST /converse` | hub | listen -> chat model -> say, with transcript and answer on the glass; `--ptt` binds it to a front click |
 | jet-app `voice` + `llm` | device | **the current loop, all on the Jet over WiFi**: capture chunks are transcribed on the device's behalf by the inference server every second (partials), the final transcript goes to the chat model with `stream: true`, each sentence is synthesised as it completes and queued to `W` while the model is still talking, `Y` + an `AbortController` for barge-in; the 24 kHz mono TTS wav is decoded and resampled to 48 kHz stereo in JS (see `docs/jet-app.md`) |
 
-(The retired host-side paths — `voice-session.js`/`voice-client.js` over a WebSocket and the
-`listen.sh`/`say.sh`/`converse.sh` ssh scripts — were removed from `host/`; git history keeps
-them, including the per-stage latency harness.)
+(The retired host-side paths — the hub's `/listen`/`/say`/`/converse` endpoints, the
+`voice-session.js`/`voice-client.js` WebSocket pair and the `listen.sh`/`say.sh`/`converse.sh`
+ssh scripts — were all removed from `host/`; git history keeps them, including the per-stage
+latency harness.)
 
 The device reads the endpoint and model names from the `llm.*` configuration (`llm.base`,
 `llm.asrModel`, `llm.chatModel`, `llm.ttsModel`, `llm.ttsVoice`, `llm.visionModel`); the host
