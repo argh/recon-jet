@@ -253,8 +253,9 @@ Note that jetd holds up to four hub sockets and `E` is a jetd-global flag: a Mac
 
 The voice loop runs on the Jet: the `voice` module's session drives the `llm` module directly
 over WiFi, and the Mac is no longer in the loop (the earlier path, `voice.hostUrl` →
-`host/voice-session.js` over a WebSocket with ffmpeg for the resample, is retired; the host
-scripts stay as developer tools, `host/README.md`). The only configuration is `llm.*`
+`host/voice-session.js` over a WebSocket with ffmpeg for the resample, is retired and removed
+from `host/` — git history keeps it; the hub remains as a developer tool, `host/README.md`).
+The only configuration is `llm.*`
 (`llm.base` on the device in `mainline/jet-app.json`); the `ws` dependency is gone and the
 wav/multipart/SSE/resample work is pure JS in `src/modules/llm/`.
 
@@ -286,7 +287,7 @@ sends `Y` before a capture whenever a clip it queued is still unreported; the je
 without restarting jetd: SIGKILL the arecord child (SIGTERM is swallowed by alsa-utils' restarted
 write).
 
-Earlier, over the host path (USB, `host/voice-session.js`, for comparison): first LLM token 3.1 s,
+Earlier, over the since-removed host path (USB, `host/voice-session.js`, for comparison): first LLM token 3.1 s,
 first audio 6.0 s after `end` for a 3.7 s question, `say hello` 250 ms warm; the LLM-bound
 stages are the same server either way.
 

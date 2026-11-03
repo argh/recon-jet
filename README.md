@@ -33,7 +33,8 @@ Your device stays recoverable the whole way — `docs/recovery.md` is the short 
 - `AGENTS.md` is the orientation for people and agents; `docs/` holds the facts by topic
   (`docs/status.md` is the executive summary of what works).
 - `kernel/` builds the kernel, device tree, rootfs and boot image (Docker); `agent/` is the
-  on-device daemon; `device/jet-app/` the Node application layer; `host/` host-side developer
-  tools; `tools/` helpers.
+  on-device daemon; `device/jet-app/` the Node application layer; `host/` remote developer
+  tools (live view/drive of the glass — never in the runtime path); `tools/` build, install
+  and debugging helpers.
 - Private configuration (networks, credentials, host lists) never lives in the repo: `./setup.sh`
   generates it all into gitignored files. See the personalisation section of `AGENTS.md`.

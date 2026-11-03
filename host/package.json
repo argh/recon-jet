@@ -2,15 +2,8 @@
   "name": "@versionzero/jet-host",
   "version": "0.1.0",
   "private": true,
-  "description": "Mac-side services for the Recon Jet (hub, voice session)",
+  "description": "Mac-side developer tools for the Recon Jet (remote view/drive, debugging)",
   "engines": {
     "node": ">=22"
-  },
-  "scripts": {
-    "voice": "node voice-session.js",
-    "test": "node --test test/*.test.js"
-  },
-  "dependencies": {
-    "ws": "^8.18.0"
   }
 }

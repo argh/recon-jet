@@ -32,9 +32,9 @@ to finish), `docs/recovery.md` (every way back; why nothing here bricks), `docs/
 - `device/doom/` Doom: doomgeneric's engine (fetched to `refs/doomgeneric`, pinned) + `doomgeneric_jet.c`
               (fb0 + panel update, keys from jetd), `i_jetsound.c` (sfx mixer into aplay), `opl_jet.c` (driver for
               Chocolate Doom's OPL music player, fetched to `refs/chocolate-doom`); `build.sh`, `deploy.sh`.
-- `host/`     Mac-side: `jet-hub.js` (dial the Jet, HTTP control API, snapshots, look),
-              `vision.js` (image -> local VLM), `look.sh`, `listen.sh`, `say.sh`, `converse.sh`
-              (voice loop via llama-swap: qwen3-asr, an LLM, kokoro TTS).
+- `host/`     remote developer tools, never in the runtime path (the device needs nothing on a
+              Mac): `jet-hub.js` (live view/drive of the glass: jetd protocol + HTTP control API),
+              `vision.js` (the hub's `/look` VLM call). See `host/README.md`.
 - `tools/`    static ARM helpers (`regdump` /dev/mem dumper, `reboot2`, `fbfill`, `wdt`, `su`),
               `jsh.sh` (ssh with a hard timeout), `cam.sh` (external camera check of the
               display), `bootimg.js`/`cpio-newc.js` (Android boot image packing), `wavstats.py`.

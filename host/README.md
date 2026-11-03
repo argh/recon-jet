@@ -1,20 +1,25 @@
-# host/: Mac-side developer tools (legacy host path)
+# host/: remote developer tools (nothing here runs the glasses)
 
-Everything the Jet needs at runtime now runs on the Jet (`device/jet-app`): the voice loop and
-the vision look talk to the inference server from the device over WiFi (`llm.base`), and jetd
-draws for jet-app. Nothing in this directory is required for the glasses to work. These are
-tools for developing against the Jet from a Mac and for measuring the server:
+The Jet is self-sufficient: jetd and `device/jet-app` run on the device, and every heavy request
+(ASR, chat, TTS, vision, map tiles) goes from the device to outbound services (`llm.base` in the
+device config; `docs/networking.md`). Nothing on a Mac is in that path, and nothing in this
+directory is required for the glasses to work.
+
+What lives here is the other direction: tools that reach **into** the device from a workstation
+for development and debugging — as opposed to `tools/`, which is build, install and on-device
+helpers. No dependencies; plain Node.
 
 | tool | what it is |
 |---|---|
-| `jet-hub.js` | the hub: jetd protocol client/acceptor on 7777 plus an HTTP control API on 7778 (`/screen`, `/snapshot`, `/look`, `/listen`, `/say`, `/converse`, `/log`, ...); `--look`, `--ptt`, `--live`. Draws only while no jet-app holds the surface (`E`) |
-| `vision.js` | the VLM call the hub's `/look` uses (`LLM_BASE`, `enable_thinking: false`) |
-| `voice-session.js`, `voice-client.js`, `test/` | **the retired host voice path**: the WebSocket session jet-app's `voice` module used to stream a turn through before the loop moved on-device (ASR / chat / TTS on the Mac with ffmpeg for the resample). `voice-client.js` drives a turn from a wav file and prints every stage timing, which is still the easiest way to measure the server's ASR/LLM/TTS latencies from a Mac |
-| `listen.sh`, `say.sh`, `converse.sh`, `look.sh`, `look-android.sh` | ssh-based CLI equivalents (arecord/aplay over ssh; the oldest path) |
+| `jet-hub.js` | live remote view/drive of the glass: jetd protocol client/acceptor on 7777 plus an HTTP control API on 7778 (`/screen`, `/raw`, `/mode`, `/console`, `/snapshot[.jpg\|.uyvy]`, `/look`, `/glance`, `/log`, `/state`); `--look`, `--ptt`, `--live`. Draws only while no jet-app holds the surface (`E`), so attaching to a running device is read-mostly by default |
+| `vision.js` | the VLM call behind the hub's `/look` (`LLM_BASE`, sends `enable_thinking: false` or the VLM burns its budget thinking) |
 
-Environment: `LLM_BASE` (OpenAI-compatible base URL), `LLM_ASR_MODEL`, `LLM_TTS_MODEL`,
-`LLM_TTS_VOICE`, `LLM_CHAT_MODEL` / `VOICE_CHAT_MODEL`, `LLM_VISION_MODEL`; `HUB_JET_PORT`,
-`HUB_HTTP_PORT`, `VOICE_PORT`. `npm install` here for `ws` (voice-session only); `npm test`.
+Pointed at the device with `JET_HOST` (default `jet.local`), at the inference server with
+`LLM_BASE` / `LLM_*_MODEL` — `. work/env.sh` (written by `./setup.sh`) sets all of it.
+One-shot equivalents without the hub: `tools/jetshot.sh` (screenshot via jet-app, or the
+framebuffer over ssh), `tools/jsh.sh` (ssh with a hard timeout), `tools/postmortem.sh` (pull
+crash/boot records).
 
-The device-side equivalents are `device/jet-app/src/modules/llm/` (server calls) and
-`src/modules/voice/` (the session and state machine); see `docs/jet-app.md` and `docs/audio.md`.
+The retired host-side voice path (the Mac ran ASR/LLM/TTS and streamed audio over a WebSocket)
+was removed when the loop moved on-device; it lives in git history with its per-stage latency
+harness (`host/voice-session.js`, `host/voice-client.js`, pre-2026-11 trees).

@@ -103,8 +103,8 @@ trusted-SSID list are per-device files on userdata, never committed. See `docs/v
 - `HUB_JET_PORT` / `HUB_HTTP_PORT` override the ports so a second hub can run beside another.
 - `LLM_BASE` etc. point at the local LLM server (OpenAI-compatible); `host/vision.js` sends
   `chat_template_kwargs: {enable_thinking: false}` to the VLM or it burns its budget thinking.
-- The hub, `host/voice-session.js` and the scripts are developer tools now (`host/README.md`):
-  the device talks to the inference server itself.
+- The hub is a developer tool (`host/README.md`), never in the runtime path: the device talks
+  to the inference server itself. The retired host voice path was removed from `host/`.
 
 ## Known link problems (see open-questions.md)
 
