@@ -218,11 +218,12 @@ const EV = { Escape: 1, Digit1: 2, Digit2: 3, Digit3: 4, Digit4: 5, Digit5: 6, D
   Home: 102, ArrowUp: 103, PageUp: 104, ArrowLeft: 105, ArrowRight: 106, End: 107, ArrowDown: 108, PageDown: 109, Insert: 110, Delete: 111 };
 
 const KEYS = { Enter: FRONT, Backspace: REAR };
+const held = new Set();                                    // H t keys currently down on the device
 addEventListener('keydown', (e) => {
   if (e.repeat || e.metaKey) return;                       // Cmd combos stay the browser's
   if (kbd.checked) {
     const code = EV[e.code];
-    if (code !== undefined) { e.preventDefault(); send(`H t ${code} 1`); }
+    if (code !== undefined) { e.preventDefault(); held.add(code); send(`H t ${code} 1`); }
     return;
   }
   if (KEYS[e.key] !== undefined) { e.preventDefault(); press(KEYS[e.key]); }
@@ -230,8 +231,13 @@ addEventListener('keydown', (e) => {
   if (sw) { e.preventDefault(); send(`H r ${sw}`); }
 });
 addEventListener('keyup', (e) => {
-  if (kbd.checked) { const code = EV[e.code]; if (code !== undefined && !e.metaKey) send(`H t ${code} 0`); return; }
+  if (kbd.checked) { const code = EV[e.code]; if (code !== undefined) { held.delete(code); send(`H t ${code} 0`); } return; }
   if (KEYS[e.key] !== undefined) release(KEYS[e.key]);
 });
+// focus leaves (Cmd-Tab, window switch): release everything held, or a lost keyup latches a
+// modifier on the device and every later Enter becomes the Ctrl+Alt+Enter shell hotkey
+const flushHeld = () => { for (const code of held) send(`H t ${code} 0`); held.clear(); release(FRONT); release(REAR); };
+addEventListener('blur', flushHeld);
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushHeld(); });
 </script>
 </html>
