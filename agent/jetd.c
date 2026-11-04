@@ -307,15 +307,18 @@ static int dirty;            /* local render needed */
 
 /* ---- hub link ------------------------------------------------------------------ */
 static int raw_keys, ext_surface;   /* set by K / E: a client owns keys / pixels (defined here for hub_drop) */
-/* Hubs: up to MAXHUB connected clients (the on-device app, the host hub, debug sessions) all
- * receive every event (including binary payloads) and may all send commands. */
-#define MAXHUB 4
+/* Hubs: up to MAXHUB connected clients (the on-device app, the live mirror, doom's key and sound
+ * links, debug sessions) all receive every event (including binary payloads) and may all send
+ * commands. A full table refuses the newcomer — it must never evict an older hub: the oldest is
+ * the app itself, and evicting it silently took the UI's keys away (doom's two connections plus
+ * the mirror once pushed a 4-entry table over the edge mid-game). */
+#define MAXHUB 16
 struct hub { int fd; char inbuf[16384]; size_t inlen;   /* large enough that a W clip drains in few passes */ size_t bin_need; int64_t stuck_since;
              int mirror; unsigned mirror_y;      /* N 1: tee panel pushes; mirror_y < H = full refresh in progress */
              int owns_keys, owns_surface; };     /* this client's K / E grants (raw_keys / ext_surface are ORs of these) */
 static struct hub hubs[MAXHUB]; static int nhubs;
 static struct hub *cur_hub;      /* the hub whose line is being handled (W payload accounting) */
-static int only_fd = -1;         /* when >= 0, sendf/send_all go to this hub only (hello + log replay) */
+static int only_fd = -1;         /* when >= 0, sendf/send_payload_all go to this hub only (hello + log replay) */
 static int turn_on, listen_on; static void turn_end(const char *why); static void listen_stop(const char *why);   /* voice section, below */
 /* K/E are per-client grants: when their owner drops (the app crashed) they must clear even while
  * other clients (the live mirror, a debug session) stay connected, or the dead-man chooser is
@@ -327,9 +330,18 @@ static void recompute_owners(void) {
     raw_keys = k; ext_surface = e;
 }
 /* no client: the recovery UI returns, the mic is released (a turn or the wake word has no one to serve) */
-static void hub_drop(int i) { close(hubs[i].fd); hubs[i] = hubs[--nhubs]; recompute_owners(); if (!nhubs) { dirty = 1; if (turn_on) turn_end("stop"); if (listen_on) listen_stop("off"); } }
+static void hub_drop(int i, const char *why) {
+    fprintf(stderr, "jetd: hub fd %d dropped (%s)%s\n", hubs[i].fd, why, hubs[i].owns_keys || hubs[i].owns_surface ? ", owned the UI" : "");
+    close(hubs[i].fd); hubs[i] = hubs[--nhubs]; recompute_owners();
+    if (!nhubs) { dirty = 1; if (turn_on) turn_end("stop"); if (listen_on) listen_stop("off"); }
+}
+/* CLOEXEC on every hub socket (and the listener): the forked helpers (arecord/jetwake, aplay, the
+ * shell, bluetoothctl) must not inherit them — an inherited copy kept a dropped hub's socket
+ * established, so the client never saw a FIN and talked into a zombie for good (buttons dead,
+ * "connected" forever). */
 static int hub_add(int fd) {
-    if (nhubs == MAXHUB) hub_drop(0);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (nhubs == MAXHUB) { fprintf(stderr, "jetd: hub fd %d refused (table full)\n", fd); close(fd); return -1; }
     struct hub *h = &hubs[nhubs++]; memset(h, 0, sizeof *h); h->fd = fd; return nhubs - 1;
 }
 static char hub_hosts[256]; static const char *hub_port;
@@ -351,9 +363,9 @@ static void sendf(const char *fmt, ...) {
         if (only_fd >= 0 && h->fd != only_fd) continue;
         ssize_t w = send(h->fd, b, n, MSG_DONTWAIT | MSG_NOSIGNAL);
         if (w == n) { h->stuck_since = 0; continue; }
-        if (w < 0 && errno != EAGAIN) { hub_drop(i--); continue; }
+        if (w < 0 && errno != EAGAIN) { hub_drop(i--, "send error"); continue; }
         if (!h->stuck_since) h->stuck_since = now_ms();                 /* partial or EAGAIN: dropped */
-        else if (now_ms() - h->stuck_since > 5000) hub_drop(i--);
+        else if (now_ms() - h->stuck_since > 5000) hub_drop(i--, "stuck 5 s");
     }
 }
 
@@ -364,7 +376,7 @@ static void hub_connected(int fd) {
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK);   /* reads stay blocking-on-POLLIN as before */
     int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
-    hub_add(fd);
+    if (hub_add(fd) < 0) return;
     only_fd = fd; send_hello(); log_on_connect(); only_fd = -1;
 }
 static void try_connect(void) {
@@ -379,6 +391,7 @@ static void try_connect(void) {
     /* non-blocking connect: a blocking one sat in ARP/SYN timeouts for seconds whenever the
      * USB peer was gone, freezing the UI loop (the log viewer must never depend on the hub) */
     int fd = socket(AF_INET, SOCK_STREAM, 0);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);   /* also while still connecting: a fork can land in this window */
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
     int r = connect(fd, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
@@ -397,6 +410,7 @@ static void connect_poll(short revents) {          /* called from the main loop 
 
 static void listen_open(void) {
     listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    fcntl(listen_fd, F_SETFD, FD_CLOEXEC);
     int one = 1; setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(atoi(hub_port)), .sin_addr.s_addr = INADDR_ANY };
     if (bind(listen_fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(listen_fd, 1) < 0) { close(listen_fd); listen_fd = -1; }
@@ -406,7 +420,7 @@ static void accept_hub(void) {
     int fd = accept(listen_fd, NULL, NULL);
     if (fd < 0) return;
     int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    hub_add(fd);
+    if (hub_add(fd) < 0) return;
     only_fd = fd; send_hello(); log_on_connect(); only_fd = -1;
 }
 
@@ -1107,11 +1121,15 @@ static int send_fd_all(int fd, const char *p, size_t len) {   /* wait up to 2 s 
     }
     return 0;
 }
-static int send_all(const void *buf, size_t len) {     /* binary payloads go to every hub (or only_fd) */
+/* A binary payload and its header line go to each hub atomically (or only_fd): a failure drops
+ * that hub alone, and no hub is ever left holding a header whose payload went unsent — the
+ * client's parser then waits on payload bytes for good, swallowing every later line (key events
+ * included) while its own writes still succeed: a live-looking app that never hears another key. */
+static int send_payload_all(const char *hdr, size_t hl, const void *buf, size_t len) {
     int rc = 0;
     for (int i = 0; i < nhubs; i++) {
         if (only_fd >= 0 && hubs[i].fd != only_fd) continue;
-        if (send_fd_all(hubs[i].fd, buf, len) < 0) { hub_drop(i--); rc = -1; }
+        if (send_fd_all(hubs[i].fd, hdr, hl) < 0 || send_fd_all(hubs[i].fd, buf, len) < 0) { hub_drop(i--, "payload send failed"); rc = -1; }
     }
     return rc;
 }
@@ -1256,7 +1274,7 @@ static void cam_snapshot(unsigned w, unsigned h, unsigned skip) {
         if (ioctl(fd, VIDIOC_DQBUF, &b) < 0) { err = "DQBUF"; break; }
         if (n == skip) {
             char hdr[64]; int hl = snprintf(hdr, sizeof hdr, "f %u %u UYVY %u\n", f.fmt.pix.width, f.fmt.pix.height, b.bytesused);
-            if (send_all(hdr, hl) == 0 && send_all(map[b.index], b.bytesused) == 0) got = 0;
+            if (send_payload_all(hdr, hl, map[b.index], b.bytesused) == 0) got = 0;
         } else {
             ioctl(fd, VIDIOC_QBUF, &b);
         }
@@ -1334,7 +1352,7 @@ static void vf_draw(const uint8_t *src) {
 static void vf_frame(void) {
     struct v4l2_buffer b = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP };
     if (ioctl(vf_fd, VIDIOC_DQBUF, &b) < 0) { if (errno != EAGAIN) { sendf("e viewfinder: DQBUF: %s\n", strerror(errno)); vf_stop(); } return; }
-    if (vf_snap) { char hdr[64]; int hl = snprintf(hdr, sizeof hdr, "f %u %u UYVY %u\n", vf_w, vf_h, b.bytesused); send_all(hdr, hl); send_all(vf_map[b.index], b.bytesused); vf_snap = 0; }
+    if (vf_snap) { char hdr[64]; int hl = snprintf(hdr, sizeof hdr, "f %u %u UYVY %u\n", vf_w, vf_h, b.bytesused); send_payload_all(hdr, hl, vf_map[b.index], b.bytesused); vf_snap = 0; }
     if (mode == M_REMOTE && now_ms() >= vf_next) { vf_draw(vf_map[b.index]); vf_next = now_ms() + vf_interval; }
     ioctl(vf_fd, VIDIOC_QBUF, &b);
 }
@@ -1409,7 +1427,7 @@ static void imu_poll(void) {
     else if (imu_quiet_ms >= 5000) { imu_rot = 0; imu_quiet_ms = 0; }
 }
 
-static int send_all(const void *buf, size_t len);
+static int send_payload_all(const char *hdr, size_t hl, const void *buf, size_t len);
 
 /* ---- voice: capture and playback through ALSA in the Alpine chroot ------------------
  * The mic is one arecord (hw:0,1, 96 kHz S32 stereo, the DMIC's only mode) downmixed and
@@ -1480,7 +1498,9 @@ static void turn_vad(double rms) {
     if (rms > start) { cap_speech = 1; cap_last_voice = now_ms(); }
     else if (cap_speech && rms < end && now_ms() - cap_last_voice > 800) cap_speech = 2;   /* trailing silence done */
 }
-static void chunk_send(const int16_t *pcm, int n) { if (nhubs && n > 0) { sendf("a %d\n", n * 2); send_all(pcm, n * 2); } }
+/* header and payload through one atomic path: sendf dropping the `a` line for a momentarily full
+ * hub while the payload still went out desynced that hub's parser */
+static void chunk_send(const int16_t *pcm, int n) { if (nhubs && n > 0) { char h[24]; int hl = snprintf(h, sizeof h, "a %d\n", n * 2); send_payload_all(h, hl, pcm, n * 2); } }
 /* a 100 ms chunk is complete (or a turn ends on a partial one): to the clients during a turn, else to the detector */
 static void chunk_ready(void) {
     if (!cap_outn) return;
@@ -1743,7 +1763,7 @@ int main(int argc, char **argv) {
             if (!pf[ihub + hi].revents) continue;
             struct hub *h = &hubs[hi];
             ssize_t r = read(h->fd, h->inbuf + h->inlen, sizeof h->inbuf - 1 - h->inlen);
-            if (r <= 0) { hub_drop(hi); break; }                      /* table changed: re-poll */
+            if (r <= 0) { hub_drop(hi, r == 0 ? "closed" : "read error"); break; }   /* table changed: re-poll */
             h->inlen += r; cur_hub = h;
             for (;;) {
                 if (h->bin_need) {                                    /* W payload: PCM for the speaker */
