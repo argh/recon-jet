@@ -5,7 +5,7 @@ import { stack, fakeMode, settle } from './helpers.js';
 import { readState } from '../src/modules/modes/state.js';
 import { ShellMode } from '../src/modes/shell/index.js';
 
-test('shell: enter sends M shell; leaving is pure menu nav (switcher opens, nothing re-entered); reselect returns to the pty; never persisted', async (t) => {
+test('shell: enter sends M shell; leaving concludes (the menu is the screen); never persisted', async (t) => {
   const s = await stack(); t.after(s.stop);
   const shell = Object.assign(new ShellMode(), { modes: s.modes, ui: s.ui, deviceLink: s.link });
   s.modes.register(fakeMode('log')).register(fakeMode('system'));
@@ -20,19 +20,21 @@ test('shell: enter sends M shell; leaving is pure menu nav (switcher opens, noth
   s.link.mode = 'shell'; s.link.emit('mode', 'shell'); await settle();
   assert.equal(s.modes.current, shell, 'jetd drawing: still the current mode');
   s.link.mode = 'remote'; s.link.emit('mode', 'remote'); await settle();
-  assert.equal(s.modes.current, shell, 'no previous mode is re-entered');
+  assert.equal(s.modes.current, null, 'concluded: nothing current, the menu is the screen');
   assert.notEqual(s.modes.switcher, null, 'leaving the shell lands on the menu');
-  s.modes.closeSwitcher();
-  // the backdrop: front returns to the pty, rear is unconsumed (ascends)
-  const sent = s.link.sent.length;
-  assert.equal(shell.onGesture('press:rear'), false, 'rear at the backdrop ascends');
-  assert.equal(shell.onGesture('press:front'), true);
-  assert.equal(s.link.sent.slice(sent).filter((l) => l === 'M shell').length, 1, 'front re-enters the pty');
-  // picking Shell in the switcher while current re-enters too (the reselect hook)
+  assert.equal(s.modes.switcher.item.id, 'shell', 'opened on the mode that ended');
+  let now = 1000;
+  s.k.rearPress(now); now += 500;
+  assert.notEqual(s.modes.switcher, null, 'rear cannot dismiss the menu: nothing to go back into');
+  s.k.frontHold(now); now += 2000;
+  assert.notEqual(s.modes.switcher, null, 'front hold cannot either');
+  s.k.frontPress(now); now += 500; await settle();
+  assert.equal(s.modes.current, shell, 'picking Shell re-enters it');
+  assert.equal(s.modes.switcher, null);
+  assert.equal(s.link.sent.filter((l) => l === 'M shell').length, 2, 'the pty is reopened');
+  // a jetd restart (fresh hello in remote) while the shell is current also concludes
   s.link.mode = 'remote';
-  s.modes.switchTo('shell'); await settle();
-  assert.equal(s.link.sent.filter((l) => l === 'M shell').length, 3, 'reselect sends M shell again');
-  // a jetd restart (fresh hello in remote) while the shell is current also lands on the menu
   s.link.emit('hello', s.link.hello); await settle();
+  assert.equal(s.modes.current, null);
   assert.notEqual(s.modes.switcher, null);
 });

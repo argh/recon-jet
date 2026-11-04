@@ -13,6 +13,11 @@
 // rear in the switcher returns to the mode — so rear-rear-rear always escapes anything. Front
 // hold is the shortcut straight to the switcher from anywhere (and closes it again); swipe
 // up/down moves, front press (or a pad tap) picks. Nothing fires on a release.
+//
+// The switcher is a screen, not an overlay: opening it is navigating out of the mode (modes are
+// modal — nothing shows behind the menu). A mode whose content ends on its own (the shell's pty
+// closed, doom quit) calls `conclude()`: it leaves, nothing is current, and the menu is the
+// screen — rear and front hold cannot dismiss it then, because there is nothing to go back into.
 import { EventEmitter } from 'node:events';
 import { Schema } from '@versionzero/module-manager';
 import { Chooser } from '../ui/chooser.js';
@@ -117,13 +122,29 @@ export class Modes extends EventEmitter {
       this.emit('mode', mode);
       if (persist && !mode.transient) this.saving = writeState(this.stateFile, { mode: id }).then(() => {}, (error) => this.logger?.warn({ error: error.message, file: this.stateFile }, 'state not saved'));
     }
+    this.closeSwitcher();   // a switch from anywhere (voice, code) dismisses the menu: the mode is the screen
     this.ui.requestRender();
     return true;
   }
 
+  /**
+   * The current mode's content ended on its own (the shell's pty was left, doom quit): navigate
+   * out, exactly like ascending a menu — the mode leaves, nothing is current, and the menu is
+   * the screen, opened on the mode that just ended.
+   */
+  conclude(mode) {
+    if (mode !== this.current) return;
+    this.current = null;
+    mode.leave?.();
+    this.logger?.info({ mode: mode.id }, 'mode concluded');
+    this.openSwitcher();
+    if (this.switcher) { this.switcher.select(mode.id); this.switcher.hint = 'swipe: move   front: pick'; }   // also when it was already open
+  }
+
   openSwitcher() {
     if (this.switcher) return;
-    this.switcher = new Chooser({ title: 'MODE', items: this.list.map((m) => { const why = m.unavailable?.() ?? null; return { id: m.id, label: why ? `${m.label ?? m.id}  ${why}` : m.label ?? m.id, disabled: !!why }; }), hint: 'swipe: move   front: pick   rear: cancel' });
+    // no current mode (a concluded one): rear has nowhere to go back to, so the hint omits it
+    this.switcher = new Chooser({ title: 'MODE', items: this.list.map((m) => { const why = m.unavailable?.() ?? null; return { id: m.id, label: why ? `${m.label ?? m.id}  ${why}` : m.label ?? m.id, disabled: !!why }; }), hint: this.current ? 'swipe: move   front: pick   rear: cancel' : 'swipe: move   front: pick' });
     if (this.current) this.switcher.select(this.current.id);
     this.logger?.info('switcher open');
     this.emit('switcher', true);
@@ -139,13 +160,13 @@ export class Modes extends EventEmitter {
 
   #onGesture(gesture) {
     if (this.deviceLink.mode !== 'remote') return;   // jetd's own screens keep their keys
-    if (gesture === 'hold:front') { if (this.switcher) this.closeSwitcher(); else this.openSwitcher(); return; }
+    if (gesture === 'hold:front') { if (!this.switcher) this.openSwitcher(); else if (this.current) this.closeSwitcher(); return; }
     if (this.switcher) {
       switch (gesture) {
         case 'swipe:up': this.switcher.move(-1); break;
         case 'swipe:down': this.switcher.move(1); break;
         case 'press:front': case 'press:tap': { const it = this.switcher.item; if (it?.disabled) return; this.closeSwitcher(); if (it) this.switchTo(it.id); return; }
-        case 'press:rear': this.closeSwitcher(); return;
+        case 'press:rear': if (this.current) this.closeSwitcher(); return;   // with nothing current (a concluded mode) the menu is the screen: nowhere to go back to
         default: return;
       }
       this.ui.requestRender();
@@ -162,10 +183,11 @@ export class Modes extends EventEmitter {
     this.ui.requestRender();
   }
 
-  /** The system layer's root: the current mode (the boot mode until one is entered), then the switcher. */
+  /** The system layer's root: the menu when it is open (a screen of its own, the surface already
+   *  cleared by the ui), else the current mode (the boot mode until one is entered). */
   render(surface) {
+    if (this.switcher) { this.switcher.render(surface); return; }
     const mode = this.current ?? this.get(this.bootMode) ?? this.list[0];
     try { mode?.render(surface); } catch (error) { this.logger?.warn({ error: error.message, mode: mode?.id }, 'render failed'); }
-    this.switcher?.render(surface);
   }
 }

@@ -4,9 +4,9 @@
 // The switcher still works: while it is open doom is frozen (SIGUSR1: paused, not drawing or
 // sounding, keys discarded) and the ui paints over its last frame; closing the switcher resumes
 // it (SIGUSR2), picking another mode kills it (SIGTERM) — modes are modal, nothing runs behind
-// the menu. doom ending by itself (Esc > Quit) is pure menu navigation like everywhere else:
-// this mode stays current (showing "not running") and the switcher opens over it; a crash shows
-// the reason and rear ascends. Without the binary or the IWAD
+// the menu. doom ending by itself (Esc > Quit) concludes the mode like any content that exits:
+// the menu is the screen, nothing current under it, and picking Doom again relaunches. A crash
+// shows the reason and rear ascends. Without the binary or the IWAD
 // (not in the repo: device/doom/README.md) the switcher lists Doom disabled with what is missing.
 // Never persisted as the start mode.
 import { spawn } from 'node:child_process';
@@ -56,7 +56,7 @@ export class DoomMode {
 
   enter() { this.error = null; this.#launch(); }
   leave() { this.#kill(); this.ui.suspend(false); }
-  /** Picking Doom in the menu while this mode is current (it quit underneath): run it again. */
+  /** Picking Doom in the menu while this mode is still current (its crash screen shows): run it again. */
   reselect() { if (!this.child) { this.error = null; this.#launch(); } }
 
   /** doom has the keys (from jetd) while it runs; with it gone, rear ascends to the menu. */
@@ -96,8 +96,8 @@ export class DoomMode {
       this.ui.suspend(false);
       this.logger?.info({ code, signal, tail: this.tail.slice(-3) }, 'doom ended');
       if (this.modes.current !== this) return;
-      // pure menu navigation: a clean quit lands on the menu over this mode's "not running"
-      if (code === 0 || signal === 'SIGTERM') this.modes.openSwitcher();
+      // a clean quit concludes the mode: the menu is the screen (a crash keeps the mode, showing why)
+      if (code === 0 || signal === 'SIGTERM') this.modes.conclude(this);
       else this.#failed(`doom ended (${signal ?? `exit ${code}`}): ${this.tail.at(-1) ?? ''}`);
     });
   }

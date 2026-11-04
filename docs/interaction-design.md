@@ -26,8 +26,8 @@ Global, identical in every mode:
 
 | Gesture | Meaning |
 |---|---|
-| front hold (~1 s) | mode switcher (full-screen list, chooser style); hold again or rear closes it |
-| rear press | back, ascending one tree: close the top overlay, leave a sub-screen; at a mode's root it opens the mode switcher, and in the switcher it returns to the mode — rear-rear-rear always escapes |
+| front hold (~1 s) | mode switcher — a screen of its own, not an overlay (modes are modal: nothing shows behind the menu); hold again or rear returns to the mode |
+| rear press | back, ascending one tree: close a menu, leave a sub-screen; at a mode's root it opens the mode switcher, and in the switcher it returns to the mode — rear-rear-rear always escapes. A mode whose content ended (shell left, doom quit) has concluded: the menu is the screen then, and rear has nowhere further to go |
 | rear hold | never used (PMIC power path) |
 
 Inside a mode (the mode decides, but these defaults keep modes consistent):
@@ -47,8 +47,10 @@ places that look alike.
 
 - Full-screen mode content, plus a 10 px status strip the system layer may draw along the top:
   link state, charging bolt, listening/looking indicator, transient notices (3 s, then gone).
-- Overlays (mode switcher, menus, confirmations) are chooser-style boxes: 2 px border, title in
-  yellow, selected row as a filled green bar with black text, hint line at the bottom.
+- Menus (the mode switcher, in-mode menus, confirmations) are chooser-style boxes: 2 px border,
+  title in yellow, selected row as a filled green bar with black text, hint line at the bottom.
+  The mode switcher draws alone on a cleared screen: opening it is navigating out of the mode,
+  not popping something up over it.
 - Two fonts: 10x20 bold for headings and the one thing that matters, 6x12 for detail. Colour
   carries meaning: green = selected/active/ok, yellow = title/attention, red = problem, grey = hint.
 - Nothing jitters: numbers are smoothed and rounded before display; animation only for
