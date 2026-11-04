@@ -108,6 +108,7 @@ export class Modes extends EventEmitter {
     if (!mode) return false;
     const why = mode.unavailable?.();
     if (why) { this.logger?.info({ mode: id, why }, 'mode unavailable'); return false; }
+    if (mode === this.current) mode.reselect?.();   // picking the current mode again: an opt-in re-entry (the shell reopens its pty view)
     if (mode !== this.current) {
       this.current?.leave?.();
       this.current = mode;
