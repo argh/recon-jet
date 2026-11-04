@@ -33,7 +33,7 @@ to finish), `docs/recovery.md` (every way back; why nothing here bricks), `docs/
               (fb0 + panel update, keys from jetd), `i_jetsound.c` (sfx mixer into aplay), `opl_jet.c` (driver for
               Chocolate Doom's OPL music player, fetched to `refs/chocolate-doom`); `build.sh`, `deploy.sh`.
 - `host/`     the `jet` CLI, never in the runtime path (the device needs nothing on a Mac): a
-              one-shot jetd client (`jet state|snapshot|log|events|console|mode|backlight|raw|live`),
+              one-shot jetd client (`jet state|snapshot|screenshot|log|events|console|mode|backlight|raw|live`),
               structured with @versionzero/module-manager (one command module per file). Inert by
               default: attaching never disturbs jet-app. See `host/README.md`.
 - `tools/`    static ARM helpers (`regdump` /dev/mem dumper, `reboot2`, `fbfill`, `wdt`, `su`),

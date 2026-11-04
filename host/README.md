@@ -14,7 +14,8 @@ anything that changes device state, because that is what you asked for.
 ```
 cd host && npm install           # @versionzero/module-manager + configurator + schema (public npm)
 node jet.js state                # hello geometry, pong RTT, glance, wear, power snapshot (--json)
-node jet.js snapshot [out.png]   # camera frame -> PNG (the glass as shown: tools/jetshot.sh)
+node jet.js snapshot [out.png]   # camera frame -> PNG
+node jet.js screenshot [out.png] # the glass as shown, assembled from the mirror
 node jet.js log [-n N] [--follow]
 node jet.js events               # stream key/motion/mode/glance/wear/view events (Ctrl-C exits)
 node jet.js console $'uname -a\n'  # type into the on-device shell pty

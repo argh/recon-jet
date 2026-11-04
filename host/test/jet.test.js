@@ -170,6 +170,7 @@ test('live serves the page, bridges mirror rects over WS, and round-trips an inj
         if (buf.length < 2) return;
         const op = buf[0] & 15; let len = buf[1] & 0x7f, off = 2;
         if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); off = 4; }
+        else if (len === 127) { if (buf.length < 10) return; len = Number(buf.readBigUInt64BE(2)); off = 10; }
         if (buf.length < off + len) return;
         const payload = buf.subarray(off, off + len); buf = buf.subarray(off + len);
         if (op === 1) {
@@ -189,4 +190,17 @@ test('live serves the page, bridges mirror rects over WS, and round-trips an inj
   child.kill('SIGINT');
   const { code } = await done;
   assert.equal(code, 0);
+}));
+
+test('screenshot assembles the mirror refresh into a PNG', () => withFake(async (fake, flags) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jet-screen-'));
+  try {
+    const out = path.join(dir, 'glass.png');
+    const { code, stdout } = await run([...flags, 'screenshot', out]);
+    assert.equal(code, 0);
+    assert.match(stdout, /glass\.png/);
+    const png = await readFile(out);
+    assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
+    assert.ok(fake.received.includes('N 1') && fake.received.includes('N 0'), 'subscribes and unsubscribes');
+  } finally { await rm(dir, { recursive: true, force: true }); }
 }));

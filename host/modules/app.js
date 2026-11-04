@@ -4,6 +4,7 @@
 import { Schema } from '@versionzero/module-manager';
 import { StateCommand } from './state.js';
 import { SnapshotCommand } from './snapshot.js';
+import { ScreenshotCommand } from './screenshot.js';
 import { LogCommand } from './log.js';
 import { EventsCommand } from './events.js';
 import { ConsoleCommand } from './console.js';
@@ -25,6 +26,7 @@ export class JetApp {
     register: [
       { ModuleClass: StateCommand, relative: true },
       { ModuleClass: SnapshotCommand, relative: true },
+      { ModuleClass: ScreenshotCommand, relative: true },
       { ModuleClass: LogCommand, relative: true },
       { ModuleClass: EventsCommand, relative: true },
       { ModuleClass: ConsoleCommand, relative: true },
