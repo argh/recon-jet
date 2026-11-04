@@ -30,7 +30,7 @@ export class DoomMode {
   };
   command; args; dataDir; returnTo; modes; ui; sounds; actions; logger;
 
-  id = 'doom'; label = 'Doom'; transient = true;
+  id = 'doom'; label = 'Doom'; ownsPanel = true;   // a native program draws: no overlays make sense here transient = true;
   /** @type {import('node:child_process').ChildProcess|null} */ child = null;
   /** @type {string|null} why the last run ended badly */ error = null;
   /** @type {string[]} the last lines doom printed */ tail = [];

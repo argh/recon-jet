@@ -43,7 +43,11 @@ export class ShellMode {
     const id = this.previous && this.previous !== this.id ? this.previous : this.returnTo;
     this.logger?.info({ to: id }, 'shell closed');
     if (!this.modes.switchTo(id)) this.modes.switchTo(this.modes.list.find((m) => m !== this)?.id);
-    this.modes.openSwitcher();   // leaving the shell is an ascent: land on the menu (rear or a pick dismisses)
+    // leaving the shell is an ascent: land on the menu — unless the restored mode owns the panel
+    // (doom: the ui suspends once its child draws, so a switcher over it cannot repaint — swipes
+    // go dark and presses pick blind; returning to the game IS the destination, and its own exit
+    // is the front hold). `ownsPanel` is the mode's declaration; `ui.suspended` the live state.
+    if (!this.modes.current?.ownsPanel && !this.ui.suspended) this.modes.openSwitcher();
   }
 
   onGesture() { return true; }   // jetd has the keys while its shell shows; nothing to do here
