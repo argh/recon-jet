@@ -27,8 +27,13 @@ the picture converges on current content no matter what was dropped. jetd accept
 clients, so the mirror rides alongside jet-app and a debug session.
 
 Audio comes along for free: capture chunks (`a`, 16 kHz mono) were always broadcast to every
-client, and the mirror adds a tee of queued speaker PCM (`u`, 48 kHz stereo) — the page hears
-both sides of a voice turn. Input goes the other way with `H k <code> <val>` (pod buttons,
+client, and the mirror adds a tee of queued speaker PCM (`u`, 48 kHz stereo, whole sample
+frames — a carry keeps TCP's arbitrary slicing out of the framing) — the page hears both sides
+of a voice turn, every UI cue, and Doom's soundtrack (doom streams its mixer into jetd's `W`
+too; jetd is the one speaker owner). The page plays it all through a single AudioWorklet ring
+(48 kHz context, ~100 ms prebuffer, re-armed only by a sustained gap), and a stat line by the
+sound toggle (`rx/played/out/ctx`, underruns, minimum buffer) tells the truth when something
+sounds wrong — it found every bug in this path. Input goes the other way with `H k <code> <val>` (pod buttons,
 real press/release so holds and the chooser work), `H r <dx> <dy>` (one summed pad gesture,
 exactly what the touchpad driver emits) and `H t <code> <val>` (keyboard keys through the
 BT-keyboard path — shell typing, modifiers, Ctrl+Alt+Enter — which the page's "keyboard"
