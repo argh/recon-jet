@@ -58,7 +58,10 @@ places that look alike.
 
 A mode is a plugin: `{ id, label, enter(ctx), leave(), onGesture(g), render(surface), tick() }`
 registered with the mode registry (module-manager module; private modes register from
-`personal/`). The switcher lists registered modes in registration order; the first registered
+`personal/`). The System screens repeat the pattern inside their mode: `Screen`-providing modules
+in a configurable array, with an enter/leave lifecycle from the mode and their own model
+subscriptions - the mode never relays events into a child. The switcher lists registered modes in
+registration order; the first registered
 is the default unless `ui.defaultMode` says otherwise; the last used mode is persisted on the
 device (`mainline/jet-app-state.json`) and restored at boot.
 
@@ -68,7 +71,7 @@ Shipped (public):
 |---|---|
 | Log | kernel log from jetd's `j` stream with scrollback and horizontal offset; the first thing shown after boot; also the crash diagnostics view |
 | Demo | a small, readable example others extend: clock, sensor readouts, camera thumbnail, "front press = describe what I see" through the configured LLM |
-| System | Status (power, link, addresses, sensors), Pad calibration, Glance calibration, Brightness, Power (live PMIC), Network (addresses, WiFi state), About (versions); also runs as the first-use wizard |
+| System | a menu of screens: Status (power, link, addresses, radios, sensors, versions), Pad calibration, Glance calibration, Brightness, Wear, Bluetooth, Location; also runs as the first-use wizard. Screens are plugins like modes one level down: modules providing `Screen`, each owning its dependencies, listed (and extended from `personal/`) by the configurable `systemMode.screens` array; a screen is told enter/leave and watches its own models only while showing |
 | Assistant | push-to-talk: front press to talk (the only mode where a press starts a voice turn); transcript and answer on the glass; audio out |
 
 Private (examples of what `personal/` adds; not in the repo):
@@ -109,6 +112,13 @@ the status strip shows text notices and the voice/look indicator but no link/cha
 Assistant (voice) and Demo (describe) run against the inference server from the device over
 WiFi (`llm.base`); the Mac-side voice session is retired, so the glasses work with no host
 attached once the WiFi and `llm.base` are configured.
+
+2026-11-04: spoken side effects are observers, not control flow. "Check my location" is an
+observable fix pursuit on the gps module (acquiring → fixed | timeout) that the screens draw and
+the voice layer narrates through announcements; a new user turn supersedes pending announcements
+(their lines are dropped unless registered with `queue: true`, which holds them until the turn is
+over) - so asking something else mid-hunt wins, and the stale fix report never interrupts the
+answer.
 
 ## Open questions
 
