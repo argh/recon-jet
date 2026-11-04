@@ -60,3 +60,6 @@ export function paragraph(s, x, y, w, h, text, { colour = C.white } = {}) {
   rows.slice(0, max).forEach((r, i) => s.text(x, y + i * font.height, r, { font, colour }));
   return Math.min(rows.length, max);
 }
+
+/** A screen title with the wizard progress ("pad calibration  2 of 3") while the wizard runs. */
+export const stepTitle = (title, wizard) => (wizard ? `${title}  ${wizard.n} of ${wizard.of}` : title);

@@ -5,11 +5,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { stack, fakeMode, fakeLink, fakeSounds, settle, tmpdir } from './helpers.js';
+import { stack, fakeMode, fakeLink, fakeSounds, buildSystem, settle, tmpdir } from './helpers.js';
 import { readState, writeState } from '../src/modules/modes/state.js';
 import { AssistantMode } from '../src/modes/assistant/index.js';
 import { DemoMode } from '../src/modes/demo/index.js';
-import { SystemMode } from '../src/modes/system/index.js';
+
 
 test('modes: the boot mode shows until begin(); the first registered mode is the fallback start', async (t) => {
   const s = await stack(); t.after(s.stop);
@@ -128,8 +128,9 @@ test('modes: a front press starts a voice turn in Assistant only; Demo looks, Sy
     startTurn() { calls.push('startTurn'); this.state = 'listening'; return true; }, cancel() { calls.push('cancel'); const was = this.state !== 'idle'; this.state = 'idle'; return was; }, clear() {},
     async look(jpg, q, { onToken }) { calls.push(`look ${jpg.length > 100 ? 'jpeg' : 'small'}`); onToken('seen'); return 'seen'; } });
   const dir = tmpdir('jet-sys-');
-  const system = Object.assign(new SystemMode(), { ofmArgsFile: path.join(dir, 'ofm-args'), ofmSysfs: dir, glanceFile: path.join(dir, 'glance'), iioDir: dir, backlightFile: path.join(dir, 'backlight'), backlightSysfs: path.join(dir, 'brightness'), netDir: dir, deviceConfig: path.join(dir, 'jet-app.json'), wear: { enabled: false, lit: true, setEnabled() {} }, modes: s.modes, ui: s.ui, input: s.input, power: s.power, sensors: s.sensors, deviceLink: s.link, sounds: fakeSounds() });
-  fs.writeFileSync(system.ofmArgsFile, 'thr_x=20 thr_y=20\n'); fs.writeFileSync(system.glanceFile, '180 197\n');
+  const paths = { ofmArgsFile: path.join(dir, 'ofm-args'), ofmSysfs: dir, glanceFile: path.join(dir, 'glance'), iioDir: dir, backlightFile: path.join(dir, 'backlight'), backlightSysfs: path.join(dir, 'brightness'), netDir: dir, btMarker: path.join(dir, 'bt') };
+  const system = buildSystem({ paths, wear: { enabled: false, lit: true, setEnabled() {} }, modes: s.modes, ui: s.ui, input: s.input, power: s.power, sensors: s.sensors, deviceLink: s.link, sounds: fakeSounds() });
+  fs.writeFileSync(paths.ofmArgsFile, 'thr_x=20 thr_y=20\n'); fs.writeFileSync(paths.glanceFile, '180 197\n');
   const demo = Object.assign(new DemoMode(), { question: 'what?', jpegQuality: 50, modes: s.modes, ui: s.ui, surface: s.surface, deviceLink: s.link, power: s.power, sensors: s.sensors, voice, sounds: fakeSounds() });
   const assistant = Object.assign(new AssistantMode(), { modes: s.modes, ui: s.ui, voice });
   await system.start(); await demo.start(); await assistant.start();
@@ -145,7 +146,7 @@ test('modes: a front press starts a voice turn in Assistant only; Demo looks, Sy
   calls.length = 0;
   s.k.frontPress(now); now += 500;
   assert.deepEqual(calls, [], 'front press in System opens a screen, no voice');
-  assert.equal(system.screen, system.screens.status);
+  assert.equal(system.screen, system.getScreen('status'));
   s.k.rearPress(now); now += 500;
   assert.equal(system.screen, null, 'rear returns to the System menu');
   s.k.rearPress(now); now += 500;

@@ -1,26 +1,39 @@
-// Location: the GPS receiver on or off, and what it sees. GPS lives in the same combo chip as
-// Bluetooth and rides its UART, so turning it on powers that radio too (scripts/gps.sh does the
-// bring-up: chroot mounts, hci0 up, TI's navd from the stock partition - docs/gps.md); while it
-// runs, WiFi rx is slow (coex untuned). The gps module follows the NMEA stream while on: this
-// screen shows satellites, fix and position live (and keeps the capture at gps.logFile for
-// later). Front toggles ("heya jet, enable gps" too); off stops the daemon and powers the radio
-// back down unless Bluetooth is set to be on. No boot persistence yet: GPS starts off.
-import { execFile } from 'node:child_process';
-import fs from 'node:fs/promises';
+// Location: a view over the gps module - the receiver on or off, and what it sees. The module
+// owns the mechanics (daemon, radio interplay, NMEA snapshot, local time); this screen shows
+// satellites, fix and position live while showing (subscribed to the module itself), and offers
+// the two switches: front toggles the selected one ("heya jet, enable gps" lands on the first),
+// swipe selects gps / local-time.
+import { Schema } from '@versionzero/module-manager';
 import { C, TOP, heading, row, hint } from '../../modules/ui/style.js';
 
+const s = Schema.create;
+
 export class LocationScreen {
-  /** @param {import('./index.js').SystemMode} sys */
-  constructor(sys) { this.sys = sys; }
-  /** @type {boolean|null} navd seen running (null until the first probe) */ running = null;
+  static moduleInfo = {
+    name: 'location-screen',
+    provides: 'Screen',
+    schema: s()
+      .property('gps', s('Gps').meta('internal', true))
+      .property('ui', s('Ui').meta('internal', true)),
+  };
+  gps; ui;
+
+  id = 'location'; label = 'Location';
   error = null; busy = false;
   #ticks = 0;
   #sel = 0;   // 0 = the gps switch, 1 = the local-time switch (swipe selects, front toggles)
+  #onUpdate = () => this.ui.requestRender();
 
-  enter() { this.#ticks = 0; this.probe().then(() => this.sys.ui.requestRender()); }
-  tick() { if (++this.#ticks % 5 === 0) this.probe().then(() => this.sys.ui.requestRender()); }
+  enter() {
+    this.#ticks = 0;
+    this.gps.on('update', this.#onUpdate);   // the readout follows the receiver while showing
+    this.gps.probe().then(() => this.ui.requestRender());
+  }
+  leave() { this.gps.off('update', this.#onUpdate); }
+  tick() { if (++this.#ticks % 5 === 0) this.gps.probe().then(() => this.ui.requestRender()); }
+
   onGesture(g) {
-    if (g === 'swipe:up' || g === 'swipe:down') { this.#sel = this.#sel ? 0 : 1; this.sys.ui.requestRender(); return true; }
+    if (g === 'swipe:up' || g === 'swipe:down') { this.#sel = this.#sel ? 0 : 1; this.ui.requestRender(); return true; }
     if (g === 'press:front' || g === 'press:tap') {
       if (this.#sel === 0) this.toggle().catch(() => {});
       else this.toggleLocalTime().catch(() => {});
@@ -31,52 +44,25 @@ export class LocationScreen {
 
   /** Local time from the fix, or GMT — the gps module owns the mechanics (TZ + /etc/localtime). */
   async toggleLocalTime() {
-    const gps = this.sys.gps; if (!gps) return;
+    const gps = this.gps;
     await gps.setLocalTime(!gps.localTime);
-    this.sys.ui.setStrip(gps.localTime ? (gps.tz ? `local time: ${gps.tz}` : 'local time: waiting for a fix') : 'clocks on GMT', { ms: 2500 });
-    this.sys.ui.requestRender();
+    this.ui.setStrip(gps.localTime ? (gps.tz ? `local time: ${gps.tz}` : 'local time: waiting for a fix') : 'clocks on GMT', { ms: 2500 });
+    this.ui.requestRender();
   }
 
-  /** Is the GPS daemon up? (pgrep: exit 1 just means no.) The gps module follows the answer. */
-  async probe() {
-    this.running = await run('pgrep', ['navd']).then(() => true, () => false);
-    if (this.running && !this.sys.gps?.listening) this.sys.gps?.listen();
-    if (this.running === false && this.sys.gps?.listening) this.sys.gps?.stopListening();
-    return this.running;
-  }
+  toggle() { return this.set(!this.gps.running); }
 
-  toggle() { return this.set(!this.running); }
-
-  /** GPS on or off, live. Rejects, after showing why, when it cannot: a spoken command reports that. */
+  /** GPS on or off, through the module. Rejects, after showing why, when it cannot: a spoken command reports that. */
   async set(on) {
     if (this.busy) return;
-    this.busy = true; this.error = null; this.sys.ui.requestRender();
+    this.busy = true; this.error = null; this.ui.requestRender();
     let failed = null;
     try {
-      if (on) { await run('sh', [this.sys.gpsScript, 'start'], 30000); this.sys.gps?.listen(); }
-      else {
-        // end the fix session at the chip first (killing the daemon leaves it streaming, which
-        // keeps the shared radio busy and strangles WiFi), then stop the daemon
-        await this.sys.gps?.stopSession();
-        this.sys.gps?.stopListening();
-        await run('sh', [this.sys.gpsScript, 'stop'], 10000);
-        const btWanted = await fs.access(this.sys.btMarker).then(() => true, () => false);
-        if (!btWanted) {
-          await run('bluetoothctl', ['power', 'off']).catch(() => {});   // radio down powers the chip off
-          await run('hciconfig', ['hci0', 'down']).catch(() => {});      // belt and suspenders
-          await run('wpa_cli', ['-i', 'wlan0', 'reassociate']).catch(() => {});   // the coex rate stays pinned at 1 Mbit/s until a reassociate
-        }
-      }
-      this.running = on;
-      this.sys.logger?.info({ on }, 'gps');
-      this.sys.ui.setStrip(`gps ${on ? 'on' : 'off'}`, { colour: on ? C.warn : C.ok, ms: 2000 });
-    } catch (error) {
-      failed = error; this.error = error.message;
-      this.sys.logger?.warn({ error: error.message }, 'gps toggle failed');
-      await this.probe().catch(() => {});
-    }
+      await this.gps.set(on);
+      this.ui.setStrip(`gps ${on ? 'on' : 'off'}`, { colour: on ? C.warn : C.ok, ms: 2000 });
+    } catch (error) { failed = error; this.error = error.message; }
     this.busy = false;
-    this.sys.ui.requestRender();
+    this.ui.requestRender();
     if (failed) throw failed;
   }
 
@@ -84,9 +70,9 @@ export class LocationScreen {
     heading(s, 'location');
     let y = TOP + 26;
     if (this.error) y = row(s, y, 'error', this.error, C.bad);
-    const on = this.running === true, g = this.sys.gps?.state, gps = this.sys.gps;
-    y = row(s, y, `${this.#sel === 0 ? '> ' : '  '}gps`, this.busy ? 'switching...' : this.running == null ? '-' : on ? 'ON  (WiFi rx degraded)' : 'off', this.busy ? C.dim : on ? C.warn : C.ok);
-    const lt = gps?.localTime;
+    const gps = this.gps, g = gps.state, on = gps.running === true;
+    y = row(s, y, `${this.#sel === 0 ? '> ' : '  '}gps`, this.busy ? 'switching...' : gps.running == null ? '-' : on ? 'ON  (WiFi rx degraded)' : 'off', this.busy ? C.dim : on ? C.warn : C.ok);
+    const lt = gps.localTime;
     y = row(s, y, `${this.#sel === 1 ? '> ' : '  '}local time`, lt ? (gps.tz || 'waiting for a fix') : 'off (clocks on GMT)', lt ? (gps.tz ? C.ok : C.warn) : C.dim);
     if (on && g) {
       const stale = !g.at || Date.now() - g.at > 5000;
@@ -101,9 +87,7 @@ export class LocationScreen {
     y += 4;
     if (!on) y = row(s, y, 'receiver', 'in the radio chip; GPS on powers Bluetooth\'s radio too', C.dim);
     if (!g || g.fix === 'none') row(s, y, 'first fix', 'cold start can take minutes under open sky', C.dim);
-    const what = this.#sel === 0 ? `gps ${on ? 'off' : 'on'}` : `local time ${gps?.localTime ? 'off' : 'on'}`;
+    const what = this.#sel === 0 ? `gps ${on ? 'off' : 'on'}` : `local time ${gps.localTime ? 'off' : 'on'}`;
     hint(s, `front: ${what}   swipe: select   rear: menu`);
   }
 }
-
-const run = (cmd, args, timeout = 5000) => new Promise((resolve, reject) => execFile(cmd, args, { timeout }, (error, stdout) => (error ? reject(error) : resolve(stdout))));

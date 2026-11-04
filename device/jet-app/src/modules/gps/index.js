@@ -1,9 +1,13 @@
-// GPS: consume the NMEA stream the TI daemon routes to its FIFO (docs/gps.md) and keep one
-// position snapshot for whoever wants it (the Location screen now, "check my location" later).
-// `listen()` opens the FIFO and follows it, reopening while the daemon restarts; every sentence
-// is also appended raw to `logFile` (on eMMC, so an outdoor test survives WiFi dropping), and
-// fix transitions plus a 30 s satellite summary go to the app log. `stopListening()` keeps the
-// last snapshot, so the screen can still say where the fix was.
+// GPS: the receiver and the position, as one model. GPS lives in the same combo chip as
+// Bluetooth and rides its UART, so `enable()` (scripts/gps.sh: chroot mounts, hci0 up, TI's navd
+// from the stock partition - docs/gps.md) powers that radio too, and `disable()` powers it back
+// down unless the radio module says Bluetooth belongs on; while the daemon runs, WiFi rx is slow
+// (coex untuned). The NMEA stream the daemon routes to its FIFO is kept as one position snapshot
+// for whoever wants it (the Location and Status screens, "check my location"). `listen()` opens
+// the FIFO and follows it, reopening while the daemon restarts; every sentence is also appended
+// raw to `logFile` (on eMMC, so an outdoor test survives WiFi dropping), and fix transitions
+// plus a 30 s satellite summary go to the app log. `stopListening()` keeps the last snapshot,
+// so a screen can still say where the fix was. No boot persistence yet: GPS starts off.
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
 import { execFile } from 'node:child_process';
@@ -12,6 +16,7 @@ import path from 'node:path';
 import { Schema } from '@versionzero/module-manager';
 import { FifoRecords, Responses, basebandStart, fixStart, fixStop, basebandStop, parseComplete, EVENT } from '../../lib/navl.js';
 import { NmeaState } from './nmea.js';
+import { Radio } from '../radio/index.js';
 import { patchLayer } from '../../lib/config.js';
 
 const s = Schema.create;
@@ -30,11 +35,15 @@ export class Gps extends EventEmitter {
       .property('tz', s('string').default('').meta('description', 'last derived IANA zone, persisted so local time survives a reboot without a fix'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'where localTime/tz persist'))
       .property('localtimeFile', s('string').default('/etc/localtime').meta('advanced').meta('description', 'symlink kept pointing at the zone for the shell and friends'))
+      .property('script', s('string').default('/opt/jet-app/scripts/gps.sh').meta('description', 'the GPS bring-up script (start|stop)'))
+      .property('radio', s('Radio').lax().meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
+    register: [Radio],
   };
-  fifo; socket; logFile; retryMs; maxHdop; minSats; localTime; tz; deviceConfig; localtimeFile; logger;
+  fifo; socket; logFile; retryMs; maxHdop; minSats; localTime; tz; deviceConfig; localtimeFile; script; radio; logger;
 
   /** @type {NmeaState} the rolling picture; `state` is its snapshot */ nmea = new NmeaState();
+  /** @type {boolean|null} the daemon seen running (null until the first probe) */ running = null;
   listening = false;
   #fd = null; #retry = null; #log = null; #records = null; #sock = null; #sockRetry = null;
   #emitAt = 0; #summaryAt = 0; #lastFix = 'none'; #tzAt = 0;
@@ -53,8 +62,49 @@ export class Gps extends EventEmitter {
   /** The app may have (re)started while GPS was already on: follow the stream again. */
   async start() {
     this.#applyTz();
-    const running = await new Promise((r) => execFile('pgrep', ['navd'], (e) => r(!e)));
-    if (running) this.listen();
+    await this.probe();
+  }
+
+  // ---- the receiver -----------------------------------------------------------------------------
+  /** Is the GPS daemon up? (pgrep: exit 1 just means no.) The listener follows the answer. */
+  async probe() {
+    this.running = await run('pgrep', ['navd']).then(() => true, () => false);
+    if (this.running && !this.listening) this.listen();
+    if (this.running === false && this.listening) this.stopListening();
+    return this.running;
+  }
+
+  /** Bring the daemon (and the shared radio) up and follow the stream. */
+  async enable() {
+    await run('sh', [this.script, 'start'], 30000);
+    this.running = true;
+    this.listen();
+  }
+
+  /**
+   * Stop the receiver: end the fix session at the chip first (killing the daemon leaves it
+   * streaming, which keeps the shared radio busy and strangles WiFi), then the daemon, then the
+   * radio goes down unless Bluetooth is set to be on. `keepRadio` leaves the radio to the caller
+   * (the radio module stops GPS this way before powering itself off).
+   */
+  async disable({ keepRadio = false } = {}) {
+    await this.stopSession();
+    this.stopListening();
+    await run('sh', [this.script, 'stop'], 10000);
+    this.running = false;
+    if (!keepRadio && !(await this.radio?.wantedAtBoot?.())) await this.radio?.powerDown?.();
+  }
+
+  /** GPS on or off, live ("heya jet, enable gps" and the Location screen land here). */
+  async set(on) {
+    try {
+      if (on) await this.enable(); else await this.disable();
+      this.logger?.info({ on }, 'gps');
+    } catch (error) {
+      this.logger?.warn({ error: error.message }, 'gps toggle failed');
+      await this.probe().catch(() => {});
+      throw error;
+    }
   }
 
   // ---- local time: the system clock stays UTC; only TZ (and /etc/localtime) localise ---------
@@ -209,3 +259,5 @@ export class Gps extends EventEmitter {
     }
   }
 }
+
+const run = (cmd, args, timeout = 5000) => new Promise((resolve, reject) => execFile(cmd, args, { timeout }, (error, stdout) => (error ? reject(error) : resolve(stdout))));

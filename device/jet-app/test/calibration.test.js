@@ -1,9 +1,10 @@
 // Pure calibration arithmetic (matches jetd's setup mode) and the Network screen's parsers.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { padThresholds, ofmArgs, glanceThresholds, glanceFile, backlightStep, PAD_STEPS, GLANCE_STEPS } from '../src/modes/system/calibration.js';
+import { padThresholds, ofmArgs, glanceThresholds, glanceFile, PAD_STEPS, GLANCE_STEPS } from '../src/modes/system/calibration.js';
+import { backlightStep } from '../src/modules/backlight/index.js';
 import { parseIpAddr, parseIwLink } from '../src/modes/system/network.js';
-import { parseShow, parseDevices } from '../src/modes/system/bluetooth.js';
+import { parseShow, parseDevices } from '../src/modules/radio/index.js';
 
 test('pad thresholds: median magnitude per direction, half the weaker direction per axis, clamped 8..60', () => {
   assert.deepEqual(PAD_STEPS.map((s) => s.dir), ['RIGHT', 'LEFT', 'DOWN', 'UP']);

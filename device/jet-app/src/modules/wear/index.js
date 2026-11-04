@@ -13,6 +13,7 @@ import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { Schema } from '@versionzero/module-manager';
 import { readInt, writeIfPresent } from '../../lib/sysfs.js';
+import { patchLayer } from '../../lib/config.js';
 
 const s = Schema.create;
 const FALLBACK_LEVEL = 208;
@@ -27,13 +28,14 @@ export class Wear extends EventEmitter {
       .property('backlightSysfs', s('string').default('/sys/class/backlight/kopin-a230/brightness').meta('description', 'backlight control'))
       .property('backlightFile', s('string').default('/android-data/mainline/backlight').meta('description', 'the saved level, used when the live one cannot be read'))
       .property('led', s('string').default('/sys/class/leds/jet:white:power').meta('description', 'LED class directory pulsed while dark ("" for none)'))
+      .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer, where `enabled` persists'))
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('surface', s('Surface').meta('internal', true))
       .property('input', s('Input').meta('internal', true))
       .property('sounds', s('Sounds').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  enabled; offDelayMs; backlightSysfs; backlightFile; led; deviceLink; surface; input; sounds; logger;
+  enabled; offDelayMs; backlightSysfs; backlightFile; led; deviceConfig; deviceLink; surface; input; sounds; logger;
 
   /** @type {boolean|null} the sensor's last word (null until it has one) */ worn = null;
   /** the display is on (as far as this module is concerned) */ lit = true;
@@ -53,6 +55,14 @@ export class Wear extends EventEmitter {
   async stop() {
     clearTimeout(this.#timer); this.#timer = null;
     if (!this.lit) await this.#light('stop');
+  }
+
+  /** The behaviour on or off, live and persisted into the per-device config layer. The live
+   * change always happens; a failed save throws after it (the screen shows why). */
+  async set(on) {
+    this.setEnabled(on);
+    await patchLayer(this.deviceConfig, { wear: { enabled: on } });
+    this.logger?.info({ on }, 'wear behaviour');
   }
 
   /** Turn the behaviour on or off live; off relights at once. */

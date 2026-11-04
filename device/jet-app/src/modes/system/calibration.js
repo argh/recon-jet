@@ -44,7 +44,3 @@ export function glanceThresholds(reads) {
 
 /** The `mainline/glance` file jetd reads: "on off". */
 export const glanceFile = ({ on, off }) => `${on} ${off}\n`;
-
-/** Backlight steps: 16..1023 by 48 (the kopin-a230 range jetd used). */
-export const BACKLIGHT = { min: 16, max: 1023, step: 48, fallback: 208 };
-export const backlightStep = (level, d) => clamp(level + d * BACKLIGHT.step, BACKLIGHT.min, BACKLIGHT.max);

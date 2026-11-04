@@ -75,3 +75,51 @@ export function fakeMode(id, extra = {}) {
     render(s) { this.rendered++; s.text(6, 40, `mode ${id}`); }, tick() { this.ticks++; }, ...extra };
   return m;
 }
+
+// ---- the System mode, wired by hand -----------------------------------------------------------
+// The screens are DI modules in production (SystemMode's `screens` array of `Screen` providers);
+// here the same instances are assembled directly so behaviour tests control every dependency.
+import { SystemMode } from '../src/modes/system/index.js';
+import { StatusScreen } from '../src/modes/system/status.js';
+import { PadCalScreen } from '../src/modes/system/pad-cal.js';
+import { GlanceCalScreen } from '../src/modes/system/glance-cal.js';
+import { BrightnessScreen } from '../src/modes/system/brightness.js';
+import { WearScreen } from '../src/modes/system/wear.js';
+import { BluetoothScreen } from '../src/modes/system/bluetooth.js';
+import { LocationScreen } from '../src/modes/system/location.js';
+import { Backlight } from '../src/modules/backlight/index.js';
+import { Radio } from '../src/modules/radio/index.js';
+
+/** Stands in for the gps module: the receiver switch and the snapshot, no daemon. */
+export function fakeGps() {
+  return Object.assign(new EventEmitter(), {
+    running: null, listening: false, state: {}, localTime: false, tz: '', calls: [],
+    async probe() { return this.running === true; },
+    goodFix() { return null; },
+    async set(on) { this.calls.push(on); this.running = on; },
+    async setLocalTime(on) { this.localTime = on; },
+    listen() { this.listening = true; }, stopListening() { this.listening = false; },
+  });
+}
+
+/**
+ * The real SystemMode over real screens, every dependency injectable (`paths` for the files).
+ * Returns the mode with `scr(id)` for reaching a screen.
+ */
+export function buildSystem({ paths = {}, ui, input, power, sensors, gps = fakeGps(), radio, backlight, wear, deviceLink = fakeLink(), modes, sounds = fakeSounds(), voice = null, actions = null, logger = null, checkFixS = 180 } = {}) {
+  radio ??= Object.assign(new Radio(), { btMarker: paths.btMarker, gps, logger });
+  backlight ??= Object.assign(new Backlight(), { file: paths.backlightFile, sysfs: paths.backlightSysfs, logger });
+  const screens = [
+    Object.assign(new StatusScreen(), { netDir: paths.netDir, ui, power, sensors, gps, radio }),
+    Object.assign(new PadCalScreen(), { ofmArgsFile: paths.ofmArgsFile, ofmSysfs: paths.ofmSysfs, ui, input, logger }),
+    Object.assign(new GlanceCalScreen(), { glanceFile: paths.glanceFile, iioDir: paths.iioDir, ui, deviceLink, logger }),
+    Object.assign(new BrightnessScreen(), { backlight, ui }),
+    Object.assign(new WearScreen(), { wear, sensors, ui, logger }),
+    Object.assign(new BluetoothScreen(), { radio, ui }),
+    Object.assign(new LocationScreen(), { gps, ui }),
+  ];
+  const sys = Object.assign(new SystemMode(), { screens, checkFixS, modes, ui, gps, voice, sounds, actions, logger });
+  sys.scr = (id) => sys.getScreen(id);
+  sys.backlightModule = backlight; sys.radioModule = radio;
+  return sys;
+}
