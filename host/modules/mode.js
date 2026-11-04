@@ -9,8 +9,8 @@ export class ModeCommand extends Command {
   static moduleInfo = {
     name: 'mode',
     schema: s().meta('description', 'switch the device mode')
-      .property('to', s('string').required().values(['remote', 'log', 'shell', 'setup'])
-        .meta('general').meta('valueDescription', 'remote|log|shell|setup')),
+      .property('to', s('string').required().values(['remote', 'log', 'shell'])
+        .meta('general').meta('valueDescription', 'remote|log|shell')),
   };
   to;
 
