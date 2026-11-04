@@ -81,31 +81,65 @@ function blit(r, dv) {
   ctx.putImageData(img, r.x, r.y);
 }
 
-/* ---- audio: schedule each S16 chunk on a rolling cursor; AudioBuffers resample themselves -- */
+/* ---- audio: one AudioWorklet ring as the single continuous source. Scheduling hundreds of
+   5 ms BufferSources put a sample-rounding click at every chunk boundary — at the tee's ~187
+   chunks/s that is a loud 187 Hz growl over the signal. The context is pinned to 48 kHz so
+   speaker frames map 1:1; mic chunks (16 kHz mono) are linearly upsampled into the same ring. */
 const sound = document.getElementById('sound'), micmon = document.getElementById('micmon');
 const audiostat = document.getElementById('audiostat');
-let actx = null, heard = 0, played = 0, aerr = '';
-const cursor = { 48000: 0, 16000: 0 };
+let actx = null, sink = null, heard = 0, played = 0, aerr = '';
 const astat = () => { audiostat.textContent = `rx ${(heard / 1024) | 0}k played ${(played / 1024) | 0}k ctx ${actx ? actx.state : '-'}${aerr ? ' ERR ' + aerr : ''}`; };
-sound.onchange = () => {
-  try { if (sound.checked && !actx) actx = new AudioContext(); actx?.resume(); } catch (e) { aerr = e.message; }
+const SINK = `class JetSink extends AudioWorkletProcessor {
+  constructor() { super(); this.q = []; this.off = 0; this.buffered = 0; this.started = false;
+    this.port.onmessage = (e) => { this.q.push(e.data); this.buffered += e.data[0].length; }; }
+  process(inputs, outputs) {
+    const out = outputs[0], L = out[0], R = out[1] || out[0], n = L.length;
+    if (!this.started) { if (this.buffered < 4800) return true; this.started = true; }
+    let i = 0;
+    while (i < n && this.q.length) {
+      const [l, r] = this.q[0], take = Math.min(n - i, l.length - this.off);
+      L.set(l.subarray(this.off, this.off + take), i);
+      R.set(r.subarray(this.off, this.off + take), i);
+      i += take; this.off += take; this.buffered -= take;
+      if (this.off === l.length) { this.q.shift(); this.off = 0; }
+    }
+    if (i < n && !this.q.length) this.started = false;   // drained: prebuffer again before the next clip
+    return true;
+  }
+}
+registerProcessor('jet-sink', JetSink);`;
+sound.onchange = async () => {
+  try {
+    if (sound.checked && !actx) {
+      actx = new AudioContext({ sampleRate: 48000 });
+      await actx.audioWorklet.addModule(URL.createObjectURL(new Blob([SINK], { type: 'text/javascript' })));
+      sink = new AudioWorkletNode(actx, 'jet-sink', { outputChannelCount: [2] });
+      sink.connect(actx.destination);
+    }
+    await actx?.resume();
+  } catch (e) { aerr = e.message; }
   astat();
 };
 function play(ab, rate, channels) {
   heard += ab.byteLength;
   try {
-    if (!sound.checked || !actx) return;
-    const whole = ab.byteLength & ~(2 * channels - 1);        // belt: never trip on a sub-frame tail
+    if (!sound.checked || !sink) return;
+    const whole = ab.byteLength & ~(2 * channels - 1);        // never trip on a sub-frame tail
     const s16 = new Int16Array(ab, 0, whole / 2), frames = s16.length / channels;
     if (!frames) return;
-    const buf = actx.createBuffer(channels, frames, rate);
-    for (let c = 0; c < channels; c++) {
-      const ch = buf.getChannelData(c);
-      for (let i = 0; i < frames; i++) ch[i] = s16[i * channels + c] / 32768;
+    let L, R;
+    if (rate === 48000) {
+      L = new Float32Array(frames); R = new Float32Array(frames);
+      for (let i = 0; i < frames; i++) { L[i] = s16[i * channels] / 32768; R[i] = s16[i * channels + (channels - 1)] / 32768; }
+    } else {                                                   // 16 kHz mono mic: upsample x3, linear
+      const up = frames * 3; L = new Float32Array(up);
+      for (let i = 0; i < frames; i++) {
+        const a = s16[i] / 32768, b = s16[Math.min(i + 1, frames - 1)] / 32768;
+        L[i * 3] = a; L[i * 3 + 1] = a + (b - a) / 3; L[i * 3 + 2] = a + 2 * (b - a) / 3;
+      }
+      R = L.slice();
     }
-    const src = actx.createBufferSource(); src.buffer = buf; src.connect(actx.destination);
-    const at = Math.max(actx.currentTime + 0.03, cursor[rate]);
-    src.start(at); cursor[rate] = at + frames / rate;
+    sink.port.postMessage([L, R], [L.buffer, R.buffer]);
     played += ab.byteLength;
   } catch (e) { aerr = e.message; } finally { astat(); }
 }
