@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN for a in udhcpd udhcpc; do ln -sf /bin/busybox /usr/sbin/$a; done && mkdir -p /var/lib/misc /usr/share/udhcpc
 COPY udhcpc-default.script /usr/share/udhcpc/default.script
 RUN chmod 755 /usr/share/udhcpc/default.script
+# colour for the interactive shells (the glass terminal and ssh); --color=auto keeps pipes clean
+COPY bashrc /root/.bashrc
 # the WireGuard auto-VPN hook (docs/vpn.md); init arms it with `wpa_cli -a` when a tunnel conf exists
 COPY wireguard/on-wifi.sh /etc/wireguard/on-wifi.sh
 RUN chmod 755 /etc/wireguard/on-wifi.sh
