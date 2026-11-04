@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       busybox dropbear-bin wpasupplicant iw wireless-tools iproute2 ethtool i2c-tools alsa-utils \
       bluez avahi-daemon libnss-mdns v4l-utils evtest curl ca-certificates xz-utils procps \
-      kmod file less nano vim-tiny mg libatomic1 libstdc++6 openssh-client wireguard-tools \
+      kmod file less nano vim-tiny mg libatomic1 libstdc++6 openssh-client wireguard-tools apt-utils \
     && rm -rf /var/lib/apt/lists/*
 # busybox applets the initramfs init calls inside the chroot (Debian's busybox has no telnetd), and
 # the udhcpc lease hook Debian does not ship
@@ -17,6 +17,8 @@ COPY udhcpc-default.script /usr/share/udhcpc/default.script
 RUN chmod 755 /usr/share/udhcpc/default.script
 # colour for the interactive shells (the glass terminal and ssh); --color=auto keeps pipes clean
 COPY bashrc /root/.bashrc
+# apt on the device is a feature (docs/setup.md): no debconf Dialog attempts on the glass shell
+RUN echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
 # the WireGuard auto-VPN hook (docs/vpn.md); init arms it with `wpa_cli -a` when a tunnel conf exists
 COPY wireguard/on-wifi.sh /etc/wireguard/on-wifi.sh
 RUN chmod 755 /etc/wireguard/on-wifi.sh
