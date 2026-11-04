@@ -117,17 +117,21 @@ reset on purpose because warm resets hang in the stock bootloader about one time
   comes from a paired Bluetooth keyboard (Ctrl+Alt+Enter opens and closes the shell from any
   screen; Alt is Meta; Shift+PgUp pages the scrollback), from the pod (rear = Ctrl-C), or from a
   client over the socket. Keyboards that appear after boot are picked up live; a keyboard's own
-  trackpad is ignored.
+  trackpad is ignored. Rear press exits the shell (a keyboard's Ctrl+C interrupts).
 - **Remote access.** ssh as root over USB (`jet.local` via mDNS on both links) and WiFi, a root
   shell on the USB serial port, telnet in the chroot. No sftp (use `scp -O`). Daemons started
-  from an ssh session must be detached or they die with it.
+  from an ssh session must be detached or they die with it. The `jet` CLI (`host/`) is a
+  one-shot client of jetd's protocol, and **`jet live` mirrors the whole device into a browser**
+  — panel (dirty-rect tee, no encoder), both audio directions, surrogate controls and full
+  keyboard pass-through, riding out link drops by redialing (`docs/live.md`).
 - **Setup.** First use runs a wizard (pad calibration, glance calibration, brightness); the same
   screens plus Power, Network, Bluetooth and About live in the System menu of the application
-  layer. jetd keeps a minimal setup mode and a recovery chooser of its own that only appear when
-  no application is connected, so calibration and a shell are reachable with the application
-  layer dead. Calibration and preferences are plain files under `/android-data/mainline/`
-  (`ofm-args`, `glance`, `backlight`, `bt`, `hub`, `usbnet`, `panel-off`, `camera-off`, `safe`);
-  jetd re-reads them on a `U` command and applies most live.
+  layer — the one menu system. jetd itself keeps only a dead-man chooser (log / shell /
+  bluetooth toggle / reboot) that appears when no client owns the UI, so a shell, the log and a
+  BT keyboard are reachable with the application layer dead; with it alive, every hold and rear
+  press ascends one tree to the app's switcher. Calibration and preferences are plain files
+  under `/android-data/mainline/` (`ofm-args`, `glance`, `backlight`, `bt`, `hub`, `usbnet`,
+  `panel-off`, `camera-off`, `safe`); jetd re-reads them on a `U` command and applies most live.
 
 ## Architecture for adding applications
 
@@ -160,8 +164,10 @@ socket; new functionality is a Node module, not a change to the C daemon.
   visual grammar are fixed by `interaction-design.md` so modes stay consistent.
 - **A native program can own the panel:** a mode spawns it, calls `ui.suspend(true)` and swallows
   gestures; the program talks to jetd itself (`K 1`, `E 1`, keys as `k` lines, frames into fb0 plus
-  the update ioctl, sound as 48 kHz stereo S16 into `aplay`). Doom (`device/doom`) is the worked
-  example, with freeze/resume signals so the switcher can still be used over it.
+  the update ioctl, sound as 48 kHz stereo S16 streamed to jetd's `W` — jetd is the one speaker
+  owner, so the live mirror hears it too). Doom (`device/doom`) is the worked example, with
+  freeze/resume signals so the switcher can still be used over it; it plays, with soundtrack,
+  in a browser via `jet live`.
 - **Configuration and personalisation:** per-device settings (inference server base URL, model
   names, hub hosts) live in `/android-data/mainline/jet-app.json` and flag files, never in the
   repo; the host tools take the same values from environment variables. The goal is that another
