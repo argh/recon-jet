@@ -1,5 +1,5 @@
 // Doom mode: a child process owns the panel; the ui is suspended while it runs, frozen/resumed
-// around the switcher, killed by leaving, and its own exit returns to the previous mode.
+// around the switcher, killed by leaving, and its own exit opens the menu (pure menu navigation).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -21,7 +21,7 @@ async function setup(t, command) {
   const s = await stack(); t.after(s.stop);
   const wad = path.join(s.dir, 'x.wad'); fs.writeFileSync(wad, 'IWAD');
   const actions = { registered: [], register(name, pattern, run) { this.registered.push({ name, pattern, run }); return this; } };
-  const doom = Object.assign(new DoomMode(), { command, args: `-iwad ${wad}`, dataDir: path.join(s.dir, 'doom'), returnTo: 'system', modes: s.modes, ui: s.ui, sounds: fakeSounds(), actions });
+  const doom = Object.assign(new DoomMode(), { command, args: `-iwad ${wad}`, dataDir: path.join(s.dir, 'doom'), modes: s.modes, ui: s.ui, sounds: fakeSounds(), actions });
   s.modes.register(fakeMode('log')).register(fakeMode('system'));
   await doom.start(); t.after(() => doom.stop());
   await s.modes.begin(); await settle();
@@ -58,20 +58,34 @@ test('doom: runs the child with the ui suspended, freezes around the switcher, l
   assert.equal(child.signalCode, 'SIGTERM');
 });
 
-test('doom: quitting by itself returns to the previous mode; a crash shows why and rear returns', async (t) => {
+test('doom: quitting by itself opens the menu over the mode; a crash shows why and rear ascends', async (t) => {
   const { s, doom } = await setup(t, fakeDoom());
   s.modes.switchTo('doom'); await settle();
   await until(() => s.ui.suspended, 'running');
   doom.child.kill('SIGTERM');   // what Esc > Quit amounts to: a clean end not caused by leave()
-  await until(() => s.modes.current.id === 'system', 'back to the previous mode');
+  await until(() => s.modes.switcher, 'the menu opens: pure menu navigation, no previous mode re-entered');
+  assert.equal(s.modes.current, doom, 'doom mode stays current under the menu');
   assert.equal(s.ui.active, true); assert.equal(doom.error, null);
+  let now = 1000;
+  s.k.rearPress(now); now += 500;   // dismiss the menu: the mode's "not running" screen
+  assert.equal(s.modes.switcher, null);
+  s.k.rearPress(now); now += 500;   // rear at the root ascends again
+  assert.notEqual(s.modes.switcher, null);
+  assert.equal(s.modes.switcher.item.id, 'doom', 'the menu opens on the current mode');
+  s.k.frontPress(now); now += 500; await settle();
+  assert.ok(doom.child, 'picking Doom again (still the current mode) relaunches it');
+  doom.child.kill('SIGTERM');
+  await until(() => s.modes.switcher, 'menu again after the second quit');
+  s.k.up(now); now += 500; s.k.frontPress(now); now += 500; await settle();
+  assert.equal(s.modes.current.id, 'system', 'another mode is a menu pick away');
   s.modes.switchTo('doom'); await settle();
   await until(() => s.ui.suspended, 'running again');
   doom.child.kill('SIGKILL');
   await until(() => doom.error, 'crash reported');
   assert.match(doom.error, /SIGKILL/); assert.deepEqual(doom.sounds.played, ['error'], 'a crash is heard'); assert.equal(s.modes.current, doom); assert.equal(s.ui.active, true);
-  s.k.rearPress(1000); await settle();
-  assert.equal(s.modes.current.id, 'system');
+  assert.equal(s.modes.switcher, null, 'a crash shows its screen, not the menu');
+  s.k.rearPress(now); now += 500;
+  assert.notEqual(s.modes.switcher, null, 'rear on the error screen ascends to the menu');
 });
 
 test('doom: without the binary or the WAD the switcher lists it disabled and it cannot be entered', async (t) => {

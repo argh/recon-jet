@@ -56,13 +56,12 @@ export class ShellMode {
     return false;
   }
 
-  /** The instant before jetd takes the panel — or the backdrop after the shell was left. */
+  /** The instant before jetd takes the panel — or, after the shell was left, a truly neutral
+   *  backdrop (black + one hint): modes are modal, nothing pretends to still be showing. */
   render(s) {
+    if (this.deviceLink.connected && this.deviceLink.mode !== 'shell') { hint(s, 'front: shell   rear: menu'); return; }
     heading(s, 'shell');
-    const text = !this.deviceLink.connected ? 'jetd is not connected.'
-      : this.deviceLink.mode === 'shell' ? 'jetd is drawing its shell.'
-      : 'shell suspended (the session is kept).';
-    paragraph(s, 6, TOP + 30, s.width - 12, 120, text, { colour: C.dim });
-    hint(s, this.deviceLink.mode === 'shell' ? 'Ctrl+Alt+Enter, front hold or rear: back' : 'front: shell   rear: menu');
+    paragraph(s, 6, TOP + 30, s.width - 12, 120, this.deviceLink.connected ? 'jetd is drawing its shell.' : 'jetd is not connected.', { colour: C.dim });
+    hint(s, 'Ctrl+Alt+Enter, front hold or rear: back');
   }
 }

@@ -1,10 +1,12 @@
 // Doom mode: runs the native doom binary (device/doom, a doomgeneric port) and gets out of its
 // way. doom is a jetd client of its own: it takes keys over the socket and writes its frames
 // straight into fb0, so while it runs the ui is suspended and this mode swallows every gesture.
-// The switcher still works: while it is open doom is frozen (SIGUSR1: paused, not drawing, keys
-// discarded) and the ui paints over its last frame; closing the switcher resumes it (SIGUSR2),
-// picking another mode kills it (SIGTERM). doom ending by itself (Esc > Quit) returns to the
-// mode showing before; a crash shows the reason and rear returns. Without the binary or the IWAD
+// The switcher still works: while it is open doom is frozen (SIGUSR1: paused, not drawing or
+// sounding, keys discarded) and the ui paints over its last frame; closing the switcher resumes
+// it (SIGUSR2), picking another mode kills it (SIGTERM) — modes are modal, nothing runs behind
+// the menu. doom ending by itself (Esc > Quit) is pure menu navigation like everywhere else:
+// this mode stays current (showing "not running") and the switcher opens over it; a crash shows
+// the reason and rear ascends. Without the binary or the IWAD
 // (not in the repo: device/doom/README.md) the switcher lists Doom disabled with what is missing.
 // Never persisted as the start mode.
 import { spawn } from 'node:child_process';
@@ -21,25 +23,22 @@ export class DoomMode {
       .property('command', s('string').default('/usr/local/bin/doom').meta('description', 'the doom binary (device/doom)'))
       .property('args', s('string').default('-iwad /usr/local/share/doom/DOOM1.WAD').meta('description', 'its arguments, space separated (-stretch fills the glass)'))
       .property('dataDir', s('string').default('/android-data/mainline/doom').meta('description', 'doom runs here: its default.cfg and savegames (it writes to the current directory)'))
-      .property('returnTo', s('string').default('system').meta('description', 'mode to return to when nothing was showing before'))
       .property('modes', s('Modes').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
       .property('sounds', s('Sounds').meta('internal', true))
       .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  command; args; dataDir; returnTo; modes; ui; sounds; actions; logger;
+  command; args; dataDir; modes; ui; sounds; actions; logger;
 
   id = 'doom'; label = 'Doom'; transient = true;
   /** @type {import('node:child_process').ChildProcess|null} */ child = null;
   /** @type {string|null} why the last run ended badly */ error = null;
   /** @type {string[]} the last lines doom printed */ tail = [];
   frozen = false;
-  previous = null;
 
   async start() {
     this.modes.register(this);
-    this.modes.on('mode', (m) => { if (m !== this) this.previous = m.id; });
     this.modes.on('switcher', (open) => this.#switcher(open));
     // "heya jet, run doom" (the ASR hears "random" more often than not): the switcher's refusal
     // (no binary, no WAD) is the error the voice reports
@@ -57,11 +56,13 @@ export class DoomMode {
 
   enter() { this.error = null; this.#launch(); }
   leave() { this.#kill(); this.ui.suspend(false); }
+  /** Picking Doom in the menu while this mode is current (it quit underneath): run it again. */
+  reselect() { if (!this.child) { this.error = null; this.#launch(); } }
 
-  /** doom has the keys (from jetd) while it runs; with it gone, rear leaves the error screen. */
+  /** doom has the keys (from jetd) while it runs; with it gone, rear ascends to the menu. */
   onGesture(g) {
-    if (!this.child && g === 'press:rear') { this.#back(); return true; }
-    return true;
+    if (this.child) return true;
+    return g !== 'press:rear';
   }
 
   render(s) {
@@ -95,7 +96,8 @@ export class DoomMode {
       this.ui.suspend(false);
       this.logger?.info({ code, signal, tail: this.tail.slice(-3) }, 'doom ended');
       if (this.modes.current !== this) return;
-      if (code === 0 || signal === 'SIGTERM') this.#back();
+      // pure menu navigation: a clean quit lands on the menu over this mode's "not running"
+      if (code === 0 || signal === 'SIGTERM') this.modes.openSwitcher();
       else this.#failed(`doom ended (${signal ?? `exit ${code}`}): ${this.tail.at(-1) ?? ''}`);
     });
   }
@@ -109,10 +111,5 @@ export class DoomMode {
     this.frozen = open;
     if (open) { this.child.kill('SIGUSR1'); this.ui.suspend(false); }
     else { this.ui.suspend(true); this.child.kill('SIGUSR2'); }
-  }
-
-  #back() {
-    const id = this.previous && this.previous !== this.id ? this.previous : this.returnTo;
-    if (!this.modes.switchTo(id)) this.modes.switchTo(this.modes.list.find((m) => m !== this)?.id);
   }
 }

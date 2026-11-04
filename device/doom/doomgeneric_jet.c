@@ -195,9 +195,11 @@ static int frozen, frz_sig, frz_mode;   /* frozen = frz_sig || frz_mode */
 static void on_usr1(int s) { (void)s; want_freeze = 1; }
 static void on_usr2(int s) { (void)s; want_thaw = 1; }
 
+extern volatile int jet_sound_paused;   /* i_jetsound.c: the mixer (and so the music clock) */
 static void set_frozen(int on) {
     if (on == frozen) return;
     frozen = on;
+    jet_sound_paused = on;                  /* Doom's own pause keeps music playing; frozen must not */
     printf("jet: %s\n", on ? "frozen" : "resumed");
     if (on) { for (int k = 0; k < 256; k++) if (held[k]) push_key(0, k); }   /* nothing stays held */
     else need_clear = 1;                                                       /* the switcher painted over us */

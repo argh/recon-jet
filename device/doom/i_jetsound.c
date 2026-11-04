@@ -44,6 +44,7 @@ static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t mixer;
 static volatile int running;
 static int play_fd = -1;
+volatile int jet_sound_paused;                 /* freeze (doomgeneric_jet.c): the music clock halts too */
 static boolean use_sfx_prefix;
 static int16_t out[SLICE * 2], music[SLICE * 2];
 static int32_t acc[SLICE * 2];
@@ -100,6 +101,14 @@ static void *mixer_main(void *arg) {
             next_try = now_ms() + RETRY_MS;
             if (player_open() < 0) perror("jet: jetd");
             else fprintf(stderr, "jet: sound to jetd (W over loopback)\n");
+        }
+        if (jet_sound_paused) {                /* frozen: no mixing (the OPL clock halts, so music
+                                                  resumes where it stopped), but keep the socket
+                                                  drained so jetd does not drop us */
+            if (play_fd >= 0) while (recv(play_fd, trash, sizeof trash, MSG_DONTWAIT) > 0) {}
+            next_slice = now_ms() + slice_ms;
+            usleep((useconds_t)(slice_ms * 1000));
+            continue;
         }
         mix_slice();
         if (play_fd >= 0) {
