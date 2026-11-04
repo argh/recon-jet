@@ -15,6 +15,7 @@
     "deploy": "sh deploy/install.sh"
   },
   "dependencies": {
+    "@photostructure/tz-lookup": "^11.7.0",
     "@versionzero/configurator": "^1.0.0",
     "@versionzero/module-manager": "^1.0.0",
     "@versionzero/schema": "^1.4.0",

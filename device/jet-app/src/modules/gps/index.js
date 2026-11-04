@@ -12,6 +12,7 @@ import path from 'node:path';
 import { Schema } from '@versionzero/module-manager';
 import { FifoRecords, Responses, basebandStart, fixStart, fixStop, basebandStop, parseComplete, EVENT } from '../../lib/navl.js';
 import { NmeaState } from './nmea.js';
+import { patchLayer } from '../../lib/config.js';
 
 const s = Schema.create;
 
@@ -25,14 +26,18 @@ export class Gps extends EventEmitter {
       .property('retryMs', s('number').default(2000).meta('description', 'reopen interval while the FIFO has no writer'))
       .property('maxHdop', s('number').default(10).meta('description', 'a fix with worse dilution is not treated as a position'))
       .property('minSats', s('number').default(4).meta('description', 'a fix using fewer satellites is not treated as a position'))
+      .property('localTime', s('boolean').default(false).meta('description', 'derive the timezone from the fix; off = clocks show GMT (Location screen toggles this)'))
+      .property('tz', s('string').default('').meta('description', 'last derived IANA zone, persisted so local time survives a reboot without a fix'))
+      .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'where localTime/tz persist'))
+      .property('localtimeFile', s('string').default('/etc/localtime').meta('advanced').meta('description', 'symlink kept pointing at the zone for the shell and friends'))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  fifo; socket; logFile; retryMs; maxHdop; minSats; logger;
+  fifo; socket; logFile; retryMs; maxHdop; minSats; localTime; tz; deviceConfig; localtimeFile; logger;
 
   /** @type {NmeaState} the rolling picture; `state` is its snapshot */ nmea = new NmeaState();
   listening = false;
   #fd = null; #retry = null; #log = null; #records = null; #sock = null; #sockRetry = null;
-  #emitAt = 0; #summaryAt = 0; #lastFix = 'none';
+  #emitAt = 0; #summaryAt = 0; #lastFix = 'none'; #tzAt = 0;
 
   /** The snapshot, plus the quality gate: `good` = a position worth showing or speaking
    * (during signal loss the chip emits wild fixes with hdop ~100 and under 4 satellites). */
@@ -47,8 +52,45 @@ export class Gps extends EventEmitter {
 
   /** The app may have (re)started while GPS was already on: follow the stream again. */
   async start() {
+    this.#applyTz();
     const running = await new Promise((r) => execFile('pgrep', ['navd'], (e) => r(!e)));
     if (running) this.listen();
+  }
+
+  // ---- local time: the system clock stays UTC; only TZ (and /etc/localtime) localise ---------
+  /** The Location screen's toggle. On with a fresh fix derives the zone now; otherwise the next
+   *  good fix does. Off returns every clock to GMT (the persisted zone is kept for next time). */
+  async setLocalTime(on) {
+    this.localTime = on;
+    this.#applyTz();
+    await patchLayer(this.deviceConfig, { gps: { localTime: on } }).catch((error) => this.logger?.warn({ error: error.message }, 'localTime not persisted'));
+    const fix = this.goodFix();
+    if (on && fix) await this.#zoneFromFix(fix);
+    this.emit('update', this.state);
+  }
+
+  async #zoneFromFix(fix) {
+    let zone;
+    try { zone = (await import('@photostructure/tz-lookup')).default(fix.lat, fix.lon); }
+    catch (error) { this.logger?.warn({ error: error.message }, 'tz lookup failed'); return; }
+    if (zone === this.tz) return;
+    this.tz = zone;
+    this.#applyTz();
+    this.logger?.info({ zone, lat: fix.lat, lon: fix.lon }, 'timezone from fix');
+    await patchLayer(this.deviceConfig, { gps: { tz: zone } }).catch((error) => this.logger?.warn({ error: error.message }, 'tz not persisted'));
+    this.emit('update', this.state);
+  }
+
+  #applyTz() {
+    const zone = this.localTime && this.tz ? this.tz : 'UTC';
+    process.env.TZ = zone;                       // Node re-reads TZ: every toTimeString localises
+    try {                                        // the shell and anything else reading /etc/localtime
+      const target = `/usr/share/zoneinfo/${zone}`;
+      if (fs.existsSync(target) && fs.existsSync(path.dirname(this.localtimeFile))) {
+        try { fs.unlinkSync(this.localtimeFile); } catch {}
+        fs.symlinkSync(target, this.localtimeFile);
+      }
+    } catch (error) { this.logger?.warn({ error: error.message }, 'localtime symlink'); }
   }
 
   async stop() { this.stopListening(); }
@@ -161,5 +203,9 @@ export class Gps extends EventEmitter {
     if (snap.fix !== this.#lastFix) { this.#lastFix = snap.fix; this.logger?.info(snap, 'gps: fix'); }
     if (now - this.#summaryAt > 30000) { this.#summaryAt = now; this.logger?.info({ fix: snap.fix, satsUsed: snap.satsUsed, satsInView: snap.satsInView, hdop: snap.hdop }, 'gps: satellites'); }
     if (now - this.#emitAt > 900) { this.#emitAt = now; this.emit('update', snap); }
+    if (this.localTime && snap.good && now - (this.#tzAt ?? 0) > 60000) {   // once a minute while moving
+      this.#tzAt = now;
+      this.#zoneFromFix(snap).catch(() => {});
+    }
   }
 }

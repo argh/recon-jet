@@ -95,3 +95,29 @@ test('gps module: follows the FIFO, logs raw sentences, survives writer restarts
   assert.equal(gps.state.satsInView, 0);
   gps.stopListening();
 });
+
+test('local time: a good fix derives the zone, persists it, and sets TZ; off returns to GMT', async () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), 'jet-tz-'));
+  const gps = Object.assign(new Gps(), {
+    fifo: path.join(dir, 'fifo'), socket: path.join(dir, 'sock'), logFile: '', retryMs: 50,
+    deviceConfig: path.join(dir, 'jet-app.json'), localtimeFile: path.join(dir, 'localtime'),
+    localTime: false, tz: '',
+  });
+  const envBefore = process.env.TZ;
+  try {
+    gps.goodFix = () => ({ lat: 37.7749, lon: -122.4194, good: true, at: Date.now() });
+    await gps.setLocalTime(true);
+    assert.equal(gps.tz, 'America/Los_Angeles');
+    assert.equal(process.env.TZ, 'America/Los_Angeles');
+    const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'jet-app.json'), 'utf8'));
+    assert.equal(persisted.gps.localTime, true);
+    assert.equal(persisted.gps.tz, 'America/Los_Angeles');
+    await gps.setLocalTime(false);
+    assert.equal(process.env.TZ, 'UTC');
+    assert.equal(gps.tz, 'America/Los_Angeles', 'the derived zone is kept for next time');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'jet-app.json'), 'utf8')).gps.localTime, false);
+  } finally {
+    if (envBefore === undefined) delete process.env.TZ; else process.env.TZ = envBefore;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

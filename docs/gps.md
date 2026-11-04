@@ -75,3 +75,12 @@ test.
   RXN prediction service is long dead); the chip's own ephemeris cache in
   `/android-data/gps/aiding/` warms repeat fixes.
 - The capture scripts and raw logs from bring-up live in `work/gps/` (not in the repo).
+
+## Local time
+
+The Location screen has a second switch: **local time**, which derives the IANA zone from a
+good fix (`@photostructure/tz-lookup`, then Debian tzdata handles DST) and applies it as `TZ`
+plus `/etc/localtime` — clocks, the shell and logs with wall times localise, while the system
+clock itself stays UTC. Off = everything on GMT. The derived zone persists (`gps.tz` in the
+device config), so local time survives a reboot without a fix; a later fix in a new zone
+updates it (checked at most once a minute).

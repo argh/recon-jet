@@ -15,12 +15,26 @@ export class LocationScreen {
   /** @type {boolean|null} navd seen running (null until the first probe) */ running = null;
   error = null; busy = false;
   #ticks = 0;
+  #sel = 0;   // 0 = the gps switch, 1 = the local-time switch (swipe selects, front toggles)
 
   enter() { this.#ticks = 0; this.probe().then(() => this.sys.ui.requestRender()); }
   tick() { if (++this.#ticks % 5 === 0) this.probe().then(() => this.sys.ui.requestRender()); }
   onGesture(g) {
-    if (g === 'press:front' || g === 'press:tap') { this.toggle().catch(() => {}); return true; }
+    if (g === 'swipe:up' || g === 'swipe:down') { this.#sel = this.#sel ? 0 : 1; this.sys.ui.requestRender(); return true; }
+    if (g === 'press:front' || g === 'press:tap') {
+      if (this.#sel === 0) this.toggle().catch(() => {});
+      else this.toggleLocalTime().catch(() => {});
+      return true;
+    }
     return false;
+  }
+
+  /** Local time from the fix, or GMT — the gps module owns the mechanics (TZ + /etc/localtime). */
+  async toggleLocalTime() {
+    const gps = this.sys.gps; if (!gps) return;
+    await gps.setLocalTime(!gps.localTime);
+    this.sys.ui.setStrip(gps.localTime ? (gps.tz ? `local time: ${gps.tz}` : 'local time: waiting for a fix') : 'clocks on GMT', { ms: 2500 });
+    this.sys.ui.requestRender();
   }
 
   /** Is the GPS daemon up? (pgrep: exit 1 just means no.) The gps module follows the answer. */
@@ -70,8 +84,10 @@ export class LocationScreen {
     heading(s, 'location');
     let y = TOP + 26;
     if (this.error) y = row(s, y, 'error', this.error, C.bad);
-    const on = this.running === true, g = this.sys.gps?.state;
-    y = row(s, y, 'gps', this.busy ? 'switching...' : this.running == null ? '-' : on ? 'ON  (WiFi rx degraded)' : 'off', this.busy ? C.dim : on ? C.warn : C.ok);
+    const on = this.running === true, g = this.sys.gps?.state, gps = this.sys.gps;
+    y = row(s, y, `${this.#sel === 0 ? '> ' : '  '}gps`, this.busy ? 'switching...' : this.running == null ? '-' : on ? 'ON  (WiFi rx degraded)' : 'off', this.busy ? C.dim : on ? C.warn : C.ok);
+    const lt = gps?.localTime;
+    y = row(s, y, `${this.#sel === 1 ? '> ' : '  '}local time`, lt ? (gps.tz || 'waiting for a fix') : 'off (clocks on GMT)', lt ? (gps.tz ? C.ok : C.warn) : C.dim);
     if (on && g) {
       const stale = !g.at || Date.now() - g.at > 5000;
       y = row(s, y, 'satellites', stale ? 'no data from the receiver' : `${g.satsUsed} used  /  ${g.satsInView} in view`, stale ? C.dim : g.satsUsed ? C.ok : C.white);
@@ -85,7 +101,8 @@ export class LocationScreen {
     y += 4;
     if (!on) y = row(s, y, 'receiver', 'in the radio chip; GPS on powers Bluetooth\'s radio too', C.dim);
     if (!g || g.fix === 'none') row(s, y, 'first fix', 'cold start can take minutes under open sky', C.dim);
-    hint(s, `front: gps ${on ? 'off' : 'on'}   rear: menu`);
+    const what = this.#sel === 0 ? `gps ${on ? 'off' : 'on'}` : `local time ${gps?.localTime ? 'off' : 'on'}`;
+    hint(s, `front: ${what}   swipe: select   rear: menu`);
   }
 }
 
