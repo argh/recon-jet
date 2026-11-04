@@ -29,7 +29,7 @@
   <button id="front">FRONT</button>
   <button id="rear">REAR</button>
   <button id="ptt" class="ptt">HOLD TO TALK</button>
-  <label><input type="checkbox" id="sound"> sound</label>
+  <label><input type="checkbox" id="sound"> sound</label> <span id="audiostat" class="hint"></span>
   <label><input type="checkbox" id="micmon"> monitor mic</label>
   <label><input type="checkbox" id="kbd"> keyboard</label>
 </div>
@@ -83,20 +83,31 @@ function blit(r, dv) {
 
 /* ---- audio: schedule each S16 chunk on a rolling cursor; AudioBuffers resample themselves -- */
 const sound = document.getElementById('sound'), micmon = document.getElementById('micmon');
-let actx = null; const cursor = { 48000: 0, 16000: 0 };
-sound.onchange = () => { if (sound.checked && !actx) actx = new AudioContext(); actx?.resume(); };
+const audiostat = document.getElementById('audiostat');
+let actx = null, heard = 0, played = 0, aerr = '';
+const cursor = { 48000: 0, 16000: 0 };
+const astat = () => { audiostat.textContent = `rx ${(heard / 1024) | 0}k played ${(played / 1024) | 0}k ctx ${actx ? actx.state : '-'}${aerr ? ' ERR ' + aerr : ''}`; };
+sound.onchange = () => {
+  try { if (sound.checked && !actx) actx = new AudioContext(); actx?.resume(); } catch (e) { aerr = e.message; }
+  astat();
+};
 function play(ab, rate, channels) {
-  if (!sound.checked || !actx) return;
-  const s16 = new Int16Array(ab), frames = s16.length / channels;
-  if (!frames) return;
-  const buf = actx.createBuffer(channels, frames, rate);
-  for (let c = 0; c < channels; c++) {
-    const ch = buf.getChannelData(c);
-    for (let i = 0; i < frames; i++) ch[i] = s16[i * channels + c] / 32768;
-  }
-  const src = actx.createBufferSource(); src.buffer = buf; src.connect(actx.destination);
-  const at = Math.max(actx.currentTime + 0.03, cursor[rate]);
-  src.start(at); cursor[rate] = at + frames / rate;
+  heard += ab.byteLength;
+  try {
+    if (!sound.checked || !actx) return;
+    const whole = ab.byteLength & ~(2 * channels - 1);        // belt: never trip on a sub-frame tail
+    const s16 = new Int16Array(ab, 0, whole / 2), frames = s16.length / channels;
+    if (!frames) return;
+    const buf = actx.createBuffer(channels, frames, rate);
+    for (let c = 0; c < channels; c++) {
+      const ch = buf.getChannelData(c);
+      for (let i = 0; i < frames; i++) ch[i] = s16[i * channels + c] / 32768;
+    }
+    const src = actx.createBufferSource(); src.buffer = buf; src.connect(actx.destination);
+    const at = Math.max(actx.currentTime + 0.03, cursor[rate]);
+    src.start(at); cursor[rate] = at + frames / rate;
+    played += ab.byteLength;
+  } catch (e) { aerr = e.message; } finally { astat(); }
 }
 
 /* ---- input: surrogate pod controls; real press/release so holds work. One exception: a long

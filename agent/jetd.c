@@ -1195,17 +1195,28 @@ static void mirror_scan(void) {
         mirror_tee(0, y, W, rows);
     }
 }
+static unsigned char au_carry[4]; static size_t au_carry_n;   /* keep tee chunks frame-aligned */
+static void mirror_audio_reset(void) { au_carry_n = 0; }
 static void mirror_audio(const void *buf, size_t len) {   /* tee of queued speaker PCM; chunks drop, never block */
+    /* TCP slices the W payload at arbitrary byte boundaries, but the page views chunks as S16
+     * stereo frames: carry the sub-frame remainder so every tee is a multiple of 4 bytes */
+    unsigned char head[4]; size_t head_n = au_carry_n;
+    memcpy(head, au_carry, au_carry_n);
+    size_t total = head_n + len, send_len = total & ~(size_t)3;
+    au_carry_n = total - send_len;
+    memcpy(au_carry, (const unsigned char *)buf + len - au_carry_n, au_carry_n);
+    if (!send_len) return;
+    size_t body = send_len - head_n;
     for (int i = 0; i < nhubs; i++) {
         struct hub *hb = &hubs[i];
         if (!hb->mirror) continue;
-        char hdr[32]; int hl = snprintf(hdr, sizeof hdr, "u %zu\n", len);
-        if (!mirror_fit(hb->fd, hl + len)) continue;
-        struct iovec iov[2] = { { hdr, (size_t)hl }, { (void *)buf, len } };
-        struct msghdr msg = { .msg_iov = iov, .msg_iovlen = 2 };
+        char hdr[32]; int hl = snprintf(hdr, sizeof hdr, "u %zu\n", send_len);
+        if (!mirror_fit(hb->fd, hl + send_len)) continue;
+        struct iovec iov[3] = { { hdr, (size_t)hl }, { head, head_n }, { (void *)buf, body } };
+        struct msghdr msg = { .msg_iov = iov, .msg_iovlen = 3 };
         ssize_t wr = sendmsg(hb->fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL);
         if (wr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;   /* chunk dropped, stream intact */
-        if (wr != (ssize_t)(hl + len)) hb->mirror = 0;
+        if (wr != (ssize_t)(hl + send_len)) hb->mirror = 0;
     }
 }
 
@@ -1651,7 +1662,7 @@ static void handle_line(char *l) {
             else if (t == 't' && got == 3) { if (!kbd_key(a, v)) raw_key(a, v); }   /* like an inkbd device event */
         } break;
     case 'v': turn_end("stop"); break;
-    case 'W': if (cur_hub) cur_hub->bin_need = strtoul(l + 1, NULL, 10); break;   /* payload bytes follow the line */
+    case 'W': if (cur_hub) { cur_hub->bin_need = strtoul(l + 1, NULL, 10); mirror_audio_reset(); } break;   /* payload bytes follow the line */
     case 'w': if (play_pid > 0) { play_end = 1; play_drain(); } else sendf("w idle\n"); break;
     case 'Y': if (play_pid > 0) { kill(play_pid, SIGKILL); play_close("flushed"); } else sendf("w idle\n"); break;   /* barge-in: drop queued audio now */
     case 'M': { char name[16]; if (sscanf(l + 1, "%15s", name) == 1) for (int i = 0; i < M_COUNT; i++) if (!strcmp(name, mode_names[i])) { chooser = 0; set_mode(i); } } break;
