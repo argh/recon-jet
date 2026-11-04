@@ -1137,9 +1137,14 @@ static int mirror_rect(struct hub *hb, int x, int y, int w, int h) {   /* 0 sent
     struct iovec iov[1 + 256]; int niov = 0;
     iov[niov++] = (struct iovec){ hdr, (size_t)hl };
     for (int r = 0; r < h; r++) iov[niov++] = (struct iovec){ fbmem + (size_t)(y + r) * finfo.line_length + (size_t)x * bpp, rowlen };
-    ssize_t wr = writev(hb->fd, iov, niov);
+    /* MSG_DONTWAIT, never writev: the fit check reads the advertised sndbuf, which overstates
+     * usable space (skb overhead), and a link that died without an RST (USB drop) never drains —
+     * a blocking write there froze the whole UI loop until the link was bounced. */
+    struct msghdr msg = { .msg_iov = iov, .msg_iovlen = niov };
+    ssize_t wr = sendmsg(hb->fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL);
     if (wr == (ssize_t)(hl + len)) return 0;
-    hb->mirror = 0;                               /* short write after the fit check: framing torn */
+    if (wr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return -1;   /* no room after all: owe a refresh */
+    hb->mirror = 0;                               /* error or short write: framing torn, mirroring ends */
     return -2;
 }
 static void mirror_bands(struct hub *hb) {        /* continue a full refresh while there is room */
@@ -1197,7 +1202,10 @@ static void mirror_audio(const void *buf, size_t len) {   /* tee of queued speak
         char hdr[32]; int hl = snprintf(hdr, sizeof hdr, "u %zu\n", len);
         if (!mirror_fit(hb->fd, hl + len)) continue;
         struct iovec iov[2] = { { hdr, (size_t)hl }, { (void *)buf, len } };
-        if (writev(hb->fd, iov, 2) != (ssize_t)(hl + len)) hb->mirror = 0;
+        struct msghdr msg = { .msg_iov = iov, .msg_iovlen = 2 };
+        ssize_t wr = sendmsg(hb->fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (wr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;   /* chunk dropped, stream intact */
+        if (wr != (ssize_t)(hl + len)) hb->mirror = 0;
     }
 }
 
