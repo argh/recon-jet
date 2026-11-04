@@ -65,6 +65,10 @@ to finish), `docs/recovery.md` (every way back; why nothing here bricks), `docs/
   `ofm-args`, `glance`, `backlight`, `panel-args`.
 
 ## Working rules learned the hard way
+- jet-app has an architecture contract (IoC/DI, model ownership, views subscribe for
+  themselves, voice observes state through announce policies): the rules live at the top of
+  `docs/jet-app.md` ("Architecture") — read them before touching `device/jet-app`, and review
+  against them.
 - Never rmmod the camera ISS module; never read ISS registers without an active stream; reading
   an unclocked module via /dev/mem gives an L3 abort.
 - Anything that only ever ran after Android had configured hardware is suspect: two cold-boot

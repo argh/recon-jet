@@ -10,6 +10,51 @@ The interaction contract is `docs/interaction-design.md`; this file is the modul
 Runtime: Node 22 in the Jet's chroot; Node 22 has the iterator helpers that
 `@versionzero/module-manager` 1.0.0 uses (no shim).
 
+## Architecture: the rules of this codebase
+
+Read this before writing or reviewing jet-app code; the module map below is the inventory,
+this is the law. The libraries' own docs are NOT restated here — see "where to learn" at the end.
+
+**Direction (the what and why).**
+- The app is an IoC container. **Modules are named singletons that own their domain's state**
+  (the models: `power`, `gps`, `radio`, `backlight`, `wear`, `sensors`...). Nothing else holds
+  that state, caches it, or mutates it on a model's behalf.
+- **Modes and screens are views**: disposable observers with an enter/leave lifecycle. While
+  active they subscribe to the models they draw from and request their own renders; on leave
+  they unsubscribe. A parent composes children and routes gestures — it never relays data.
+  The smell that prompted this design: `parent.on('update', () => if (child is active)
+  child.poke())` — if you are writing that, the child is missing a subscription.
+- **Voice is a peer view, not a controller.** Async outcomes are observable model state (the
+  gps `pursuit`: idle → acquiring → fixed | timeout), never a function-call lifespan. Spoken
+  responses attach to state through `voice.announce({queue?})` with explicit supersede
+  semantics: a new user turn silences pending announcements (user intent wins; `queue: true`
+  defers instead of dropping). `await voice.say(...)` inside control flow is a bug by policy.
+- **Extensibility is abstract types, not edits.** Anything pluggable declares `provides:` and
+  plugs into an array-of-type property (modes; the System `screens`); the `personal/` layer
+  extends by registration + config, with no core change.
+
+**The how (this architecture in @versionzero/module-manager).**
+- A dependency is a schema property: `s('Power')` injects the singleton; a module's schema
+  declares exactly what it uses — deps, file paths, tunables — and nothing more.
+- An abstract type is `provides: 'Screen'`; a pluggable list is
+  `s('array').property('*', s('Screen')).default([...names])` (order = config order;
+  undocumented upstream as of argh/module-manager#4 — the container test below is the
+  executable spec, including the deepMerge note: injected test fakes must be class instances).
+- Children register `{relative: true}`: their config nests under the parent's path
+  (`systemMode.padCalScreen.ofmArgsFile`).
+- Config layers: `config/jet-app.default.json` → device (`mainline/jet-app.json`) →
+  `personal/jet-app.json`; modules read the merged result through their schema at start.
+
+**Where to learn (pointers, not inlining).**
+- Libraries, locally: `~/devel/versionzero/{module-manager,configurator,schema}` (READMEs,
+  `module-manager/examples/zws.js` + `hello-world-advanced.js` + `lifecycle.js`) and the
+  docusaurus tree `~/devel/versionzero/docs.v0.net/docs` (DI, lifecycle, commands guides).
+  These are context-heavy: a fresh agent should study them in a subagent.
+- In-repo exemplars: `src/jet.js` (the composition root), `src/modes/system/index.js` (the
+  screens array + wizard sequencing), `src/modes/system/status.js` (a screen: deps, enter/leave
+  subscription), `src/modules/gps/index.js` (a model + the pursuit), the announcements block in
+  `src/modules/voice/index.js`, and `test/system-mode.test.js` (the container DI test).
+
 ## Modules (`src/modules/`)
 
 | module | job | events / API |
