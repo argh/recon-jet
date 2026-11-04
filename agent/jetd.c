@@ -310,7 +310,7 @@ static int raw_keys, ext_surface;   /* set by K / E: a client owns keys / pixels
 /* Hubs: up to MAXHUB connected clients (the on-device app, the host hub, debug sessions) all
  * receive every event (including binary payloads) and may all send commands. */
 #define MAXHUB 4
-struct hub { int fd; char inbuf[1024]; size_t inlen; size_t bin_need; int64_t stuck_since;
+struct hub { int fd; char inbuf[16384]; size_t inlen;   /* large enough that a W clip drains in few passes */ size_t bin_need; int64_t stuck_since;
              int mirror; unsigned mirror_y;      /* N 1: tee panel pushes; mirror_y < H = full refresh in progress */
              int owns_keys, owns_surface; };     /* this client's K / E grants (raw_keys / ext_surface are ORs of these) */
 static struct hub hubs[MAXHUB]; static int nhubs;
@@ -1185,8 +1185,14 @@ static uint32_t band_checksum(unsigned y, unsigned rows) {
     }
     return s;
 }
+static int64_t mirror_next_scan;
 static void mirror_scan(void) {
-    if (!mirror_on() || now_ms() - mirror_last_tee < 150) return;
+    int64_t now = now_ms();
+    /* absolute cadence: without it a static screen re-checksummed every loop pass, and during
+     * audio the POLLIN storm span the loop so fast the scan throttled W consumption below
+     * real-time (the page heard stuttering tails) */
+    if (!mirror_on() || now < mirror_next_scan || now - mirror_last_tee < 150) return;
+    mirror_next_scan = now + 150;
     for (unsigned b = 0, y = 0; y < H; b++, y += MIRROR_BAND) {
         unsigned rows = H - y < MIRROR_BAND ? H - y : MIRROR_BAND;
         uint32_t s = band_checksum(y, rows);
@@ -1198,6 +1204,7 @@ static void mirror_scan(void) {
 static unsigned char au_carry[4]; static size_t au_carry_n;   /* keep tee chunks frame-aligned */
 static void mirror_audio_reset(void) { au_carry_n = 0; }
 static void mirror_audio(const void *buf, size_t len) {   /* tee of queued speaker PCM; chunks drop, never block */
+    mirror_last_tee = now_ms();                            /* audio is tee activity: no dirty-scan during playback */
     /* TCP slices the W payload at arbitrary byte boundaries, but the page views chunks as S16
      * stereo frames: carry the sub-frame remainder so every tee is a multiple of 4 bytes */
     unsigned char head[4]; size_t head_n = au_carry_n;

@@ -87,8 +87,8 @@ function blit(r, dv) {
    speaker frames map 1:1; mic chunks (16 kHz mono) are linearly upsampled into the same ring. */
 const sound = document.getElementById('sound'), micmon = document.getElementById('micmon');
 const audiostat = document.getElementById('audiostat');
-let actx = null, sink = null, heard = 0, played = 0, aerr = '';
-const astat = () => { audiostat.textContent = `rx ${(heard / 1024) | 0}k played ${(played / 1024) | 0}k ctx ${actx ? actx.state : '-'}${aerr ? ' ERR ' + aerr : ''}`; };
+let actx = null, sink = null, heard = 0, played = 0, written = 0, aerr = '', lastUnder = 0, clipT0 = 0, clipBytes = 0, clipLast = 0;
+const astat = () => { audiostat.textContent = `rx ${(heard / 1024) | 0}k played ${(played / 1024) | 0}k out ${(written / 48000) | 0}s ctx ${actx ? actx.state : '-'}${aerr ? ' ERR ' + aerr : ''}`; };
 const SINK = `class JetSink extends AudioWorkletProcessor {
   constructor() { super(); this.q = []; this.off = 0; this.buffered = 0; this.started = false;
     this.port.onmessage = (e) => { this.q.push(e.data); this.buffered += e.data[0].length; }; }
@@ -103,7 +103,17 @@ const SINK = `class JetSink extends AudioWorkletProcessor {
       i += take; this.off += take; this.buffered -= take;
       if (this.off === l.length) { this.q.shift(); this.off = 0; }
     }
-    if (i < n && !this.q.length) this.started = false;   // drained: prebuffer again before the next clip
+    this.wrote = (this.wrote || 0) + i;
+    this.minbuf = Math.min(this.minbuf ?? 1e9, this.buffered);
+    if (i < n && this.started) this.under = (this.under || 0) + 1;
+    // chunks arrive every ~5 ms but process() runs every ~2.7 ms, so a transiently empty queue
+    // is NORMAL mid-stream: only a sustained gap (~60 ms) re-arms the prebuffer for the next clip
+    if (i < n) { if (++this.empty > 24) { this.started = false; this.empty = 0; } }
+    else this.empty = 0;
+    if ((this.tick = (this.tick || 0) + 1) % 47 === 0) {   // ~8 Hz telemetry
+      this.port.postMessage({ wrote: this.wrote, under: this.under || 0, minbuf: this.minbuf === 1e9 ? -1 : this.minbuf });
+      this.minbuf = 1e9;
+    }
     return true;
   }
 }
@@ -114,6 +124,8 @@ sound.onchange = async () => {
       actx = new AudioContext({ sampleRate: 48000 });
       await actx.audioWorklet.addModule(URL.createObjectURL(new Blob([SINK], { type: 'text/javascript' })));
       sink = new AudioWorkletNode(actx, 'jet-sink', { outputChannelCount: [2] });
+      sink.onprocessorerror = () => { aerr = 'processor died'; astat(); };
+      sink.port.onmessage = (e) => { written = e.data.wrote; astat(); if (e.data.under !== lastUnder || e.data.minbuf >= 0) { if (e.data.minbuf >= 0 || e.data.under !== lastUnder) evlog(`audio under=${e.data.under} minbuf=${e.data.minbuf}`); lastUnder = e.data.under; } };
       sink.connect(actx.destination);
     }
     await actx?.resume();
@@ -122,6 +134,9 @@ sound.onchange = async () => {
 };
 function play(ab, rate, channels) {
   heard += ab.byteLength;
+  const now = performance.now();
+  if (now - clipT0 > 300) { if (clipBytes) evlog(`clip rx ${clipBytes}B over ${(clipLast - clipT0) | 0}ms`); clipT0 = now; clipBytes = 0; }
+  clipBytes += ab.byteLength; clipLast = now;
   try {
     if (!sound.checked || !sink) return;
     const whole = ab.byteLength & ~(2 * channels - 1);        // never trip on a sub-frame tail
