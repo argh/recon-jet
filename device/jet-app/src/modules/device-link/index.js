@@ -18,9 +18,10 @@ export class DeviceLink extends EventEmitter {
       .property('reconnectMs', s('number').default(2000).meta('description', 'redial interval'))
       .property('dialTimeoutMs', s('number').default(5000).meta('description', 'give up a dial attempt after this long'))
       .property('replyTimeoutMs', s('number').default(5000).meta('description', 'timeout for request/reply commands'))
+      .property('silentMs', s('number').default(15000).meta('description', 'ping after this long without a received byte; no reply tears the link down'))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  host; port; listen; bind; reconnectMs; dialTimeoutMs; replyTimeoutMs; logger;
+  host; port; listen; bind; reconnectMs; dialTimeoutMs; replyTimeoutMs; silentMs; logger;
 
   /** @type {net.Socket|null} */ #sock = null;
   #server = null;
@@ -61,9 +62,22 @@ export class DeviceLink extends EventEmitter {
     sock.setNoDelay(true);
     sock.setKeepAlive(true, 10000);
     const parser = new ProtocolParser();
-    sock.on('data', (chunk) => { for (const m of parser.feed(chunk)) this.#dispatch(m); });
+    // Proof-of-life watchdog: a dead link does not always close (a half-open USB peer, or jetd
+    // dropping this hub while a forked helper's inherited fd kept the socket established — the
+    // app once ran for minutes "connected" with every button dead). Any received byte is proof;
+    // after silentMs without one a ping must bring bytes, or the socket is torn down to redial.
+    let lastRecv = Date.now(), probed = false;
+    const watchdog = setInterval(() => {
+      const idleMs = Date.now() - lastRecv;
+      if (idleMs < this.silentMs) { probed = false; return; }
+      if (!probed) { probed = true; this.ping().catch(() => {}); return; }
+      if (idleMs >= this.silentMs + this.replyTimeoutMs) { this.logger?.warn({ idleMs }, 'link silent, tearing it down'); sock.destroy(); }
+    }, 5000);
+    watchdog.unref?.();
+    sock.on('data', (chunk) => { lastRecv = Date.now(); for (const m of parser.feed(chunk)) this.#dispatch(m); });
     sock.on('error', (error) => this.logger?.warn({ error: error.message }, 'link error'));
     sock.on('close', () => {
+      clearInterval(watchdog);
       if (this.#sock !== sock) return;
       this.#sock = null; this.hello = null; this.mode = null;
       this.#rejectAll(new Error('disconnected'));

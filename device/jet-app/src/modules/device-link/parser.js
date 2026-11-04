@@ -27,8 +27,11 @@ export class ProtocolParser {
       const line = this.#buf.subarray(0, nl).toString('latin1').replace(/\r$/, '');
       this.#buf = this.#buf.subarray(nl + 1);
       const [t, ...a] = line.split(' ');
-      if (t === 'f') this.#pending = { kind: 'f', header: { w: +a[0], h: +a[1], fmt: a[2] }, len: +a[3] };
-      else if (t === 'a') this.#pending = { kind: 'a', len: +a[0] };
+      // a length that cannot be real (resync garbage shaped like a header) must not leave the
+      // parser waiting on payload bytes forever — pass it through as a line instead
+      const sane = (len) => Number.isInteger(len) && len >= 0 && len <= 16 << 20;
+      if (t === 'f' && sane(+a[3])) this.#pending = { kind: 'f', header: { w: +a[0], h: +a[1], fmt: a[2] }, len: +a[3] };
+      else if (t === 'a' && sane(+a[0])) this.#pending = { kind: 'a', len: +a[0] };
       else out.push({ type: 'line', line });
     }
     return out;
