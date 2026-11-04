@@ -106,7 +106,7 @@ export function fakeGps() {
  * The real SystemMode over real screens, every dependency injectable (`paths` for the files).
  * Returns the mode with `scr(id)` for reaching a screen.
  */
-export function buildSystem({ paths = {}, ui, input, power, sensors, gps = fakeGps(), radio, backlight, wear, deviceLink = fakeLink(), modes, sounds = fakeSounds(), voice = null, actions = null, logger = null, checkFixS = 180 } = {}) {
+export function buildSystem({ paths = {}, ui, input, power, sensors, gps = fakeGps(), radio, backlight, wear, deviceLink = fakeLink(), modes, sounds = fakeSounds(), voice = null, actions = null, logger = null } = {}) {
   radio ??= Object.assign(new Radio(), { btMarker: paths.btMarker, gps, logger });
   backlight ??= Object.assign(new Backlight(), { file: paths.backlightFile, sysfs: paths.backlightSysfs, logger });
   const screens = [
@@ -118,7 +118,7 @@ export function buildSystem({ paths = {}, ui, input, power, sensors, gps = fakeG
     Object.assign(new BluetoothScreen(), { radio, ui }),
     Object.assign(new LocationScreen(), { gps, ui }),
   ];
-  const sys = Object.assign(new SystemMode(), { screens, checkFixS, modes, ui, gps, voice, sounds, actions, logger });
+  const sys = Object.assign(new SystemMode(), { screens, modes, ui, gps, voice, sounds, actions, logger });
   sys.scr = (id) => sys.getScreen(id);
   sys.backlightModule = backlight; sys.radioModule = radio;
   return sys;

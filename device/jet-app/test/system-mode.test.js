@@ -264,36 +264,39 @@ test('system: Location toggles GPS through the gps module (script, session, radi
   } finally { process.env.PATH = old; gps.stopListening(); }
 });
 
-test('system: "check my location" speaks the hunt: satellites as they lock, the fix brings the screen up', async () => {
-  const voice = { said: [], warmed: 0, async say(t) { this.said.push(t); }, warm() { this.warmed++; } };
-  const gps = fakeGps();
-  gps.sats = 0; gps.fix = null;
-  Object.defineProperty(gps, 'state', { get() { return { satsUsed: this.sats }; } });
-  gps.goodFix = function () { return this.fix; };
+test('system: "check my location" = start the pursuit + announcement observers: satellites as they lock, the fix brings the screen up', async () => {
+  // voice: announcements recorded (the supersede/queue policy itself is voice.test.js territory)
+  const voice = { said: [], warmed: 0, warm() { this.warmed++; }, announce() { const said = this.said; return { say(t) { said.push(t); }, cancel() {} }; } };
+  const gps = Object.assign(new Gps(), { logger: null, fixTimeoutS: 0.2 });
+  let sats = 0, fix = null, enabled = 0;
+  gps.probe = async function () { return (this.running ??= false); };
+  gps.enable = async function () { enabled++; this.running = true; };
+  gps.goodFix = () => fix;
+  Object.defineProperty(gps, 'state', { get: () => ({ satsUsed: sats }) });
   const actions = { list: [], register(name, pattern, run) { this.list.push({ name, pattern, run }); return this; } };
-  const { sys } = await make({ calibrated: true, extra: { gps, voice, actions, checkFixS: 1 } });
-  sys.checkStepMs = 10;
+  const { sys } = await make({ calibrated: true, extra: { gps, voice, actions } });
   const check = actions.list.find((a) => a.name === 'check location');
   assert.ok(check.pattern.test('check my location')); assert.ok(check.pattern.test('check gps'));
   assert.ok(!check.pattern.test('check my calendar'));
   sys.enter();
-  // no fix in time: the hunt narrates and gives up onto the screen
+  // no fix in time: the hunt narrates and gives up onto the screen (the receiver stays on)
   check.run();
   await until(() => voice.said.length >= 2, 'gave up');
   assert.equal(voice.said[0], 'Getting a fix on you.');
   assert.match(voice.said.at(-1), /No fix yet/);
   assert.equal(sys.screen, sys.scr('location'), 'the hunt is on the glass');
   assert.equal(voice.warmed, 1);
-  assert.deepEqual(gps.calls, [true], 'gps was turned on');
-  // satellites lock, then the gated fix: progressive news, then the screen and the word
+  assert.equal(enabled, 1, 'gps was turned on');
+  assert.equal(gps.running, true, 'and stays on after the timeout');
+  // satellites lock, then the gated fix: progressive news, then the map and the word
   voice.said.length = 0;
   sys.open(null);
-  gps.fix = null;
+  gps.fixTimeoutS = 180;
   check.run();
   await until(() => voice.said.length === 1, 'hunting again');
-  gps.sats = 3;
-  await until(() => voice.said.includes('3 satellites locked.'), 'sats spoken');
-  gps.sats = 5; gps.fix = { good: true };
+  sats = 3; gps.emit('update', {});
+  assert.ok(voice.said.includes('3 satellites locked.'), 'sats spoken');
+  sats = 5; fix = { good: true }; gps.emit('update', {});
   await until(() => voice.said.at(-1) === 'Got a fix. On your display.', 'fix spoken');
   assert.ok(sys.modes.switched.includes('map'), 'the fix opens the map');
   assert.ok(!voice.said.includes('5 satellites locked.'), 'the fix beat the count');
@@ -302,6 +305,14 @@ test('system: "check my location" speaks the hunt: satellites as they lock, the 
   check.run(); check.run();
   await until(() => voice.said.at(-1) === 'Got a fix. On your display.', 'immediate');
   assert.equal(voice.said.length, 1);
+  // the receiver refusing to come up is one spoken line, not a crash
+  voice.said.length = 0;
+  gps.running = false; fix = null;
+  gps.enable = async () => { throw new Error('no receiver'); };
+  check.run();
+  await until(() => voice.said.length === 1, 'error spoken');
+  assert.equal(voice.said[0], 'The receiver did not come up.');
+  assert.equal(gps.pursuit.state, 'idle');
 });
 
 test('system: Wear toggles the off-head behaviour live through the wear module, which persists it into the per-device config layer', async () => {

@@ -314,3 +314,39 @@ test('voice: the wake word begins a turn with no cue and no V; an action takes t
   off.link.emit('wake', { avg: 250, max: 255 });
   assert.equal(off.voice.state, 'idle'); assert.deepEqual(off.link.sent, ['v'], 'a stray detection: the capture jetd began is stopped');
 });
+
+test('voice: announcements - speak now when live, superseded by a user turn (dropped), queue:true speaks after the turn, cancel', async (t) => {
+  const { voice, link, session } = await make();
+  t.after(() => voice.stop());
+  const spoken = () => session.said.filter((s) => /\.$/.test(s) && !['ok', 'hmm', 'hm2', 'oops'].includes(s));
+  // a plain completion speaks at once (synth + clip to the speaker, interrupting nothing)
+  const a = voice.announce();
+  a.say('Fix found.');
+  await sleep(1);
+  assert.deepEqual(spoken(), ['Fix found.']);
+  assert.ok(link.clips.some((c) => c.toString() === 'say:Fix found.'), 'played as a clip');
+  // a new user-initiated turn supersedes what was registered before it: user intent wins
+  const dropped = voice.announce();               // default policy: the result is dropped
+  const queued = voice.announce({ queue: true }); // explicit queue: it speaks after the turn
+  press(voice);
+  assert.equal(voice.state, 'listening');
+  dropped.say('Old news.'); queued.say('France is six hours ahead.'); queued.say('And sunny.');
+  await sleep(1);
+  assert.deepEqual(spoken(), ['Fix found.'], 'nothing speaks during the turn');
+  // the turn runs to idle: the queued lines follow, in order; the dropped one never does
+  link.emit('captureEnd', 'end');
+  session.emit('final', { type: 'final', text: 'what about france', turn: voice.turn });
+  session.emit('done', { type: 'done', answer: 'It is in Europe.', turn: voice.turn });
+  await sleep(5);
+  assert.equal(voice.state, 'idle');
+  assert.deepEqual(spoken(), ['Fix found.', 'France is six hours ahead.', 'And sunny.']);
+  // after the flush the queued handle is live again
+  queued.say('Still here.');
+  await sleep(1);
+  assert.ok(spoken().includes('Still here.'));
+  // cancel releases a handle for good
+  const gone = voice.announce();
+  gone.cancel(); gone.say('Never.');
+  await sleep(1);
+  assert.ok(!spoken().includes('Never.') && !spoken().includes('Old news.'));
+});

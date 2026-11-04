@@ -33,7 +33,6 @@ export class SystemMode {
       .property('screens', s('array').property('*', s('Screen'))
         .default(['status-screen', 'pad-cal-screen', 'glance-cal-screen', 'brightness-screen', 'wear-screen', 'bluetooth-screen', 'location-screen'])
         .meta('description', 'the System screens, in menu order (personal/ screens provide "Screen" and are added here)'))
-      .property('checkFixS', s('number').default(180).meta('description', '"check my location": how long to hunt for a fix before giving up'))
       .property('modes', s('Modes').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
       .property('gps', s('Gps').meta('internal', true))
@@ -52,7 +51,7 @@ export class SystemMode {
     ],
   };
   /** @type {object[]} the Screen providers, in menu order (injected) */ screens = [];
-  checkFixS; modes; ui; gps; voice; sounds; actions; logger;
+  modes; ui; gps; voice; sounds; actions; logger;
 
   id = 'system'; label = 'System'; spoken = ['settings'];
   /** @type {Chooser} */ menu;
@@ -89,40 +88,49 @@ export class SystemMode {
   getScreen(id) { return this.screens.find((sc) => sc.id === id); }
 
   // ---- "check my location" --------------------------------------------------------------------
-  #checking = false;
-  checkStepMs = 2000;   // the watch cadence (tests shrink it)
+  #checking = false;   // only until startPursuit settles; the pursuit state guards the hunt itself
 
-  /** The spoken hunt: progressive satellite news until the gated fix lands or time runs out. */
-  async #checkLocation() {
-    if (this.#checking) return;
+  /**
+   * Start the gps module's fix pursuit and observe it: the navigation (map on a fix, the
+   * Location screen on a timeout) follows the state, and the spoken commentary is an
+   * announcement - a later user turn supersedes it and its lines are dropped (user intent wins).
+   */
+  #checkLocation() {
+    if (this.#checking || this.gps.pursuit?.state === 'acquiring') return;
     this.#checking = true;
-    try {
-      if (!(await this.gps.probe())) await this.gps.set(true);
-      this.voice?.warm?.();
-      if (this.gps.goodFix()) return await this.#fixFound();
-      await this.voice?.say?.('Getting a fix on you.');
-      const t0 = Date.now();
-      let saidSats = 0;
-      while (Date.now() - t0 < this.checkFixS * 1000) {
-        await new Promise((r) => setTimeout(r, this.checkStepMs));
-        if (this.gps.goodFix()) return await this.#fixFound();
-        const sats = this.gps.state.satsUsed ?? 0;
-        if (sats >= 2 && sats !== saidSats) { saidSats = sats; await this.voice?.say?.(`${sats} satellites locked.`); }
+    this.voice?.warm?.();
+    const a = this.voice?.announce?.();
+    let saidSats = 0;
+    const onPursuit = (p) => {
+      switch (p.state) {
+        case 'acquiring':   // progressive satellite news while the hunt runs
+          if (p.satsUsed >= 2 && p.satsUsed !== saidSats) { saidSats = p.satsUsed; a?.say(`${p.satsUsed} satellites locked.`); }
+          return;
+        case 'fixed':   // the map, centred on the fix; the Location screen when the map is unavailable
+          this.gps.off('pursuit', onPursuit);
+          if (!this.modes.switchTo('map')) { if (this.modes.current !== this) this.modes.switchTo(this.id); this.open('location'); }
+          a?.say('Got a fix. On your display.');
+          return;
+        case 'timeout':   // the receiver stays on: the display has the hunt
+          this.gps.off('pursuit', onPursuit);
+          a?.say('No fix yet. I will keep looking; your display has the hunt.');
+          if (this.modes.current !== this) this.modes.switchTo(this.id);
+          this.open('location');
+          return;
+        default: this.gps.off('pursuit', onPursuit);   // cancelled: nothing to say
       }
-      await this.voice?.say?.('No fix yet. I will keep looking; your display has the hunt.');
-      if (this.modes.current !== this) this.modes.switchTo(this.id);
-      this.open('location');
-    } catch (error) {
+    };
+    this.gps.on('pursuit', onPursuit);
+    this.gps.startPursuit().then((started) => {
+      this.#checking = false;
+      if (!started) return this.gps.off('pursuit', onPursuit);   // another hunt owns the observers
+      if (this.gps.pursuit.state === 'acquiring') a?.say('Getting a fix on you.');
+    }, (error) => {
+      this.#checking = false;
+      this.gps.off('pursuit', onPursuit);
       this.logger?.warn({ error: error.message }, 'check location failed');
-      await this.voice?.say?.('The receiver did not come up.').catch(() => {});
-    } finally { this.#checking = false; }
-  }
-
-  /** The fix landed: the map (centred on the fix), then the word. Falls back to the Location
-   * screen if the map mode is not available. */
-  async #fixFound() {
-    if (!this.modes.switchTo('map')) { if (this.modes.current !== this) this.modes.switchTo(this.id); this.open('location'); }
-    await this.voice?.say?.('Got a fix. On your display.');
+      a?.say('The receiver did not come up.');
+    });
   }
 
   /** First use: a screen reports its setup missing (pad or glance calibration). */

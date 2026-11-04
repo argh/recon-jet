@@ -157,6 +157,56 @@ export class Voice extends EventEmitter {
   /** Forget the last transcript and answer. */
   clear() { this.transcript = ''; this.answer = ''; }
 
+  // ---- announcements ---------------------------------------------------------------------------
+  // Voice as an observer to state, not an owner of it: a module pursuing something (a GPS fix)
+  // registers an announcement and feeds it lines as its state lands, instead of a control-flow
+  // method awaiting say(). The policy is explicit, and user intent wins: a new user-initiated
+  // turn (press or wake word) supersedes every announcement registered before it.
+  #announcements = new Set();
+
+  /**
+   * Register a pending announcement. `say(text)` speaks at once while the handle is live (it
+   * interrupts nothing: clips queue to the speaker in order, so speech mid-answer follows the
+   * answer). A new user turn supersedes the handle: by default its later results are dropped;
+   * with `queue: true` they are held and spoken once that turn is over, after which the handle
+   * is live again. `cancel()` releases it.
+   * @param {{queue?: boolean}} [options]
+   * @returns {{say: (text: string) => void, cancel: () => void, superseded: boolean}}
+   */
+  announce({ queue = false } = {}) {
+    const a = {
+      queue, superseded: false, buffered: [],
+      say: (text) => this.#announceSay(a, text),
+      cancel: () => { a.buffered.length = 0; this.#announcements.delete(a); },
+    };
+    this.#announcements.add(a);
+    return a;
+  }
+
+  #announceSay(a, text) {
+    if (!this.#announcements.has(a)) { this.logger?.info({ text }, 'announcement dropped'); return; }   // cancelled, or superseded with the default policy
+    if (a.superseded) { a.buffered.push(text); return; }   // queue: true - spoken after the turn
+    this.logger?.info({ text }, 'announcement');
+    this.say(text).catch((error) => this.logger?.warn({ error: error.message, text }, 'announcement failed'));
+  }
+
+  /** A user turn begins: their intent wins over anything registered before it. */
+  #supersedeAnnouncements() {
+    for (const a of this.#announcements) {
+      if (a.queue) a.superseded = true;
+      else { this.#announcements.delete(a); this.logger?.info('announcement superseded'); }
+    }
+  }
+
+  /** The turn is over: queued announcements speak, in the order their results landed. */
+  #flushAnnouncements() {
+    for (const a of this.#announcements) {
+      if (!a.superseded) continue;
+      a.superseded = false;
+      for (const text of a.buffered.splice(0)) this.#announceSay(a, text);
+    }
+  }
+
   /**
    * The session asks with every final transcript before the model answers: a registered action
    * runs instead (true, the strip names it, a failure is a cue and a message); otherwise the turn
@@ -195,6 +245,7 @@ export class Voice extends EventEmitter {
   }
 
   #begin({ wake = false } = {}) {
+    this.#supersedeAnnouncements();
     const turn = ++this.turn;
     this.transcript = ''; this.answer = ''; this.audioFrames = 0; this.#wakeTurn = wake; this.#routed = false;
     this.#setState('listening');
@@ -286,6 +337,7 @@ export class Voice extends EventEmitter {
     this.state = next; this.#stateT = t;
     this.emit('state', { from, to: next, turn: this.turn });
     this.ui.requestRender();
+    if (next === 'idle') this.#flushAnnouncements();
   }
 
   // ---- speaker --------------------------------------------------------------------------------
