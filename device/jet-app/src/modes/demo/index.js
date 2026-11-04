@@ -56,6 +56,10 @@ export class DemoMode {
 
   async start() {
     this.modes.register(this);
+    // the surface comes back (jetd restart, link drop): this mode owns the rectangle math, so it
+    // re-requests with fresh geometry — the surface's own re-arm can only replay a stale rect,
+    // and one computed during the outage is garbage (width 0)
+    this.surface.on?.('ready', () => { if (this.modes.current === this) this.#camera(); });
     // "heya jet, run analysis": from any mode, come here and describe what the camera sees; spoken,
     // so the answer gets a spoken remark too (the button's describe stays silent)
     this.actions?.register('analysis', /^run analysis\b/, async () => {

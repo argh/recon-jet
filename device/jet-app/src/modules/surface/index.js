@@ -152,6 +152,9 @@ export class Surface extends EventEmitter {
    * while paused: the stream then starts on `resumeViewfinder()`.
    */
   async viewfinder(x, y, w, h, fps = this.viewfinderFps) {
+    // no geometry: the caller computed this rect from width 0, so it must not become the stored
+    // want (the owner re-requests on 'ready' with real numbers; see demo mode)
+    if (!this.ready) { this.logger?.info({ x, y, w, h }, 'viewfinder parked (no surface yet)'); return null; }
     this.#vf = { x, y, w, h, fps };
     if (this.viewfinderPaused) { this.logger?.info({ x, y, w, h }, 'viewfinder parked'); return null; }
     return this.#stream();
@@ -159,9 +162,7 @@ export class Surface extends EventEmitter {
 
   /** jetd starts streaming the wanted rectangle; a stop or pause that raced the reply wins. */
   async #stream() {
-    // no geometry yet (reconnect in progress): park; #acquire re-arms once the surface is back.
-    // Streaming now would use a caller rect computed from width 0 — off-panel garbage.
-    if (!this.ready) { this.logger?.info('viewfinder parked (no surface yet)'); return null; }
+    if (!this.ready) return null;   // belt: viewfinder() already refuses to store without geometry
     const p = this.#vf;
     const src = await this.deviceLink.viewfinder(p.x, p.y, p.w, p.h, p.fps);
     if (this.#vf !== p || this.viewfinderPaused) { this.deviceLink.viewfinderStop(); return null; }
