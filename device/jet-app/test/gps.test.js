@@ -121,3 +121,46 @@ test('local time: a good fix derives the zone, persists it, and sets TZ; off ret
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('gps: the fix pursuit is observable data: acquiring with satellite progress, then fixed, timeout or cancelled', async () => {
+  const gps = Object.assign(new Gps(), { logger: null, fixTimeoutS: 0.05 });
+  let fix = null, sats = 0;
+  gps.probe = async () => true;   // receiver already on
+  gps.goodFix = () => fix;
+  Object.defineProperty(gps, 'state', { get: () => ({ satsUsed: sats }) });
+  const events = [];
+  gps.on('pursuit', (p) => events.push(p));
+  // the hunt: progress only when the used count moves, fixed the moment the gated fix lands
+  assert.equal(await gps.startPursuit(), true);
+  assert.deepEqual(events, [{ state: 'acquiring', satsUsed: 0 }]);
+  assert.equal(await gps.startPursuit(), false, 'one hunt at a time');
+  gps.emit('update', {});
+  assert.equal(events.length, 1, 'no progress: no event');
+  sats = 3; gps.emit('update', {});
+  assert.deepEqual(events.at(-1), { state: 'acquiring', satsUsed: 3 });
+  fix = { good: true }; gps.emit('update', {});
+  assert.deepEqual(events.at(-1), { state: 'fixed', fix });
+  gps.emit('update', {});
+  assert.equal(events.at(-1).state, 'fixed', 'the hunt is over: updates no longer watched');
+  // a fresh good fix answers at once
+  events.length = 0;
+  assert.equal(await gps.startPursuit(), true);
+  assert.deepEqual(events, [{ state: 'fixed', fix }]);
+  // the pursuit owns its timeout; the receiver is left on
+  fix = null; events.length = 0;
+  await gps.startPursuit();
+  await new Promise((r) => setTimeout(r, 80));
+  assert.deepEqual(events.map((e) => e.state), ['acquiring', 'timeout']);
+  // cancelled: back to idle, nothing more
+  events.length = 0;
+  await gps.startPursuit();
+  gps.cancelPursuit();
+  assert.deepEqual(events.map((e) => e.state), ['acquiring', 'idle']);
+  // a receiver that will not come up rejects and returns to idle
+  gps.probe = async () => false;
+  gps.enable = async () => { throw new Error('no receiver'); };
+  events.length = 0;
+  await assert.rejects(gps.startPursuit(), /no receiver/);
+  assert.deepEqual(events.map((e) => e.state), ['acquiring', 'idle']);
+  assert.equal(gps.pursuit.state, 'idle');
+});

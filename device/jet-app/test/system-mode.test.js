@@ -19,8 +19,8 @@ import { Wear } from '../src/modules/wear/index.js';
 import { fakeLink, fakeSounds, fakeGps, buildSystem, tmpdir, settle } from './helpers.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-/** Poll until `cond()` is true (2 s limit). */
-async function until(cond, what = 'condition') { for (let i = 0; i < 400; i++) { if (cond()) return; await sleep(5); } throw new Error(`timeout: ${what}`); }
+/** Poll until `cond()` is true (6 s limit: the full suite runs files in parallel and loads the box). */
+async function until(cond, what = 'condition') { for (let i = 0; i < 1200; i++) { if (cond()) return; await sleep(5); } throw new Error(`timeout: ${what}`); }
 
 async function make({ calibrated = false, glanceRaw = 150, extra = {} } = {}) {
   const dir = tmpdir('jet-system-');

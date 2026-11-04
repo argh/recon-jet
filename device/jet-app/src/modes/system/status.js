@@ -51,11 +51,13 @@ export class StatusScreen {
     this.#shownPower = null;
     this.power.on('update', this.#onPower);     // we know we are showing: our models tell us when to repaint
     this.gps?.on('update', this.#onGps);
+    this.gps?.on('pursuit', this.#onGps);
     this.refresh();
   }
   leave() {
     this.power.off('update', this.#onPower);
     this.gps?.off('update', this.#onGps);
+    this.gps?.off('pursuit', this.#onGps);
   }
   tick() { if (++this.#ticks % NET_TICKS === 0) this.refresh(); }
 
@@ -114,7 +116,8 @@ export class StatusScreen {
     const bt = this.radio.controller;
     y = row(s, y, 'bluetooth', bt === undefined ? '-' : bt ? (bt.powered ? `on${this.radio.connected[0] ? '  ' + this.radio.connected[0].name : ''}` : 'off') : 'no controller', bt?.powered ? C.warn : C.dim);
     const gps = this.gps?.running, gstate = this.gps?.state;
-    const gval = gps == null ? '-' : !gps ? 'off' : gstate && gstate.at ? (gstate.fix !== 'none' ? `on  ${gstate.fix} fix  ${gstate.satsUsed} sats` : `on  ${gstate.satsUsed}/${gstate.satsInView} sats`) : 'on';
+    let gval = gps == null ? '-' : !gps ? 'off' : gstate && gstate.at ? (gstate.fix !== 'none' ? `on  ${gstate.fix} fix  ${gstate.satsUsed} sats` : `on  ${gstate.satsUsed}/${gstate.satsInView} sats`) : 'on';
+    if (this.gps?.pursuit?.state === 'acquiring') gval += '  (hunting)';
     y = row(s, y, 'gps', gval, gps ? C.warn : C.dim);
     y = row(s, y, 'glance', sensors.glance ? `${sensors.glance.worn ? 'worn' : 'off'}  raw ${sensors.glance.raw}  ${ago(sensors.glance.t)}` : '-');
     y = row(s, y, 'new view', sensors.view ? `${sensors.view.degrees} deg  ${ago(sensors.view.t)}` : '-');

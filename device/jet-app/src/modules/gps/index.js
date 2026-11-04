@@ -36,11 +36,12 @@ export class Gps extends EventEmitter {
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'where localTime/tz persist'))
       .property('localtimeFile', s('string').default('/etc/localtime').meta('advanced').meta('description', 'symlink kept pointing at the zone for the shell and friends'))
       .property('script', s('string').default('/opt/jet-app/scripts/gps.sh').meta('description', 'the GPS bring-up script (start|stop)'))
+      .property('fixTimeoutS', s('number').default(180).meta('description', 'how long a fix pursuit hunts before giving up'))
       .property('radio', s('Radio').lax().meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
     register: [Radio],
   };
-  fifo; socket; logFile; retryMs; maxHdop; minSats; localTime; tz; deviceConfig; localtimeFile; script; radio; logger;
+  fifo; socket; logFile; retryMs; maxHdop; minSats; localTime; tz; deviceConfig; localtimeFile; script; fixTimeoutS; radio; logger;
 
   /** @type {NmeaState} the rolling picture; `state` is its snapshot */ nmea = new NmeaState();
   /** @type {boolean|null} the daemon seen running (null until the first probe) */ running = null;
@@ -106,6 +107,52 @@ export class Gps extends EventEmitter {
       throw error;
     }
   }
+
+  // ---- the fix pursuit ------------------------------------------------------------------------
+  // "check my location" as data: idle -> acquiring (satsUsed as progress) -> fixed | timeout,
+  // emitted as 'pursuit' events. The pursuit owns its own timeout and knows nothing of voice or
+  // UI; the screens watch it to draw, the voice layer watches it to speak (modes/system).
+
+  /** @type {{state: 'idle'|'acquiring'|'fixed'|'timeout', satsUsed?: number, fix?: object}} */
+  pursuit = { state: 'idle' };
+  #pursuitTimer = null;
+  #pursuitWatch = null;
+
+  /**
+   * Hunt for a gated fix: receiver up if it is off, then `acquiring` until `goodFix()` lands
+   * (`fixed`) or `fixTimeoutS` passes (`timeout`, the receiver stays on). A fresh good fix
+   * resolves to `fixed` at once. One hunt at a time: resolves false while one is running.
+   * Rejects (back to `idle`) when the receiver will not come up.
+   */
+  startPursuit() {
+    if (this.pursuit.state === 'acquiring') return Promise.resolve(false);
+    const fix = this.goodFix();
+    if (fix) { this.#pursuit({ state: 'fixed', fix }); return Promise.resolve(true); }
+    this.#pursuit({ state: 'acquiring', satsUsed: 0 });
+    this.#pursuitWatch = () => {
+      const got = this.goodFix();
+      if (got) return this.#endPursuit({ state: 'fixed', fix: got });
+      const satsUsed = this.state.satsUsed ?? 0;
+      if (satsUsed !== this.pursuit.satsUsed) this.#pursuit({ state: 'acquiring', satsUsed });
+    };
+    this.on('update', this.#pursuitWatch);
+    this.#pursuitTimer = setTimeout(() => this.#endPursuit({ state: 'timeout' }), this.fixTimeoutS * 1000);
+    this.#pursuitTimer.unref?.();
+    return (async () => {
+      if (!(await this.probe())) await this.enable();
+      return true;
+    })().catch((error) => { this.#endPursuit({ state: 'idle' }); throw error; });
+  }
+
+  /** Call off a running hunt (the receiver is left as it is). */
+  cancelPursuit() { if (this.pursuit.state === 'acquiring') this.#endPursuit({ state: 'idle' }); }
+
+  #endPursuit(next) {
+    clearTimeout(this.#pursuitTimer); this.#pursuitTimer = null;
+    if (this.#pursuitWatch) { this.off('update', this.#pursuitWatch); this.#pursuitWatch = null; }
+    this.#pursuit(next);
+  }
+  #pursuit(next) { this.pursuit = next; this.emit('pursuit', next); }
 
   // ---- local time: the system clock stays UTC; only TZ (and /etc/localtime) localise ---------
   /** The Location screen's toggle. On with a fresh fix derives the zone now; otherwise the next

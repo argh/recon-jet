@@ -27,9 +27,10 @@ export class LocationScreen {
   enter() {
     this.#ticks = 0;
     this.gps.on('update', this.#onUpdate);   // the readout follows the receiver while showing
+    this.gps.on('pursuit', this.#onUpdate);  // ...and the hunt, when "check my location" runs one
     this.gps.probe().then(() => this.ui.requestRender());
   }
-  leave() { this.gps.off('update', this.#onUpdate); }
+  leave() { this.gps.off('update', this.#onUpdate); this.gps.off('pursuit', this.#onUpdate); }
   tick() { if (++this.#ticks % 5 === 0) this.gps.probe().then(() => this.ui.requestRender()); }
 
   onGesture(g) {
@@ -74,6 +75,8 @@ export class LocationScreen {
     y = row(s, y, `${this.#sel === 0 ? '> ' : '  '}gps`, this.busy ? 'switching...' : gps.running == null ? '-' : on ? 'ON  (WiFi rx degraded)' : 'off', this.busy ? C.dim : on ? C.warn : C.ok);
     const lt = gps.localTime;
     y = row(s, y, `${this.#sel === 1 ? '> ' : '  '}local time`, lt ? (gps.tz || 'waiting for a fix') : 'off (clocks on GMT)', lt ? (gps.tz ? C.ok : C.warn) : C.dim);
+    const hunt = gps.pursuit?.state;
+    if (hunt && hunt !== 'idle') y = row(s, y, 'hunt', hunt === 'acquiring' ? `getting a fix...  ${gps.pursuit.satsUsed ?? 0} sats` : hunt === 'fixed' ? 'fix found' : 'gave up (still looking)', hunt === 'fixed' ? C.ok : C.warn);
     if (on && g) {
       const stale = !g.at || Date.now() - g.at > 5000;
       y = row(s, y, 'satellites', stale ? 'no data from the receiver' : `${g.satsUsed} used  /  ${g.satsInView} in view`, stale ? C.dim : g.satsUsed ? C.ok : C.white);
