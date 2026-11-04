@@ -133,7 +133,7 @@ test('blitRGB565 and blitImage (jpeg-js round trip, scaled)', () => {
 test('surface: acquires geometry, writes changed rows only, leaves the viewfinder to jetd', async () => {
   const device = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'jet-fb-')), 'fb0');
   const sent = [];
-  const link = { connected: true, on() {}, send: (l) => sent.push(l), surface: async () => ({ w: 8, h: 4, bpp: 16, stride: 16 }),
+  const link = { connected: true, mode: 'remote', on() {}, send: (l) => sent.push(l), surface: async () => ({ w: 8, h: 4, bpp: 16, stride: 16 }),
     flushRect: (...a) => sent.push(`F ${a.join(' ')}`), viewfinder: async () => ({ w: 640, h: 480 }), viewfinderStop: () => sent.push('z') };
   const s = Object.assign(new Surface(), { device, minFlushMs: 0, fontDir, mainFont: 'ter-u20b.psf', smallFont: 'Lat2-Terminus12x6.psf', viewfinderFps: 10, deviceLink: link });
   const ready = once(s, 'ready');
@@ -175,7 +175,7 @@ test('surface: acquires geometry, writes changed rows only, leaves the viewfinde
 test('surface: a paused viewfinder is stopped at jetd but remembered; resume restarts it, a stop while paused forgets it', async () => {
   const device = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'jet-fb-')), 'fb0');
   const sent = [];
-  const link = { connected: true, on() {}, send: (l) => sent.push(l), surface: async () => ({ w: 8, h: 4, bpp: 16, stride: 16 }),
+  const link = { connected: true, mode: 'remote', on() {}, send: (l) => sent.push(l), surface: async () => ({ w: 8, h: 4, bpp: 16, stride: 16 }),
     flushRect: (...a) => sent.push(`F ${a.join(' ')}`), viewfinder: async (...a) => { sent.push(`Z ${a.join(' ')}`); return { w: 640, h: 480 }; }, viewfinderStop: () => sent.push('z') };
   const s = Object.assign(new Surface(), { device, minFlushMs: 0, fontDir, mainFont: 'ter-u20b.psf', smallFont: 'Lat2-Terminus12x6.psf', viewfinderFps: 10, deviceLink: link });
   const ready = once(s, 'ready');

@@ -116,7 +116,10 @@ export class DeviceLink extends EventEmitter {
   text(row, text, { centre = false } = {}) { return this.send(`${centre ? 'A' : 'T'} ${row} ${text}`); }
   rect(x, y, w, h, [r, g, b]) { return this.send(`B ${x} ${y} ${w} ${h} ${r} ${g} ${b}`); }
   backlight(level) { return this.send(`L ${level}`); }
-  setMode(name) { return this.send(`M ${name}`); }
+  /** Switch jetd's mode. `mode` flips optimistically: the ui's render gate reads it, and a frame
+   *  flushed during the ACK round-trip would land on jetd's screen (the shell-entry race: one
+   *  placeholder flush overwrote the console). jetd's `m` reply confirms or corrects it. */
+  setMode(name) { const ok = this.send(`M ${name}`); if (ok) this.mode = name; return ok; }
   captureStart(maxSeconds) { return this.send(maxSeconds ? `V ${maxSeconds}` : 'V'); }
   captureStop() { return this.send('v'); }
   /** Wake word listening on (with the model's cutoff and window) or off; resolves with jetd's `x` state ("on", "off", "error ..."). */

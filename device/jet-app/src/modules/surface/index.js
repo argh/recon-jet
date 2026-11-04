@@ -110,7 +110,10 @@ export class Surface extends EventEmitter {
   // ---- flushing ------------------------------------------------------------------------
   /** Write the changed rectangle to the framebuffer and push it. Returns the rectangle, or null. */
   flush() {
-    if (!this.active || !this.raster || !this.deviceLink.connected) return null;
+    // the live link mode, not just the event-driven `active` flag: setMode flips the mode
+    // optimistically, and a frame flushed in the ACK window lands on jetd's own screen (the
+    // shell-entry race: the placeholder overwrote the console)
+    if (!this.active || this.deviceLink.mode !== 'remote' || !this.raster || !this.deviceLink.connected) return null;
     const wait = this.minFlushMs - (Date.now() - this.#lastFlush);
     if (wait > 0) { clearTimeout(this.#timer); this.#timer = setTimeout(() => this.flush(), wait); return null; }
     const { raster } = this;
