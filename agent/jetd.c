@@ -1204,7 +1204,8 @@ static void mirror_scan(void) {
 static unsigned char au_carry[4]; static size_t au_carry_n;   /* keep tee chunks frame-aligned */
 static void mirror_audio_reset(void) { au_carry_n = 0; }
 static void mirror_audio(const void *buf, size_t len) {   /* tee of queued speaker PCM; chunks drop, never block */
-    mirror_last_tee = now_ms();                            /* audio is tee activity: no dirty-scan during playback */
+    /* audio must NOT touch mirror_last_tee: continuous audio (doom) would starve the video scan;
+     * the absolute cadence above is what keeps the scan off the hot loop */
     /* TCP slices the W payload at arbitrary byte boundaries, but the page views chunks as S16
      * stereo frames: carry the sub-frame remainder so every tee is a multiple of 4 bytes */
     unsigned char head[4]; size_t head_n = au_carry_n;

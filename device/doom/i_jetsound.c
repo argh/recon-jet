@@ -1,10 +1,11 @@
 /* Sound for Doom on the Recon Jet: doomgeneric's sound module (the slot i_sdlsound.c fills in the
  * SDL build) as a small software mixer. Doom's SFX lumps are 8-bit unsigned mono, mostly 11025 Hz;
  * a mixer thread resamples the playing channels (linear, 16.16 fixed point) into 10 ms slices of
- * 48 kHz stereo S16, the one format the speaker amp accepts (docs/audio.md), and writes them to an
- * `aplay -D hw:0,0` child over a pipe kept one page deep, so the blocking write paces the mixer
- * and little audio sits ahead of the speaker (~20 ms pipe + aplay's 40 ms buffer). Volume and
- * separation follow i_sdlsound.c's arithmetic. aplay dying (hw:0,0 busy with jet-app's TTS, say)
+ * 48 kHz stereo S16, the one format the speaker amp accepts (docs/audio.md), and streams them to
+ * jetd's `W` over loopback (docs/jetd.md) — jetd is the one owner of the speaker, so doom audio
+ * gets the same path as every other sound, including the live mirror's tee. TCP buffers unlike
+ * the old one-page aplay pipe, so the mixer paces itself on an absolute slice clock. Volume and
+ * separation follow i_sdlsound.c's arithmetic. jetd dying (or dropping us)
  * silences Doom until the next retry, two seconds later. Music is Chocolate Doom's OPL player
  * (i_oplmusic.c on the emulated chip in opl3.c, opl_jet.c as its driver), rendered into the same
  * slices here, so the mixer thread is the music clock: it keeps mixing even with aplay gone. */
@@ -15,7 +16,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -40,7 +44,6 @@ static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t mixer;
 static volatile int running;
 static int play_fd = -1;
-static pid_t play_pid = -1;
 static boolean use_sfx_prefix;
 static int16_t out[SLICE * 2], music[SLICE * 2];
 static int32_t acc[SLICE * 2];
@@ -51,29 +54,18 @@ float libsamplerate_scale = 0.65f;
 
 static int64_t now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
 
-/* ---- the aplay child ------------------------------------------------------------------- */
+/* ---- jetd as the speaker --------------------------------------------------------------- */
 static void player_close(void) {
     if (play_fd >= 0) { close(play_fd); play_fd = -1; }
-    if (play_pid > 0) { waitpid(play_pid, NULL, 0); play_pid = -1; }
 }
 
 static int player_open(void) {
-    /* not -q: aplay's "underrun!!!" lines are the one sign the mixer fell behind */
-    static char *argv[] = { "aplay", "-D", "hw:0,0", "-f", "S16_LE", "-c", "2", "-r", "48000", "-t", "raw",
-                            "--buffer-time", "40000", "--period-time", "10000", "-", NULL };
-    int p[2];
-    if (pipe(p) < 0) return -1;
-    pid_t pid = fork();
-    if (pid < 0) { close(p[0]); close(p[1]); return -1; }
-    if (pid == 0) {
-        dup2(p[0], 0); close(p[0]); close(p[1]);
-        signal(SIGUSR1, SIG_IGN); signal(SIGUSR2, SIG_IGN);           /* freeze/resume are ours, not aplay's */
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    close(p[0]);
-    fcntl(p[1], F_SETPIPE_SZ, 4096);                                  /* one page: ~21 ms of audio ahead of aplay */
-    play_fd = p[1]; play_pid = pid;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(7777) };
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof a) < 0) { if (fd >= 0) close(fd); return -1; }
+    int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    play_fd = fd;
     return 0;
 }
 
@@ -100,21 +92,30 @@ static void mix_slice(void) {
 }
 
 static void *mixer_main(void *arg) {
-    int64_t next_try = 0;
+    int64_t next_try = 0, next_slice = now_ms();
+    char hdr[24], trash[4096];
+    const int slice_ms = SLICE * 1000 / RATE;
     while (running) {
         if (play_fd < 0 && now_ms() >= next_try) {
             next_try = now_ms() + RETRY_MS;
-            if (player_open() < 0) perror("jet: aplay");
-            else fprintf(stderr, "jet: sound to aplay (pid %d)\n", (int)play_pid);
+            if (player_open() < 0) perror("jet: jetd");
+            else fprintf(stderr, "jet: sound to jetd (W over loopback)\n");
         }
         mix_slice();
-        if (play_fd < 0) { usleep(SLICE * 1000000 / RATE); continue; }     /* no speaker: still keep time for the music */
-        const char *p = (const char *)out; size_t left = sizeof out;
-        while (left) {
-            ssize_t n = write(play_fd, p, left);
-            if (n < 0) { if (errno == EINTR) continue; fprintf(stderr, "jet: aplay gone (%s), retrying in %d s\n", strerror(errno), RETRY_MS / 1000); player_close(); break; }
-            p += n; left -= n;
+        if (play_fd >= 0) {
+            /* jetd talks back (hello, log lines): drain or its stuck-writer rule drops us */
+            while (recv(play_fd, trash, sizeof trash, MSG_DONTWAIT) > 0) {}
+            int hl = snprintf(hdr, sizeof hdr, "W %zu\n", sizeof out);
+            struct iovec iov[2] = { { hdr, (size_t)hl }, { out, sizeof out } };
+            ssize_t want = hl + (ssize_t)sizeof out, n;
+            do n = writev(play_fd, iov, 2); while (n < 0 && errno == EINTR);
+            if (n != want) { fprintf(stderr, "jet: jetd gone (%s), retrying in %d s\n", n < 0 ? strerror(errno) : "short write", RETRY_MS / 1000); player_close(); }
         }
+        /* the mixer is its own clock: TCP buffers, so unlike the old one-page pipe nothing paces us */
+        next_slice += slice_ms;
+        int64_t wait = next_slice - now_ms();
+        if (wait > 0) usleep((useconds_t)(wait * 1000));
+        else if (wait < -10 * slice_ms) next_slice = now_ms();   /* fell far behind (suspend): resync, do not sprint */
     }
     return arg;
 }
