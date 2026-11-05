@@ -159,6 +159,20 @@ if [ -e /dev/media0 ] && [ -x $A/usr/bin/media-ctl ]; then
 fi
 # glance sensor (APDS9900 as tmd2771, DT node on i2c2): IIO device, polled by jetd
 [ -f /lib/modules/tsl2772.ko ] && { insmod /lib/modules/tsl2772.ko && log "tsl2772 (glance sensor) loaded" || log "tsl2772 insmod FAILED"; }
+# gyro "new view" stream (lsm9ds0_gyro, IIO): the ST gyro powers down between one-shot _raw reads,
+# so those go stale — a live angular-rate stream needs an hrtimer-triggered buffer. Create a 50 Hz
+# trigger and wire it to the gyro's buffer; jetd reads the stream. Needs CONFIG_IIO_HRTIMER_TRIGGER.
+GY=; for d in /sys/bus/iio/devices/iio:device*; do [ "$(cat $d/name 2>/dev/null)" = lsm9ds0_gyro ] && GY=$d && break; done
+if [ -n "$GY" ] && [ -d /sys/kernel/config/iio ]; then
+  mkdir -p /sys/kernel/config/iio/triggers/hrtimer/jetgyro 2>/dev/null
+  for t in /sys/bus/iio/devices/trigger*; do [ "$(cat $t/name 2>/dev/null)" = jetgyro ] && echo 50 > $t/sampling_frequency 2>/dev/null; done
+  echo jetgyro > $GY/trigger/current_trigger 2>/dev/null
+  for a in x y z; do echo 1 > $GY/buffer0/in_anglvel_${a}_en 2>/dev/null; done
+  echo 0 > $GY/buffer0/in_timestamp_en 2>/dev/null
+  echo 64 > $GY/buffer0/length 2>/dev/null
+  echo 1 > $GY/buffer0/enable 2>/dev/null
+  log "gyro buffer: enable=$(cat $GY/buffer0/enable 2>/dev/null) trigger=$(cat $GY/trigger/current_trigger 2>/dev/null)"
+fi
 OARGS=$(cat /mnt/data/mainline/ofm-args 2>/dev/null)   # e.g. "thr_x=14 thr_y=16" written by jetd setup
 [ -f /lib/modules/jet-ofm.ko ] && [ $SAFE -lt 2 ] && { insmod /lib/modules/jet-ofm.ko $OARGS && log "jet-ofm (touchpad) loaded ($OARGS)" || log "jet-ofm insmod FAILED"; }
 if [ -f /mnt/data/mainline/panel-off ] || [ $SAFE -ge 3 ]; then

@@ -162,7 +162,9 @@ export class DemoMode {
     let y = TOP + main.height + 6;
     const r = (label, value, colour) => { s.text(MARGIN, y, label, { font: small, colour: C.dim }); s.text(left, y, value, { font: small, colour: colour ?? C.white, align: 'right', maxWidth: left - MARGIN - 70 }); y += small.height + 1; };
     r('glance', glance ? (glance.worn ? 'worn' : 'off') + `  raw ${glance.raw}` : '-', glance?.worn ? C.ok : C.white);
-    r('new view', view ? `${view.degrees} deg  ${ago(view.t)}` : '-');
+    // the new-view trigger, as the detector would fire it: #count ticks on each decision, the angle
+    // is how far the head turned, the seconds reset to 0 and climb — so a fresh capture is unmistakable
+    r('new view', view ? `#${view.n}  ${view.degrees} deg  ${since(view.t)}s` : 'none yet', view && since(view.t) < 3 ? C.ok : C.white);
     r('battery', m ? `${m.vbat} mV  ${m.ma >= 0 ? '+' : ''}${m.ma} mA` : '-', m && m.vbat < 3600 ? C.warn : C.white);
     r('camera', s.viewfinderRect ? 'live' : 'off', s.viewfinderRect ? C.ok : C.dim);
     s.strokeRect(cam.x - 2, cam.y - 2, cam.w + 4, cam.h + 4, s.viewfinderRect ? C.ok : C.faint);
@@ -175,4 +177,4 @@ export class DemoMode {
   }
 }
 
-const ago = (t) => 'at ' + new Date(t).toTimeString().slice(0, 8);
+const since = (t) => Math.max(0, Math.round((Date.now() - t) / 1000));   // seconds since an event, for a live "just fired" readout

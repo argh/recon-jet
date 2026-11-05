@@ -1404,7 +1404,6 @@ static void view_thresholds_load(void) {
     if (f) { if (fscanf(f, "%d %d", &view_deg_thr, &view_still_ms) != 2) { view_deg_thr = 20; view_still_ms = 1000; } fclose(f); }
 }
 static int imu_fd = -1;    /* IIO buffer (/dev/iio:deviceN, 3 x le:s16 per sample at the sensor ODR) */
-static int sysfs_write(const char *path, const char *val) { FILE *f = fopen(path, "w"); if (!f) return -1; int r = fputs(val, f) < 0 ? -1 : 0; fclose(f); return r; }
 static void imu_open(void) {
     for (int i = 0; i < 16; i++) {
         char p[128], name[32] = ""; FILE *f;
@@ -1416,17 +1415,17 @@ static void imu_open(void) {
         for (int a = 0; a < 3; a++) snprintf(imu_path[a], sizeof imu_path[a], "/sys/bus/iio/devices/iio:device%d/in_anglvel_%c_raw", i, ax[a]);
         snprintf(p, sizeof p, "/sys/bus/iio/devices/iio:device%d/in_anglvel_scale", i);
         if ((f = fopen(p, "r"))) { double sc; if (fscanf(f, "%lf", &sc) == 1 && sc > 0) imu_scale_dps = sc * 57.29578; fclose(f); }
-        /* sysfs raw reads power the sensor up and down with settling delays (~50 ms per axis,
-         * which stalled the UI loop); the IIO buffer streams samples at the ODR instead */
+        /* init wires an hrtimer-triggered buffer to the gyro (kernel/initramfs/init) because the
+         * ST driver powers the sensor down between one-shot _raw reads, so those go stale. Open the
+         * stream if that buffer is running; otherwise fall back to the (stale-prone) 2 Hz sysfs
+         * reads so nothing crashes on a kernel without the trigger. */
         char d[128]; snprintf(d, sizeof d, "/sys/bus/iio/devices/iio:device%d", i);
-        int ok = 1;
-        for (int a = 0; a < 3 && ok; a++) { snprintf(p, sizeof p, "%s/scan_elements/in_anglvel_%c_en", d, ax[a]); ok = sysfs_write(p, "1") == 0; }
-        snprintf(p, sizeof p, "%s/scan_elements/in_timestamp_en", d); sysfs_write(p, "0");
-        snprintf(p, sizeof p, "%s/buffer/length", d); if (ok) ok = sysfs_write(p, "64") == 0;
-        snprintf(p, sizeof p, "%s/buffer/enable", d); if (ok) ok = sysfs_write(p, "1") == 0;
-        snprintf(p, sizeof p, "/dev/iio:device%d", i);
-        if (ok) imu_fd = open(p, O_RDONLY | O_NONBLOCK);
-        if (imu_fd < 0) fprintf(stderr, "jetd: gyro buffer unavailable, sysfs fallback at 2 Hz\n");
+        int streaming = 0;
+        snprintf(p, sizeof p, "%s/buffer0/enable", d); FILE *bf = fopen(p, "r");
+        if (!bf) { snprintf(p, sizeof p, "%s/buffer/enable", d); bf = fopen(p, "r"); }
+        if (bf) { streaming = fgetc(bf) == '1'; fclose(bf); }
+        if (streaming) { snprintf(p, sizeof p, "/dev/iio:device%d", i); imu_fd = open(p, O_RDONLY | O_NONBLOCK); }
+        if (imu_fd < 0) fprintf(stderr, "jetd: gyro buffer not streaming, sysfs fallback at 2 Hz\n");
         break;
     }
     view_thresholds_load();

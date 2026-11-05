@@ -13,11 +13,12 @@ export class Sensors extends EventEmitter {
   deviceLink;
   /** @type {{worn: number, raw: number, t: number}|null} the eye is at the glass */ glance = null;
   /** @type {{worn: number, raw: number, t: number}|null} the glasses are on a head */ worn = null;
-  /** @type {{degrees: number, t: number}|null} */ view = null;
+  /** @type {{degrees: number, t: number, n: number}|null} last new-view event; `n` counts them so a repeat is visible */ view = null;
+  /** total new-view events since start (a monotonic trigger counter, for watching the detector decide) */ viewCount = 0;
 
   async start() {
     this.deviceLink.on('glance', (g) => { this.glance = { ...g, t: Date.now() }; this.emit('glance', this.glance); });
     this.deviceLink.on('worn', (o) => { this.worn = { ...o, t: Date.now() }; this.emit('worn', this.worn); });
-    this.deviceLink.on('view', (v) => { this.view = { ...v, t: Date.now() }; this.emit('view', this.view); });
+    this.deviceLink.on('view', (v) => { this.view = { ...v, t: Date.now(), n: ++this.viewCount }; this.emit('view', this.view); });
   }
 }
