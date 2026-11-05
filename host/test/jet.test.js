@@ -24,8 +24,8 @@ function run(args, { env = {}, onStdout, timeoutMs = 15000 } = {}) {
   });
 }
 
-async function withFake(fn) {
-  const fake = await startFakeJetd();
+async function withFake(fn, opts) {
+  const fake = await startFakeJetd(opts);
   try { return await fn(fake, ['--host', '127.0.0.1', '--port', String(fake.port)]); }
   finally { await fake.close(); }
 }
@@ -191,6 +191,19 @@ test('live serves the page, bridges mirror rects over WS, and round-trips an inj
   const { code } = await done;
   assert.equal(code, 0);
 }));
+
+test('live keeps redialing until a subscribe is acknowledged, instead of stranding on a failed one', () => withFake(async (fake, flags) => {
+  // the first two connections drop on `N 1` without ever acknowledging it (jetd rebooting, WiFi
+  // settling): the regression left the bridge connected-but-unsubscribed after one such failure,
+  // so the page froze on a stale frame. It must keep trying and reach the connection that mirrors.
+  let child = null;
+  const done = run([...flags, 'live', '--open', 'false', '--http-port', '0'], { onStdout: (_all, c) => { child = c; }, timeoutMs: 20000 });
+  const t0 = Date.now();
+  while (fake.state.conns < 3 && Date.now() - t0 < 15000) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(fake.state.conns >= 3, `expected redials past the failed subscribes, saw ${fake.state.conns} connections`);
+  child?.kill('SIGINT');
+  assert.equal((await done).code, 0, 'stays up and exits cleanly, never crashed out of the redial loop');
+}, { flakyMirrors: 2 }));
 
 test('screenshot assembles the mirror refresh into a PNG', () => withFake(async (fake, flags) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'jet-screen-'));

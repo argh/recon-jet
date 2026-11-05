@@ -36,30 +36,36 @@ export class LiveCommand extends Command {
 
     // The Jet's links drop (USB falls off, WiFi starves under GPS/BT coex) and come back; a live
     // session must ride through that, so unlike the one-shot commands this one redials forever.
-    const attach = (j) => {
+    const wire = (j) => {
       j.on('blit', (r) => { text({ t: 'b', x: r.x, y: r.y, w: r.w, h: r.h }); binary(r.data); });
       j.on('speaker', (d) => { text({ t: 'u' }); binary(d); });
       j.on('mic', (d) => { text({ t: 'a' }); binary(d); });
       j.on('line', (l) => { if (!'bua'.includes(l[0]) || l[1] !== ' ') text({ t: 'line', line: l }); });
-      j.on('close', async () => {
-        if (stopping) return;
-        current = null; text({ t: 'gone' });
-        console.log(`jet live: lost ${this.host} — redialing`);
-        for (;;) {
-          await new Promise((r) => setTimeout(r, 2000));
-          if (stopping) return;
-          const next = new JetClient(this);
-          try { await next.connect(); } catch { continue; }
-          attach(next); current = next;
-          fmt = await next.request('N', 'N 1');
-          text({ t: 'fmt', ...fmt });
-          console.log(`jet live: ${this.host} is back`);
-          return;
-        }
-      });
+      j.once('close', () => { if (!stopping && current === j) { current = null; text({ t: 'gone' }); redial(); } });
     };
-    attach(jet);
-    fmt = await jet.request('N', 'N 1');
+    // A session is up only once the socket is connected AND `N 1` is acknowledged: the subscribe
+    // reply can be slow or never arrive (jetd still booting, WiFi settling after a reconnect), and
+    // a single failed attempt must not strand the bridge connected-but-unsubscribed — that left the
+    // page frozen on a stale, half-refreshed frame (it read as garbage). redial() keeps trying and
+    // is a single shared promise, so the startup path and a later drop await the same recovery
+    // rather than racing (the race exited the process mid-reconnect). Each acknowledged `N 1` makes
+    // jetd restart a full band refresh, so a recovered link always repaints whole.
+    const subscribe = async (j) => { const f = await j.request('N', 'N 1'); fmt = f; current = j; text({ t: 'fmt', ...f }); };
+    let redialPromise = null, dialing = null;
+    const redial = () => redialPromise ??= (async () => {
+      text({ t: 'gone' });
+      console.log(`jet live: lost ${this.host} — redialing`);
+      for (; !stopping;) {
+        const next = dialing = new JetClient(this);
+        try { await next.connect(); wire(next); await subscribe(next); console.log(`jet live: ${this.host} is mirroring`); break; }
+        catch { await next.close().catch(() => {}); if (stopping) break; await new Promise((r) => setTimeout(r, 2000)); }
+      }
+      dialing = null; redialPromise = null;
+    })();
+
+    wire(jet);
+    try { await subscribe(jet); }
+    catch { await jet.close().catch(() => {}); redial(); }   // background: the server still starts and the page shows "reconnecting"
 
     const server = createServer(async (req, res) => {
       const file = req.url === '/' ? 'index.html' : null;   // one page; nothing else is served
@@ -89,14 +95,15 @@ export class LiveCommand extends Command {
 
     await new Promise((r) => server.listen(this.httpPort, '127.0.0.1', r));
     const url = `http://127.0.0.1:${server.address().port}/`;
-    console.log(`jet live: mirroring ${fmt.w}x${fmt.h} @ ${fmt.bpp} bpp from ${this.host}`);
+    console.log(fmt ? `jet live: mirroring ${fmt.w}x${fmt.h} @ ${fmt.bpp} bpp from ${this.host}` : `jet live: waiting for ${this.host} to come up`);
     console.log(`jet live: ${url}  (Ctrl-C stops; the glass is never blocked by this)`);
     if (this.open) spawn('open', [url], { stdio: 'ignore', detached: true }).unref();
 
     await this.interrupted();
     stopping = true;
     current?.send('N 0');
-    await (current !== jet ? current?.close() : undefined);   // the original is closed by the base
+    if (current && current !== jet) await current.close().catch(() => {});   // the original is closed by the base
+    if (dialing && dialing !== current) await dialing.close().catch(() => {});   // a reconnect in flight: let Ctrl-C exit promptly
     server.close(); for (const ws of sockets) ws.destroy();
   }
 }

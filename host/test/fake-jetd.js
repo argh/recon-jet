@@ -6,9 +6,11 @@ import net from 'node:net';
 
 export const LOG_LINES = ['j <6>[1.000000] boot one', 'j <6>[2.000000] boot two', 'j <6>[3.000000] boot three'];
 
-export function startFakeJetd() {
+export function startFakeJetd({ flakyMirrors = 0 } = {}) {
   const received = [];
+  const state = { conns: 0 };
   const server = net.createServer((sock) => {
+    const flaky = ++state.conns <= flakyMirrors;   // this connection drops on `N 1` without ever acknowledging it
     sock.on('error', () => {});
     sock.write('h 428 240 42 12\n' + LOG_LINES.join('\n') + '\n');
     const later = setTimeout(() => sock.write('k 86 1\nk 86 0\nj <6>[9.000000] live line\n'), 150);
@@ -27,8 +29,9 @@ export function startFakeJetd() {
         else if (t === 'O') sock.write('o 1 210\n');
         else if (t === 'J') { const n = a[0] ? Math.min(+a[0], LOG_LINES.length) : LOG_LINES.length; for (const l of LOG_LINES.slice(LOG_LINES.length - n)) sock.write(l + '\n'); sock.write(`J ${n}\n`); }
         else if (t === 'S') { const w = +a[0] || 640, h = +a[1] || 480; const bytes = Buffer.alloc(w * h * 2, 0x80); sock.write(`f ${w} ${h} UYVY ${bytes.length}\n`); sock.write(bytes); }
-        else if (t === 'N' && a[0] === '1') {            // mirror on: format reply + a full-frame refresh
-          sock.write('N 428 240 16 856\n');
+        else if (t === 'N' && a[0] === '1') {
+          if (flaky) { setTimeout(() => sock.destroy(), 10); continue; }   // subscribe never acknowledged: the reply the bridge awaits never comes
+          sock.write('N 428 240 16 856\n');                                // mirror on: format reply + a full-frame refresh
           const rect = Buffer.alloc(428 * 240 * 2, 0x1f);
           sock.write(`b 0 0 428 240 ${rect.length}\n`); sock.write(rect);
         }
@@ -37,5 +40,5 @@ export function startFakeJetd() {
     });
   });
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () =>
-    resolve({ port: server.address().port, received, close: () => new Promise((r) => server.close(r)) })));
+    resolve({ port: server.address().port, received, state, close: () => new Promise((r) => server.close(r)) })));
 }
