@@ -5,6 +5,7 @@ import jpeg from 'jpeg-js';
 import { uyvyToRgba } from '../src/lib/uyvy.js';
 import { DemoMode } from '../src/modes/demo/index.js';
 import { fakeLink, fakeSounds, settle } from './helpers.js';
+import { EventEmitter } from 'node:events';
 
 test('uyvy -> rgba: grey, pure colours, subsampling', () => {
   const px = (Y, U, V) => Buffer.from([U, Y, V, Y]);   // two pixels
@@ -58,6 +59,36 @@ test('demo: front press takes a snapshot, encodes it and streams the answer; rea
   demo.onGesture('press:front'); await new Promise((r) => setTimeout(r, 20));
   assert.equal(demo.error, 'no camera'); assert.equal(demo.state, 'idle');
   assert.deepEqual(demo.sounds.played.filter((n) => n === 'error'), ['error'], 'the failure is heard'); assert.equal(demo.sounds.played[0], 'ack', 'sending is acknowledged');
+});
+
+test('demo: the live camera is modal — it pauses under the mode menu, resumes on cancel, stays off on a pick', async () => {
+  const modes = Object.assign(new EventEmitter(), { current: null, register(m) { this.current = m; return this; } });
+  const ui = { requestRender() {}, setStrip() {} };
+  const surface = Object.assign(new EventEmitter(), {
+    width: 428, height: 240, viewfinderRect: null, paused: false,
+    viewfinder(x, y, w, h) { if (!this.paused) this.viewfinderRect = { x, y, w, h }; return Promise.resolve({ w: 640, h: 480 }); },
+    stopViewfinder() { this.viewfinderRect = null; },
+    pauseViewfinder() { this.paused = true; this.viewfinderRect = null; },
+    resumeViewfinder() { this.paused = false; this.viewfinderRect = { x: 262, y: 14, w: 160, h: 120 }; },
+  });
+  const demo = Object.assign(new DemoMode(), { modes, ui, surface, deviceLink: fakeLink(), power: { smoothed: null }, sensors: {}, voice: {}, sounds: fakeSounds() });
+  await demo.start();                 // register() made demo the current mode
+  demo.enter(); await settle();
+  assert.ok(surface.viewfinderRect, 'camera live while Describe is the screen');
+  // front hold opens the switcher: the camera (a jetd-side overlay) must stop, or it shows through the menu
+  modes.emit('switcher', true); await settle();
+  assert.equal(surface.paused, true); assert.equal(surface.viewfinderRect, null, 'paused under the menu');
+  // rear cancels back to Describe: the camera comes back
+  modes.emit('switcher', false); await settle(); await new Promise((r) => setTimeout(r, 0));
+  assert.equal(surface.paused, false); assert.ok(surface.viewfinderRect, 'resumed on cancel');
+  // picking another mode: switcher closes, then current moves away (and leave() stops the camera) — no brief re-open
+  modes.emit('switcher', true); await settle();
+  assert.equal(surface.paused, true);
+  modes.emit('switcher', false);      // closeSwitcher fires first...
+  modes.current = { id: 'other' };    // ...then switchTo moves current away (same tick, before the deferred resume)
+  demo.leave();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(surface.paused, true, 'a pick does not resume the camera for a frame');
 });
 
 test('demo: the "run analysis" command comes to this mode first, then describes', async () => {

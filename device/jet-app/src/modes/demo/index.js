@@ -60,6 +60,15 @@ export class DemoMode {
     // re-requests with fresh geometry — the surface's own re-arm can only replay a stale rect,
     // and one computed during the outage is garbage (width 0)
     this.surface.on?.('ready', () => { if (this.modes.current === this) this.#camera(); });
+    // the camera is a jetd-side overlay (it streams into the panel rectangle itself), so the modal
+    // menu — which only replaces what the ui renders — does not cover it: the live view would show
+    // through the switcher. Pause it while the menu is up, resume when it closes back to us. The
+    // resume is deferred so a menu dismissed by *picking another mode* (leave() stops the camera)
+    // does not briefly re-open it.
+    this.modes.on?.('switcher', (open) => {
+      if (open) { if (this.modes.current === this) this.surface.pauseViewfinder(); return; }
+      queueMicrotask(() => { if (this.modes.current === this) this.surface.resumeViewfinder(); });
+    });
     // "heya jet, run analysis": from any mode, come here and describe what the camera sees; spoken,
     // so the answer gets a spoken remark too (the button's describe stays silent)
     this.actions?.register('analysis', /^run analysis\b/, async () => {
