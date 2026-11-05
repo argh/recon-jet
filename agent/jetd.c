@@ -315,6 +315,7 @@ static int raw_keys, ext_surface;   /* set by K / E: a client owns keys / pixels
 #define MAXHUB 16
 struct hub { int fd; char inbuf[16384]; size_t inlen;   /* large enough that a W clip drains in few passes */ size_t bin_need; int64_t stuck_since;
              int mirror; unsigned mirror_y;      /* N 1: tee panel pushes; mirror_y < H = full refresh in progress */
+             unsigned char *mpend; size_t mpend_len, mpend_off, mcap;   /* unsent tail of a partial mirror write (framing must stay intact) */
              int owns_keys, owns_surface; };     /* this client's K / E grants (raw_keys / ext_surface are ORs of these) */
 static struct hub hubs[MAXHUB]; static int nhubs;
 static struct hub *cur_hub;      /* the hub whose line is being handled (W payload accounting) */
@@ -332,6 +333,7 @@ static void recompute_owners(void) {
 /* no client: the recovery UI returns, the mic is released (a turn or the wake word has no one to serve) */
 static void hub_drop(int i, const char *why) {
     fprintf(stderr, "jetd: hub fd %d dropped (%s)%s\n", hubs[i].fd, why, hubs[i].owns_keys || hubs[i].owns_surface ? ", owned the UI" : "");
+    free(hubs[i].mpend);
     close(hubs[i].fd); hubs[i] = hubs[--nhubs]; recompute_owners();
     if (!nhubs) { dirty = 1; if (turn_on) turn_end("stop"); if (listen_on) listen_stop("off"); }
 }
@@ -1147,23 +1149,50 @@ static int mirror_fit(int fd, size_t need) {
     if (ioctl(fd, TIOCOUTQ, &queued) < 0 || getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sl) < 0) return 0;
     return sndbuf - queued > (int)need + 64;
 }
+/* Flush a buffered tail from an earlier partial write. 1 = empty (clear to send new), 0 = still
+ * pending (socket full), -1 = dead. The tail MUST go out in full before any new frame, or the
+ * page's byte-stream parser stays desynced on the torn payload. */
+static int mirror_drain(struct hub *hb) {
+    while (hb->mpend_off < hb->mpend_len) {
+        ssize_t wr = send(hb->fd, hb->mpend + hb->mpend_off, hb->mpend_len - hb->mpend_off, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (wr > 0) { hb->mpend_off += (size_t)wr; continue; }
+        if (wr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        hb->mirror = 0; return -1;
+    }
+    hb->mpend_off = hb->mpend_len = 0;
+    return 1;
+}
+/* Send one framed message (header + payload iovecs) to a mirror client without ever tearing it.
+ * A short write is not fatal: the unsent remainder is copied into the hub's tail buffer and
+ * drained over later loops, so the socket filling mid-frame costs frames (dropped at boundaries,
+ * the band refresh repaints), never a corrupt, stuck page. 0 = queued, -1 = no room, -2 = dead. */
+static int mirror_sendv(struct hub *hb, struct iovec *iov, int niov, size_t total) {
+    if (hb->mpend_off < hb->mpend_len) { int d = mirror_drain(hb); if (d <= 0) return d < 0 ? -2 : -1; }   /* finish the prior tail first */
+    struct msghdr msg = { .msg_iov = iov, .msg_iovlen = niov };
+    ssize_t wr = sendmsg(hb->fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (wr == (ssize_t)total) return 0;
+    if (wr < 0) return (errno == EAGAIN || errno == EWOULDBLOCK) ? -1 : (hb->mirror = 0, -2);
+    size_t sent = (size_t)wr, rem = total - sent;                 /* a partial write: stash the rest, framing preserved */
+    if (!hb->mpend || rem > hb->mcap) { hb->mirror = 0; return -2; }
+    size_t skip = sent, o = 0;
+    for (int i = 0; i < niov && o < rem; i++) {
+        if (skip >= iov[i].iov_len) { skip -= iov[i].iov_len; continue; }
+        size_t take = iov[i].iov_len - skip;
+        memcpy(hb->mpend + o, (unsigned char *)iov[i].iov_base + skip, take);
+        o += take; skip = 0;
+    }
+    hb->mpend_len = rem; hb->mpend_off = 0;
+    return 0;
+}
 static int mirror_rect(struct hub *hb, int x, int y, int w, int h) {   /* 0 sent, -1 no room, -2 dead */
     unsigned bpp = vinfo.bits_per_pixel / 8;
     size_t rowlen = (size_t)w * bpp, len = rowlen * h;
     char hdr[64]; int hl = snprintf(hdr, sizeof hdr, "b %d %d %d %d %zu\n", x, y, w, h, len);
-    if (!mirror_fit(hb->fd, hl + len)) return -1;
+    if (hb->mpend_off >= hb->mpend_len && !mirror_fit(hb->fd, hl + len)) return -1;   /* (a pending tail still drains via sendv) */
     struct iovec iov[1 + 256]; int niov = 0;
     iov[niov++] = (struct iovec){ hdr, (size_t)hl };
     for (int r = 0; r < h; r++) iov[niov++] = (struct iovec){ fbmem + (size_t)(y + r) * finfo.line_length + (size_t)x * bpp, rowlen };
-    /* MSG_DONTWAIT, never writev: the fit check reads the advertised sndbuf, which overstates
-     * usable space (skb overhead), and a link that died without an RST (USB drop) never drains —
-     * a blocking write there froze the whole UI loop until the link was bounced. */
-    struct msghdr msg = { .msg_iov = iov, .msg_iovlen = niov };
-    ssize_t wr = sendmsg(hb->fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL);
-    if (wr == (ssize_t)(hl + len)) return 0;
-    if (wr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return -1;   /* no room after all: owe a refresh */
-    hb->mirror = 0;                               /* error or short write: framing torn, mirroring ends */
-    return -2;
+    return mirror_sendv(hb, iov, niov, (size_t)hl + len);
 }
 static void mirror_bands(struct hub *hb) {        /* continue a full refresh while there is room */
     while (hb->mirror && hb->mirror_y < H) {
@@ -1183,8 +1212,13 @@ static void mirror_tee(int x, int y, int w, int h) {
     }
 }
 static int mirror_pending(void) {
-    for (int i = 0; i < nhubs; i++) if (hubs[i].mirror && hubs[i].mirror_y < H) return 1;
+    for (int i = 0; i < nhubs; i++) if (hubs[i].mirror && (hubs[i].mirror_y < H || hubs[i].mpend_off < hubs[i].mpend_len)) return 1;
     return 0;
+}
+/* Each loop: push out any tail left by a partial write, so a frame that didn't fit in one write
+ * still completes even when no new frame follows (the page would otherwise wait on it forever). */
+static void mirror_pump(void) {
+    for (int i = 0; i < nhubs; i++) if (hubs[i].mirror && hubs[i].mpend_off < hubs[i].mpend_len) mirror_drain(&hubs[i]);
 }
 static int mirror_on(void) {
     for (int i = 0; i < nhubs; i++) if (hubs[i].mirror) return 1;
@@ -1237,12 +1271,9 @@ static void mirror_audio(const void *buf, size_t len) {   /* tee of queued speak
         struct hub *hb = &hubs[i];
         if (!hb->mirror) continue;
         char hdr[32]; int hl = snprintf(hdr, sizeof hdr, "u %zu\n", send_len);
-        if (!mirror_fit(hb->fd, hl + send_len)) continue;
+        if (hb->mpend_off >= hb->mpend_len && !mirror_fit(hb->fd, hl + send_len)) continue;   /* chunk dropped, stream intact */
         struct iovec iov[3] = { { hdr, (size_t)hl }, { head, head_n }, { (void *)buf, body } };
-        struct msghdr msg = { .msg_iov = iov, .msg_iovlen = 3 };
-        ssize_t wr = sendmsg(hb->fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL);
-        if (wr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;   /* chunk dropped, stream intact */
-        if (wr != (ssize_t)(hl + send_len)) hb->mirror = 0;
+        mirror_sendv(hb, iov, 3, (size_t)hl + send_len);   /* a partial write stashes its tail; it never tears the stream */
     }
 }
 
@@ -1678,8 +1709,11 @@ static void handle_line(char *l) {
     case 'Q': power_read(); sendf("q %d %d %d %d 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x %s %d\n", pstate.vbat, pstate.vsys, pstate.vbus, pstate.ma, pstate.ctrl1 & 0xff, pstate.stat1 & 0xff, pstate.lin & 0xff, pstate.cin & 0xff, pstate.vichrg & 0xff, pstate.udc[0] ? pstate.udc : "-", pstate.maxpower); break;
     case 'N': if (cur_hub) {                                   /* mirror on/off for THIS client */
             cur_hub->mirror = atoi(l + 1) != 0; cur_hub->mirror_y = H;
+            cur_hub->mpend_off = cur_hub->mpend_len = 0;        /* a fresh (re)subscribe starts the stream clean */
             if (cur_hub->mirror) {
                 int sb = 1 << 20; setsockopt(cur_hub->fd, SOL_SOCKET, SO_SNDBUF, &sb, sizeof sb);
+                cur_hub->mcap = (size_t)W * H * (vinfo.bits_per_pixel / 8) + 128;   /* holds any single rect's tail */
+                if (!cur_hub->mpend) cur_hub->mpend = malloc(cur_hub->mcap);
                 only_fd = cur_hub->fd; sendf("N %u %u %u %u\n", W, H, vinfo.bits_per_pixel, finfo.line_length); only_fd = -1;
                 cur_hub->mirror_y = 0; mirror_bands(cur_hub);  /* full refresh starts immediately */
             }
@@ -1818,6 +1852,7 @@ int main(int argc, char **argv) {
             if (reveal >= klog_n) reveal = -1;
         }
         if (auto_remote && nhubs && reveal < 0 && now_ms() - start_ms >= boot_hold_s * 1000LL) { auto_remote = 0; set_mode(M_REMOTE); }
+        mirror_pump();   /* complete any partial-write tail before new frames */
         for (int i = 0; i < nhubs; i++) if (hubs[i].mirror && hubs[i].mirror_y < H) mirror_bands(&hubs[i]);
         mirror_scan();
         render();
