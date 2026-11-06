@@ -1390,13 +1390,15 @@ static void vf_frame(void) {
 
 /* ---- hub commands --------------------------------------------------------------- */
 /* ---- head motion (LSM9DS0 gyro via IIO): "new view" events ---------------------------
- * 20 Hz sysfs polling. Zero-rate bias (tens of deg/s on this part) is tracked while the head is
- * still (per-axis spread over the last 0.5 s below ~1.5 deg/s). Rotation magnitude above 5 deg/s
- * accumulates degrees; once more than ~20 degrees have been turned and the head has then been
- * still for 1 s, "n <degrees>" is sent (the hub's live look uses it as the trigger). The
- * accumulator decays after 5 s of stillness. Thresholds in /mnt/data/mainline/view ("deg still_ms"). */
+ * 20-50 Hz polling. Zero-rate bias (tens of deg/s on this part) is tracked while the head is still
+ * (per-axis spread over the last samples below ~3 deg/s). While moving (rate magnitude > 5 deg/s)
+ * the SIGNED rate is integrated per axis, so the accumulator is the NET change of gaze direction,
+ * not the total path travelled: looking left then right and back nets ~0 and is not a new view,
+ * while a turn that ends somewhere new accumulates. When the net rotation passes ~20 degrees and
+ * the head has then held still for 1 s, "n <degrees>" is sent (a look trigger). The accumulator
+ * decays after 5 s of stillness. Thresholds in /mnt/data/mainline/view ("deg still_ms"). */
 static char imu_path[3][128]; static double imu_scale_dps = 0.000153 * 57.29578;
-static double imu_bias[3], imu_rot, imu_ring[3][10]; static int imu_ringn, imu_ringfill, imu_still_ms, imu_quiet_ms, imu_biased;
+static double imu_bias[3], imu_disp[3], imu_ring[3][10]; static int imu_ringn, imu_ringfill, imu_still_ms, imu_quiet_ms, imu_biased;
 static int view_deg_thr = 20, view_still_ms = 1000; static int64_t imu_next;
 static void view_thresholds_load(void) {
     FILE *f = fopen("/mnt/data/mainline/view", "r"); if (!f) f = fopen("/android-data/mainline/view", "r");
@@ -1451,10 +1453,15 @@ static void imu_poll(void) {
     if (!imu_biased) return;
     double mag = 0; for (int a = 0; a < 3; a++) { double h = w[a] - imu_bias[a]; mag += h * h; } mag = sqrt(mag);
     double dt = imu_fd >= 0 ? 0.05 : 0.5;
-    if (mag > 5.0) { imu_rot += mag * dt; imu_still_ms = 0; imu_quiet_ms = 0; }
-    else { imu_still_ms += (int)(dt * 1000); imu_quiet_ms += (int)(dt * 1000); }
-    if (imu_rot >= view_deg_thr && imu_still_ms >= view_still_ms) { sendf("n %.0f\n", imu_rot); imu_rot = 0; imu_still_ms = 0; }
-    else if (imu_quiet_ms >= 5000) { imu_rot = 0; imu_quiet_ms = 0; }
+    if (mag > 5.0) {                                 /* moving: integrate the signed rate per axis */
+        for (int a = 0; a < 3; a++) imu_disp[a] += (w[a] - imu_bias[a]) * dt;
+        imu_still_ms = 0; imu_quiet_ms = 0;
+    } else { imu_still_ms += (int)(dt * 1000); imu_quiet_ms += (int)(dt * 1000); }
+    /* net change of direction = magnitude of the per-axis integral (back-and-forth cancels); an
+     * approximation of the true rotation angle, close enough for a degrees threshold */
+    double net = sqrt(imu_disp[0] * imu_disp[0] + imu_disp[1] * imu_disp[1] + imu_disp[2] * imu_disp[2]);
+    if (net >= view_deg_thr && imu_still_ms >= view_still_ms) { sendf("n %.0f\n", net); imu_disp[0] = imu_disp[1] = imu_disp[2] = 0; imu_still_ms = 0; }
+    else if (imu_quiet_ms >= 5000) { imu_disp[0] = imu_disp[1] = imu_disp[2] = 0; imu_quiet_ms = 0; }
 }
 
 static int send_payload_all(const char *hdr, size_t hl, const void *buf, size_t len);
