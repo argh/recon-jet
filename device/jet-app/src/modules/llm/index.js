@@ -39,9 +39,10 @@ export class Llm {
       .property('asrTimeoutMs', s('number').default(20000).meta('description', 'transcription request timeout'))
       .property('chatTimeoutMs', s('number').default(90000).meta('description', 'chat/describe request timeout (whole stream)'))
       .property('ttsTimeoutMs', s('number').default(30000).meta('description', 'speech request timeout'))
+      .property('warmCooldownMs', s('number').default(60000).meta('description', 'ignore a `warm` for a model warmed this recently (the vision model unloads after ~300 s idle)'))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  base; asrModel; chatModel; ttsModel; ttsVoice; visionModel; thinkingKwarg; reasoningEffort; maxTokens; visionMaxTokens; asrTimeoutMs; chatTimeoutMs; ttsTimeoutMs; logger;
+  base; asrModel; chatModel; ttsModel; ttsVoice; visionModel; thinkingKwarg; reasoningEffort; maxTokens; visionMaxTokens; asrTimeoutMs; chatTimeoutMs; ttsTimeoutMs; warmCooldownMs; logger;
 
   #url = null; #agent = null;
   now = () => performance.now();
@@ -123,6 +124,24 @@ export class Llm {
     const content = [{ type: 'text', text: question }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}` } }];
     return this.chatStream([{ role: 'user', content }], onToken, signal, { model: this.visionModel, maxTokens: this.visionMaxTokens });
   }
+
+  /**
+   * Pre-load a model (the vision model by default) with a one-token request, so the next real
+   * call is warm instead of eating the cold load (~7 s for the 34 GB vision model vs ~0.1 s warm).
+   * Fire-and-forget and debounced per model, so it is safe to call on every head-turn; it only
+   * displaces the other big LLM on the server, never the resident voice model.
+   */
+  warm(model = this.visionModel, cooldownMs = this.warmCooldownMs) {
+    if (!this.configured) return;
+    const nowMs = this.now();
+    if (nowMs - (this.#warmedAt.get(model) ?? -Infinity) < cooldownMs) return;
+    this.#warmedAt.set(model, nowMs);
+    const body = JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: '.' }],
+      ...(this.thinkingKwarg ? { chat_template_kwargs: { enable_thinking: false } } : {}) });
+    this.#request('chat/completions', { headers: { 'Content-Type': 'application/json' }, body, timeoutMs: this.chatTimeoutMs })
+      .then(() => this.logger?.debug({ model, ms: Math.round(this.now() - nowMs) }, 'warmed'), (error) => this.logger?.debug({ model, error: error.message }, 'warm skipped'));
+  }
+  #warmedAt = new Map();
 
   // ---- transport ---------------------------------------------------------------------------
   /**

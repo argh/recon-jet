@@ -413,6 +413,10 @@ export class Voice extends EventEmitter {
   }
   #warmedAt = -Infinity;
 
+  /** Pre-load the vision model so a describe is warm, not a cold load. Debounced in the llm module;
+   *  safe to call on entering a vision mode and on each new-view while it is current. */
+  warmVision() { this.llm?.warm?.(); }
+
   /** Debug: speak `text` through the TTS and the Jet's speaker; resolves with the PCM size. */
   async say(text) {
     if (!this.llm?.configured) throw new Error('llm.base is not set');

@@ -69,6 +69,10 @@ export class DemoMode {
       if (open) { if (this.modes.current === this) this.surface.pauseViewfinder(); return; }
       queueMicrotask(() => { if (this.modes.current === this) this.surface.resumeViewfinder(); });
     });
+    // a new view while Describe is up strongly predicts a describe is coming — pre-warm the vision
+    // model (debounced in the llm module) so the look is warm, not a ~7 s cold load. Gated to this
+    // mode so turning your head elsewhere never evicts the server's code model.
+    this.sensors?.on?.('view', () => { if (this.modes.current === this) this.voice.warmVision?.(); });
     // "heya jet, run analysis": from any mode, come here and describe what the camera sees; spoken,
     // so the answer gets a spoken remark too (the button's describe stays silent)
     this.actions?.register('analysis', /^run analysis\b/, async () => {
@@ -80,6 +84,7 @@ export class DemoMode {
   enter() {
     this.state = 'idle'; this.answer = ''; this.error = null;
     this.#camera();
+    this.voice.warmVision?.();   // entering Describe: pre-load vision so the first look is warm
   }
   leave() { this.surface.stopViewfinder(); this.#look++; this.state = 'idle'; this.answer = ''; this.error = null; }
 
