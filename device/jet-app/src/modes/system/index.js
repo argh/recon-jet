@@ -17,6 +17,7 @@ import { PadCalScreen } from './pad-cal.js';
 import { GlanceCalScreen } from './glance-cal.js';
 import { BrightnessScreen } from './brightness.js';
 import { BluetoothScreen } from './bluetooth.js';
+import { Bluez } from '../../modules/bt/bluez.js';
 import { LocationScreen } from './location.js';
 import { WearScreen } from './wear.js';
 
@@ -41,6 +42,7 @@ export class SystemMode {
       .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
     register: [
+      Bluez,
       { ModuleClass: StatusScreen, relative: true },
       { ModuleClass: PadCalScreen, relative: true },
       { ModuleClass: GlanceCalScreen, relative: true },
