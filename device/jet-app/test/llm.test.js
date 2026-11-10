@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { wavHeader, pcmToWav, parseWav } from '../src/modules/llm/wav.js';
 import { multipart } from '../src/modules/llm/multipart.js';
 import { SseParser } from '../src/modules/llm/sse.js';
-import { toStereo48k } from '../src/modules/llm/resample.js';
+import { toStereo48k, createStereo48kStream } from '../src/modules/llm/resample.js';
 import { Llm } from '../src/modules/llm/index.js';
 
 const sine = (hz, rate, frames, amp = 10000) => { const b = Buffer.alloc(frames * 2); for (let i = 0; i < frames; i++) b.writeInt16LE(Math.round(Math.sin(2 * Math.PI * hz * i / rate) * amp), i * 2); return b; };
@@ -73,6 +73,33 @@ test('resample: 24 kHz mono -> 48 kHz stereo doubles the frames, keeps the tone,
   assert.equal(up.length, 6 * 4); assert.deepEqual([0, 1, 2, 3, 4, 5].map((i) => up.readInt16LE(i * 4)), [0, 3333, 6666, 10000, 10000, 10000]);
   assert.equal(toStereo48k(Buffer.alloc(0), { rate: 24000 }).length, 0);
   assert.throws(() => toStereo48k(Buffer.alloc(4), { rate: 24000, channels: 3 }), /3-channel/);
+});
+
+test('resample stream: chunked 24k->48k matches the whole-buffer result, no seam clicks or drift', () => {
+  const inFrames = 2400;
+  const tone = sine(1000, 24000, inFrames);   // 100 ms of 1 kHz, mono 24k
+  // feed it in uneven chunks (odd frame counts, including a tiny one) through the stateful resampler
+  const stream = createStereo48kStream({ rate: 24000, channels: 1 });
+  const parts = [];
+  for (let off = 0, n = 0; off < tone.length; n++) {
+    const frames = [17, 1, 300, 83, 999][n % 5];            // uneven, and a 1-frame chunk
+    const end = Math.min(off + frames * 2, tone.length);
+    parts.push(stream(tone.subarray(off, end)));
+    off = end;
+  }
+  const streamed = Buffer.concat(parts);
+  // length matches the whole-buffer 2x within the final held sample or two: a causal stream cannot
+  // emit a sample that needs a not-yet-arrived input, so the last ~2 output frames (~0.04 ms, at a
+  // sentence boundary) are dropped. Constant, not drift (that is the point of feeding uneven chunks).
+  assert.ok(streamed.length <= inFrames * 2 * 4 && inFrames * 2 * 4 - streamed.length <= 8, `len ${streamed.length} vs ${inFrames * 2 * 4}`);
+  // every seam is continuous: no sample jumps bigger than the whole-buffer resample ever produces
+  const whole = toStereo48k(tone, { rate: 24000 });
+  let maxStep = 0; for (let i = 1; i < whole.length / 4; i++) maxStep = Math.max(maxStep, Math.abs(whole.readInt16LE(i * 4) - whole.readInt16LE((i - 1) * 4)));
+  for (let i = 1; i < streamed.length / 4; i++) {
+    assert.equal(streamed.readInt16LE(i * 4), streamed.readInt16LE(i * 4 + 2), 'L==R');
+    assert.ok(Math.abs(streamed.readInt16LE(i * 4) - streamed.readInt16LE((i - 1) * 4)) <= maxStep + 1, `seam jump at ${i}`);
+  }
+  assert.throws(() => createStereo48kStream({ rate: 96000 }), /upsample-only/);
 });
 
 /** A fake OpenAI-compatible server; `script` decides each route's reply. */

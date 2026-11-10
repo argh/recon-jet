@@ -18,7 +18,7 @@ import { Schema } from '@versionzero/module-manager';
 import { pcmToWav, parseWav } from './wav.js';
 import { multipart } from './multipart.js';
 import { SseParser } from './sse.js';
-import { toStereo48k } from './resample.js';
+import { toStereo48k, createStereo48kStream } from './resample.js';
 
 const s = Schema.create;
 
@@ -39,10 +39,11 @@ export class Llm {
       .property('asrTimeoutMs', s('number').default(20000).meta('description', 'transcription request timeout'))
       .property('chatTimeoutMs', s('number').default(90000).meta('description', 'chat/describe request timeout (whole stream)'))
       .property('ttsTimeoutMs', s('number').default(30000).meta('description', 'speech request timeout'))
+      .property('ttsStreamHz', s('number').default(24000).meta('description', 'sample rate of the streaming TTS `speech.audio.delta` PCM (mono); the clone emits 24 kHz'))
       .property('warmCooldownMs', s('number').default(60000).meta('description', 'ignore a `warm` for a model warmed this recently (the vision model unloads after ~300 s idle)'))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  base; asrModel; chatModel; ttsModel; ttsVoice; visionModel; thinkingKwarg; reasoningEffort; maxTokens; visionMaxTokens; asrTimeoutMs; chatTimeoutMs; ttsTimeoutMs; warmCooldownMs; logger;
+  base; asrModel; chatModel; ttsModel; ttsVoice; visionModel; thinkingKwarg; reasoningEffort; maxTokens; visionMaxTokens; asrTimeoutMs; chatTimeoutMs; ttsTimeoutMs; ttsStreamHz; warmCooldownMs; logger;
 
   #url = null; #agent = null;
   now = () => performance.now();
@@ -113,6 +114,23 @@ export class Llm {
     const pcm = toStereo48k(data, { rate, channels });
     this.logger?.debug({ httpMs: Math.round(t1 - t0), resampleMs: Math.round(this.now() - t1), rate, channels, bytes: pcm.length }, 'tts');
     return pcm;
+  }
+
+  /**
+   * Streamed text -> speech: `onPcm` gets each 48 kHz stereo S16 chunk as the server renders it
+   * (the voice clone streams `speech.audio.delta` events, raw PCM at `ttsStreamHz` mono), so the
+   * first sound comes out in ~0.15 s instead of waiting for the whole clip (~2 s). The chunks are
+   * resampled with continuity across boundaries, so they play gaplessly through jetd's `W` buffer.
+   * @param {string} text @param {(pcm: Buffer) => void} onPcm @param {AbortSignal} [signal]
+   */
+  async speakStream(text, onPcm, signal) {
+    const sse = new SseParser(), resample = createStereo48kStream({ rate: this.ttsStreamHz, channels: 1 });
+    const body = JSON.stringify({ model: this.ttsModel, input: text, voice: this.ttsVoice, stream_format: 'sse' });
+    await this.#request('audio/speech', { headers: { 'Content-Type': 'application/json' }, body, signal, timeoutMs: this.ttsTimeoutMs, onChunk: (chunk) => {
+      for (const ev of sse.feed(chunk)) {
+        if (ev.type === 'speech.audio.delta' && ev.audio) { const pcm = resample(Buffer.from(ev.audio, 'base64')); if (pcm.length) onPcm(pcm); }
+      }
+    } });
   }
 
   /**

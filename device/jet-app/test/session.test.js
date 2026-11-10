@@ -15,7 +15,7 @@ const wait = (ms, signal) => new Promise((resolve, reject) => {
 
 /** Transcript = the byte count; the answer is two sentences; audio = sentence length bytes. */
 function fakeLlm({ chatDelayMs = 2, speakMs = () => 2, tokens = ['It is', ' sunny', '.', ' Take a', ' hat.'], fail = {} } = {}) {
-  const calls = { transcribe: [], chat: [], speak: [], aborted: [] };
+  const calls = { transcribe: [], chat: [], speak: [], speakStream: [], aborted: [] };
   return { calls, configured: true,
     async transcribe(pcm, { signal } = {}) {
       calls.transcribe.push(pcm.length);
@@ -38,13 +38,21 @@ function fakeLlm({ chatDelayMs = 2, speakMs = () => 2, tokens = ['It is', ' sunn
       if (fail.speak) throw new Error('tts down');
       return Buffer.alloc(text.length, 7);
     },
+    async speakStream(text, onPcm, signal) {
+      calls.speakStream.push(text);
+      signal?.addEventListener('abort', () => calls.aborted.push(`tts ${text}`), { once: true });
+      await wait(speakMs(text), signal);
+      if (fail.speak) throw new Error('tts down');
+      const buf = Buffer.alloc(text.length, 7), mid = Math.ceil(buf.length / 2);   // two chunks, like the TTS deltas
+      onPcm(buf.subarray(0, mid)); onPcm(buf.subarray(mid));
+    },
     async describe(jpeg, question, onToken, signal) { calls.look = { jpeg, question }; for (const t of ['a ', 'desk']) { await wait(2, signal); onToken(t); } return 'a desk'; },
   };
 }
 
 function make(opts) {
   const llm = fakeLlm(opts);
-  const session = new VoiceSession(llm, { partialMs: 15, sentenceGapMs: 0 });   // no gap: audio bytes = sentence bytes below
+  const session = new VoiceSession(llm, { partialMs: 15, sentenceGapMs: 0, streamTts: opts?.streamTts ?? false });   // no gap: audio bytes = sentence bytes below
   const events = [];
   for (const type of ['partial', 'final', 'token', 'audio', 'done', 'error']) session.on(type, (m) => events.push(m));
   return { llm, session, events, types: () => events.map((e) => e.type) };
@@ -75,6 +83,21 @@ test('session: a turn: partials while listening, final, tokens, per-sentence aud
   assert.equal(session.busy, false);
   // the partial's request was aborted when the capture ended, if one was in flight; no stray partials after
   assert.ok(!types().slice(types().indexOf('final')).includes('partial'));
+});
+
+test('session: streamTts emits each sentence as chunks, in order, with the sentence label on its first chunk', async () => {
+  // sentence 1 renders slower than sentence 2: chunks must still come out sentence-by-sentence in order
+  const { llm, session, events } = make({ streamTts: true, speakMs: (s) => (s.startsWith('It') ? 30 : 2) });
+  session.start(7); session.audio(Buffer.alloc(3200));
+  assert.equal(await session.end(), true);
+  const audio = events.filter((e) => e.type === 'audio');
+  assert.equal(audio.length, 4, 'two sentences x two chunks');
+  assert.deepEqual(audio.map((e) => e.sentence), ['It is sunny.', '', 'Take a hat.', ''], 'the sentence label rides the first chunk only');
+  assert.equal(audio[0].pcm.length + audio[1].pcm.length, 'It is sunny.'.length, 'chunks of a sentence sum to the whole');
+  assert.equal(audio[2].pcm.length + audio[3].pcm.length, 'Take a hat.'.length);
+  assert.deepEqual(llm.calls.speakStream, ['It is sunny.', 'Take a hat.']);
+  assert.equal(llm.calls.speak.length, 0, 'the whole-clip path is not used when streaming');
+  assert.deepEqual(events.at(-1), { type: 'done', turn: 7, answer: 'It is sunny. Take a hat.' });
 });
 
 test('session: nothing heard: final "" then done "" with no chat', async () => {

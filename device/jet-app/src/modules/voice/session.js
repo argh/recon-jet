@@ -26,9 +26,9 @@ export class VoiceSession extends EventEmitter {
    * @param {{partialMs?: number, systemPrompt?: string, sentenceGapMs?: number, logger?: object}} [options]
    *   sentenceGapMs: silence after each sentence's audio; the TTS voices run "Roger. Say..." together
    */
-  constructor(llm, { partialMs = 1000, systemPrompt = SYSTEM_PROMPT, sentenceGapMs = 400, logger } = {}) {
+  constructor(llm, { partialMs = 1000, systemPrompt = SYSTEM_PROMPT, sentenceGapMs = 400, streamTts = true, logger } = {}) {
     super();
-    this.llm = llm; this.partialMs = partialMs; this.systemPrompt = systemPrompt; this.sentenceGapMs = sentenceGapMs; this.logger = logger;
+    this.llm = llm; this.partialMs = partialMs; this.systemPrompt = systemPrompt; this.sentenceGapMs = sentenceGapMs; this.streamTts = streamTts; this.logger = logger;
   }
   now = () => performance.now();
   /** @type {object|null} the running turn */ #turn = null;
@@ -140,16 +140,31 @@ export class VoiceSession extends EventEmitter {
       let drain = Promise.resolve(), ttsError = null, firstToken = null, firstAudio = null, sentences = 0, tokens = 0;
       // the TTS chain never rejects (a rejected promise waiting for the chat stream to end would
       // be an unhandled rejection): a failure is kept and aborts the turn, the error goes out once
+      const gap = () => this.sentenceGapMs > 0 && this.#emit(t, 'audio', { pcm: Buffer.alloc(Math.round(this.sentenceGapMs * 192)), bytes: Math.round(this.sentenceGapMs * 192), sentence: '' });   // 48 kHz stereo S16: 192 bytes/ms
       const speakQueued = () => {
         drain = drain.then(async () => {
           while (queue.length && this.#current(t) && !ttsError) {
             const sentence = queue.shift(), t0 = this.now();
-            const spoken = await this.llm.speak(sentence, signal);
-            if (!this.#current(t)) return;
-            const audio = this.sentenceGapMs > 0 ? Buffer.concat([spoken, Buffer.alloc(Math.round(this.sentenceGapMs * 192))]) : spoken;   // 48 kHz stereo S16: 192 bytes per ms
-            sentences++; firstAudio ??= this.#ms(tEnd);
-            this.logger?.info({ turn: t.id, ms: this.#ms(t0), bytes: audio.length, audioS: +(audio.length / 192000).toFixed(2), sentence }, 'tts');
-            this.#emit(t, 'audio', { pcm: audio, bytes: audio.length, sentence });
+            if (this.streamTts) {
+              // stream the sentence as it renders: each chunk is played as it arrives, so the first
+              // sound does not wait for the whole clip (the consumer plays one `W` per audio event)
+              let chunks = 0;
+              await this.llm.speakStream(sentence, (pcm) => {
+                if (!this.#current(t)) return;
+                chunks++; firstAudio ??= this.#ms(tEnd);
+                this.#emit(t, 'audio', { pcm, bytes: pcm.length, sentence: chunks === 1 ? sentence : '' });
+              }, signal);
+              if (!this.#current(t)) return;
+              gap(); sentences++;
+              this.logger?.info({ turn: t.id, ms: this.#ms(t0), chunks, sentence }, 'tts');
+            } else {
+              const spoken = await this.llm.speak(sentence, signal);
+              if (!this.#current(t)) return;
+              const audio = this.sentenceGapMs > 0 ? Buffer.concat([spoken, Buffer.alloc(Math.round(this.sentenceGapMs * 192))]) : spoken;
+              sentences++; firstAudio ??= this.#ms(tEnd);
+              this.logger?.info({ turn: t.id, ms: this.#ms(t0), bytes: audio.length, audioS: +(audio.length / 192000).toFixed(2), sentence }, 'tts');
+              this.#emit(t, 'audio', { pcm: audio, bytes: audio.length, sentence });
+            }
           }
         }).catch((error) => { if (this.#current(t) && !ttsError) { ttsError = error; t.abort.abort(); } });
       };
