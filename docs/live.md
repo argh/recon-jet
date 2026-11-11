@@ -20,6 +20,18 @@ At 428x240 a full frame is 205 KB and a typical text-UI delta a few KB: raw RGB5
 enough that MJPEG or any encoder would only add CPU and latency on a device with no hardware
 codec available.
 
+A client that writes `/dev/fb0` and pushes the panel itself keeps that fast path and still gets
+mirrored by reporting each rect it pushed (`f <x> <y> <w> <h>`); doom does this, so the page sees
+it at its real frame rate (~41 fps over USB) rather than the ~7 fps the fallback below managed.
+The fallback is only for writers that never talk to jetd at all — `fbfill`, anything started from
+the shell: while a mirror is subscribed and some writer could still be reaching the glass
+unannounced, jetd checksums the framebuffer in bands and tees the ones that changed. Reading
+back from the panel's write-combining memory costs ~185 ns per load instruction whatever its
+width, so the hash runs four interleaved FNV lanes to keep the loads 16 bytes wide (2.4 ms a
+frame, not 9.1), and backs off to a 600 ms cadence while the picture sits still. With every
+writer reporting — the usual case, since jet-app's surface module reports too — it does not run
+at all, which is why an idle mirror now costs jetd almost nothing.
+
 Mirroring never blocks the UI loop. A rect is written only when it wholly fits the socket's
 free space (`SO_SNDBUF` − `TIOCOUTQ`); a client that falls behind is owed a **banded full
 refresh** that drains as its socket empties — and because bands read the live framebuffer,

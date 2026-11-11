@@ -64,6 +64,7 @@ struct omapfb_update_window { uint32_t x, y, width, height, format, out_x, out_y
 #define SRC_H DOOMGENERIC_RESY
 
 /* ---- framebuffer ------------------------------------------------------------------- */
+static int jfd = -1;                           /* jetd socket: keys in, and our push reports out */
 static int fbfd = -1;
 static uint8_t *fbmem;
 static struct fb_var_screeninfo vinfo;
@@ -76,10 +77,23 @@ static uint32_t pal[256];                      /* palette packed for the fb's pi
 /* Black the whole glass, not just our window: whatever was on it (jet-app, the switcher) stays
  * in the side bars otherwise, since the panel only repaints what is pushed. */
 static int need_clear = 1;     /* cleared with the first frame: by then jet-app has stopped painting */
+/* Tell jetd the rectangle we just pushed ourselves, so a live mirror gets the frame straight
+ * from the tee. Without it jetd can only find our pixels by checksumming the panel back out of
+ * write-combining memory (its mirror_scan), which costs it CPU and mirrors us at ~7 fps.
+ * Never blocks the game: a dropped line costs that frame's mirror update and nothing else,
+ * and the next frame reports the same rectangle again. */
+static void jet_pushed(int x, int y, unsigned w, unsigned h) {
+    if (jfd < 0) return;
+    char line[64];
+    int n = snprintf(line, sizeof line, "f %d %d %u %u\n", x, y, w, h);
+    send(jfd, line, n, MSG_DONTWAIT | MSG_NOSIGNAL);
+}
+
 static void fb_clear(void) {
     struct omapfb_update_window uw = { 0, 0, vinfo.xres, vinfo.yres, 0, 0, 0, vinfo.xres, vinfo.yres, {0} };
     memset(fbmem, 0, finfo.line_length * vinfo.yres);
     ioctl(fbfd, OMAPFB_UPDATE_WINDOW, &uw);
+    jet_pushed(0, 0, vinfo.xres, vinfo.yres);
 }
 
 static void fb_init(void) {
@@ -116,6 +130,7 @@ static void fb_palette(void) {
 static void fb_push(void) {
     struct omapfb_update_window uw = { out_x, out_y, out_w, out_h, 0, out_x, out_y, out_w, out_h, {0} };
     if (ioctl(fbfd, OMAPFB_UPDATE_WINDOW, &uw) < 0) { static int once; if (!once++) perror("OMAPFB_UPDATE_WINDOW"); }
+    jet_pushed(out_x, out_y, out_w, out_h);
 }
 
 static void fb_blit(void) {
@@ -210,7 +225,6 @@ static void freeze_sig(int on) { frz_sig = on; set_frozen(frz_sig || frz_mode); 
 static void freeze_mode(int on) { frz_mode = on; set_frozen(frz_sig || frz_mode); }
 
 /* ---- input sources: jetd socket, or evdev directly ------------------------------------- */
-static int jfd = -1;
 static char jbuf[1024]; static size_t jlen;
 static struct pollfd evfd[8]; static int nev;
 

@@ -39,7 +39,8 @@ host -> jet:
 | `T <row> <text>` / `A <row> <text>` / `X <x> <y> <text>` | text at row, centred on row, at pixel |
 | `R <r> <g> <b>` | text colour |
 | `B <x> <y> <w> <h> <r> <g> <b>` | filled rectangle |
-| `F` | flush to the panel |
+| `F` | flush to the panel (an external-surface owner may name a rect: `F <x> <y> <w> <h>`) |
+| `f <x> <y> <w> <h>` | external-surface owner only: "I pushed this rect to the panel myself" — mirror it without pushing it again. A surface owner that reports its pushes this way (or with `F`) is never checksummed by the mirror's fallback scan |
 | `L <0-1023>` | backlight |
 | `P` | ping -> `p` |
 | `M <remote\|log\|shell>` | switch mode |

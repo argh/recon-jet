@@ -85,6 +85,7 @@
  *   b <x> <y> <w> <h> <len> + bytes   mirror rect (packed rows, fb pixel format per the N reply)
  *   u <len> + bytes             mirror tee of queued speaker audio (48 kHz stereo S16)
  */
+#include <arm_neon.h>
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
@@ -179,10 +180,13 @@ static void fb_flush(void) {
 /* External surface: a client owns the framebuffer pixels (writes /dev/fb0 itself) and asks jetd
  * only to push rectangles to the panel. jetd then draws nothing in remote mode except the live
  * viewfinder rectangle (Z). */
+static int fb_clip(int *x, int *y, int *w, int *h) {   /* clamp to the panel; 0 if nothing is left */
+    if (*x < 0) { *w += *x; *x = 0; } if (*y < 0) { *h += *y; *y = 0; }
+    if (*x + *w > (int)W) *w = W - *x; if (*y + *h > (int)H) *h = H - *y;
+    return *w > 0 && *h > 0;
+}
 static void fb_update(int x, int y, int w, int h) {
-    if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; }
-    if (x + w > (int)W) w = W - x; if (y + h > (int)H) h = H - y;
-    if (w <= 0 || h <= 0) return;
+    if (!fb_clip(&x, &y, &w, &h)) return;
     struct omapfb_update_window uw = { x, y, w, h, 0, 0, 0, w, h, {0} };
     ioctl(fbfd, OMAPFB_UPDATE_WINDOW, &uw);
     mirror_tee(x, y, w, h);
@@ -316,7 +320,8 @@ static int raw_keys, ext_surface;   /* set by K / E: a client owns keys / pixels
 struct hub { int fd; char inbuf[16384]; size_t inlen;   /* large enough that a W clip drains in few passes */ size_t bin_need; int64_t stuck_since;
              int mirror; unsigned mirror_y;      /* N 1: tee panel pushes; mirror_y < H = full refresh in progress */
              unsigned char *mpend; size_t mpend_len, mpend_off, mcap;   /* unsent tail of a partial mirror write (framing must stay intact) */
-             int owns_keys, owns_surface; };     /* this client's K / E grants (raw_keys / ext_surface are ORs of these) */
+             int owns_keys, owns_surface;        /* this client's K / E grants (raw_keys / ext_surface are ORs of these) */
+             int reports; };                     /* has told us about a push of its own (F / f): its pixels need no scanning */
 static struct hub hubs[MAXHUB]; static int nhubs;
 static struct hub *cur_hub;      /* the hub whose line is being handled (W payload accounting) */
 static int only_fd = -1;         /* when >= 0, sendf/send_payload_all go to this hub only (hello + log replay) */
@@ -329,6 +334,14 @@ static void recompute_owners(void) {
     for (int i = 0; i < nhubs; i++) { k |= hubs[i].owns_keys; e |= hubs[i].owns_surface; }
     if (raw_keys != k || ext_surface != e) dirty = 1;
     raw_keys = k; ext_surface = e;
+}
+/* Does every client holding the panel tell us when it pushes (F / f)? Then nothing reaches the
+ * glass behind the mirror's back and the dirty scan has nothing left to find. jet-app always
+ * has (its surface module takes `E 1` on connect and reports every rect), so the scan is really
+ * only for a surface owner that stays silent and for programs run from the shell. */
+static int surface_reports(void) {
+    for (int i = 0; i < nhubs; i++) if (hubs[i].owns_surface && !hubs[i].reports) return 0;
+    return 1;
 }
 /* no client: the recovery UI returns, the mic is released (a turn or the wake word has no one to serve) */
 static void hub_drop(int i, const char *why) {
@@ -1224,34 +1237,57 @@ static int mirror_on(void) {
     for (int i = 0; i < nhubs; i++) if (hubs[i].mirror) return 1;
     return 0;
 }
-/* Direct-framebuffer writers (Doom pushes its own update windows; fbfill; anything run from the
- * shell) never pass the tee above. Fallback: while mirrors are subscribed and no tee has fired
- * recently, checksum the framebuffer in bands and tee the ones that changed — a few MB/s of
- * reads at worst, ~7 fps of mirror for a 35 fps game, zero cost while the normal tee flows. */
+/* Direct-framebuffer writers never pass the tee above: a surface owner pushing its own update
+ * windows without reporting them (`f`), or a program run from the shell (fbfill and friends).
+ * Fallback for those: checksum the framebuffer in bands and tee the ones that changed.
+ *
+ * Reading /dev/fb0 back is write-combining memory — no prefetch, no cache-line fill — so it
+ * costs ~185 ns per load instruction whatever that instruction's width (measured on the glass).
+ * A serial hash chain is unvectorizable and so pins the loads at 4 bytes; four interleaved
+ * FNV-1a lanes widen them to 16 and bring a frame from 9.1 ms down to 2.4 ms, every byte still
+ * read either way. Sampling sparsely would be another 8x but can step over a glyph-sized change,
+ * which is exactly what the shell case needs to catch, so coverage stays complete. */
 static uint32_t mirror_band_sum[(240 + MIRROR_BAND - 1) / MIRROR_BAND];
 static uint32_t band_checksum(unsigned y, unsigned rows) {
+    uint32x4_t v = vdupq_n_u32(2166136261u);
+    const uint32x4_t prime = vdupq_n_u32(16777619u);
     uint32_t s = 2166136261u;
+    const unsigned words = W * (vinfo.bits_per_pixel / 8) / 4;
     for (unsigned r = 0; r < rows; r++) {
         const uint32_t *p = (const uint32_t *)(fbmem + (size_t)(y + r) * finfo.line_length);
-        for (unsigned i = 0; i < W * (vinfo.bits_per_pixel / 8) / 4; i++) s = (s ^ p[i]) * 16777619u;
+        unsigned i = 0;
+        for (; i + 4 <= words; i += 4) v = vmulq_u32(veorq_u32(v, vld1q_u32(p + i)), prime);
+        for (; i < words; i++) s = (s ^ p[i]) * 16777619u;          /* row tail */
     }
-    return s;
+    return s ^ vgetq_lane_u32(v, 0) ^ vgetq_lane_u32(v, 1) ^ vgetq_lane_u32(v, 2) ^ vgetq_lane_u32(v, 3);
 }
-static int64_t mirror_next_scan;
+static int64_t mirror_next_scan; static int mirror_scan_quiet;   /* consecutive scans that found nothing */
 static void mirror_scan(void) {
     int64_t now = now_ms();
+    /* Nothing to go looking for unless something can reach the glass without saying so: a
+     * surface owner that doesn't report its pushes, or the shell, where an arbitrary program
+     * can write /dev/fb0. When jetd owns the pixels, or the owner reports, every change has
+     * already gone out through the tee. (So a direct writer run over ssh while the app is on
+     * the glass is not mirrored — run it from the shell mode if it should be.) */
+    if (!mirror_on() || !((mode == M_CONSOLE) || (ext_surface && !surface_reports()))) { mirror_scan_quiet = 0; return; }
     /* absolute cadence: without it a static screen re-checksummed every loop pass, and during
      * audio the POLLIN storm span the loop so fast the scan throttled W consumption below
      * real-time (the page heard stuttering tails) */
-    if (!mirror_on() || now < mirror_next_scan || now - mirror_last_tee < 150) return;
-    mirror_next_scan = now + 150;
+    if (now < mirror_next_scan || now - mirror_last_tee < 150) return;
+    /* and back off while the picture sits still: coverage is unchanged, the first change after a
+     * quiet spell merely takes up to 600 ms to notice, and finding one snaps the cadence back */
+    mirror_next_scan = now + 150 * (mirror_scan_quiet > 8 ? 4 : mirror_scan_quiet > 4 ? 2 : 1);
+    int changed = 0;
     for (unsigned b = 0, y = 0; y < H; b++, y += MIRROR_BAND) {
         unsigned rows = H - y < MIRROR_BAND ? H - y : MIRROR_BAND;
         uint32_t s = band_checksum(y, rows);
         if (s == mirror_band_sum[b]) continue;
         mirror_band_sum[b] = s;
         mirror_tee(0, y, W, rows);
+        changed = 1;
     }
+    if (changed) { mirror_scan_quiet = 0; mirror_next_scan = now + 150; }
+    else if (mirror_scan_quiet < 1000) mirror_scan_quiet++;
 }
 static unsigned char au_carry[4]; static size_t au_carry_n;   /* keep tee chunks frame-aligned */
 static void mirror_audio_reset(void) { au_carry_n = 0; }
@@ -1697,8 +1733,17 @@ static void handle_line(char *l) {
     case 'B': if (drawing_ok && sscanf(l + 1, "%d %d %d %d %d %d %d", &x, &y, &w, &h, &r, &g, &b) == 7) fill_rect(x, y, w, h, px(r & 255, g & 255, b & 255)); break;
     case 'F':
         if (!drawing_ok) break;
+        if (cur_hub) cur_hub->reports = 1;
         if (ext_surface) { if (sscanf(l + 1, "%d %d %d %d", &x, &y, &w, &h) == 4) fb_update(x, y, w, h); else fb_update(0, 0, W, H); }
         else fb_flush();
+        break;
+    /* the surface owner pushed this rectangle to the panel itself: mirror it, don't push it
+     * again. Lets a client keep its own low-latency path to the glass without the mirror having
+     * to go looking for what changed (see mirror_scan). */
+    case 'f':
+        if (!drawing_ok || !ext_surface) break;
+        if (cur_hub) cur_hub->reports = 1;
+        if (sscanf(l + 1, "%d %d %d %d", &x, &y, &w, &h) == 4 && fb_clip(&x, &y, &w, &h)) mirror_tee(x, y, w, h);
         break;
     case 'E': if (cur_hub) { cur_hub->owns_surface = atoi(l + 1) != 0; recompute_owners(); } sendf("E %u %u %u %u\n", W, H, vinfo.bits_per_pixel, finfo.line_length); if (!ext_surface) dirty = 1; break;
     case 'Z': { int fps = 10; if (sscanf(l + 1, "%d %d %d %d %d", &x, &y, &w, &h, &fps) >= 4) vf_start(x, y, w, h, fps); } break;
