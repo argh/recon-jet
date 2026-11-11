@@ -10,6 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       bluez avahi-daemon libnss-mdns v4l-utils evtest curl ca-certificates xz-utils procps \
       kmod file less nano vim-tiny mg libatomic1 libstdc++6 openssh-client wireguard-tools apt-utils \
     && rm -rf /var/lib/apt/lists/*
+# Diagnostics and an editor, kept in the image rather than apt-installed by hand on each device:
+# these live on userdata and so survive a reflash, but not a rootfs rebuild, and re-deriving the
+# list from memory after one wasted an afternoon. `perf` is deliberately absent — Debian's build
+# tracks its own kernel, not our mainline 6.18.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      iputils-ping netcat-openbsd net-tools lsof strace tcpdump \
+      htop sysstat iotop iperf3 emacs-nox \
+    && rm -rf /var/lib/apt/lists/*
 # busybox applets the initramfs init calls inside the chroot (Debian's busybox has no telnetd), and
 # the udhcpc lease hook Debian does not ship
 RUN for a in udhcpd udhcpc; do ln -sf /bin/busybox /usr/sbin/$a; done && mkdir -p /var/lib/misc /usr/share/udhcpc
