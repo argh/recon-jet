@@ -51,6 +51,7 @@ export class LiveCommand extends Command {
     // rather than racing (the race exited the process mid-reconnect). Each acknowledged `N 1` makes
     // jetd restart a full band refresh, so a recovered link always repaints whole.
     const subscribe = async (j) => { const f = await j.request('N', 'N 1'); fmt = f; current = j; text({ t: 'fmt', ...f }); };
+    const idle = () => { if (!sockets.size) current?.send('N 0'); };   // last page gone: stop the tee
     let redialPromise = null, dialing = null;
     const redial = () => redialPromise ??= (async () => {
       text({ t: 'gone' });
@@ -87,8 +88,13 @@ export class LiveCommand extends Command {
         if (op === 1) current?.send(payload.toString());      // the page speaks jetd's protocol
       });
       sock.on('data', reader);
-      sock.on('close', () => sockets.delete(sock));
-      sock.on('error', () => sockets.delete(sock));
+      // Nobody watching: drop the subscription. jetd tees every panel push to a subscribed
+      // mirror whether or not a page is reading, and with a direct writer reporting its frames
+      // (doom) that is megabytes a second of the device's link and CPU spent on no one. A
+      // closed tab leaves this process running, so without this a backgrounded `jet live` taxed
+      // the Jet indefinitely. The next page re-subscribes below and gets a fresh band refresh.
+      sock.on('close', () => { sockets.delete(sock); idle(); });
+      sock.on('error', () => { sockets.delete(sock); idle(); });
       if (current && fmt) { text({ t: 'fmt', ...fmt }); current.send('N 1'); }   // late joiner: format + fresh refresh
       else text({ t: 'gone' });                                                  // mid-outage: the page shows reconnecting
     });
