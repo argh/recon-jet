@@ -94,8 +94,15 @@ Bluetooth on mainline: `hci_uart` (HCI-LL over serdev on uart2) loads at init; t
 (dbus + bluetoothd in the rootfs, `uhid`/`hid-generic` for LE HID-over-GATT keyboards, `hidp` for
 classic ones) starts at init with the radio down (`AutoEnable=false`); the marker
 `/android-data/mainline/bt` powers it at boot and jet-app's System > Bluetooth screen toggles it
-live and keeps the marker in step, because an up hci0 pins the WiFi rx rate at 1 Mbit/s (coex
-untuned): radio on for the keyboard on the USB link, off for WiFi unplugged. Pairing: `bluetoothctl` over ssh
+live and keeps the marker in step. Coexistence (one antenna, time-multiplexed by SoftGemini,
+measured 2026-11-09): active BT airtime (discovery, GPS) starves WiFi to ~0, and that part is
+architectural. An idle-up radio with the bonded keyboard *absent* used to cost ~80% of WiFi
+throughput too — the kernel's LE auto-connect background scan defaults to 30ms window / 60ms
+interval (50% antenna duty) until the keyboard reappears, and WL127x SoftGemini has no LE-scan
+policy. Fixed in the rootfs: `main.conf` `ScanIntervalAutoConnect=2048`/`ScanWindowAutoConnect=48`
+(30ms/1280ms, ~2% duty, WiFi-neutral; the scan stops entirely while the keyboard is connected).
+The tradeoff is the waking keyboard advertising for a few seconds before it is caught.
+Pairing: `bluetoothctl` over ssh
 (`agent KeyboardDisplay`, `pair`, `trust`); the Rii K06 ("K06 BLE Keyboard", LE, Just Works, no
 passkey) paired 2026-10-27 and reconnects by itself. Pairings live in the rootfs
 `/var/lib/bluetooth`. Kernel: `CONFIG_UHID=m` added to `jet.config` 2026-10-27 (omap2plus leaves it

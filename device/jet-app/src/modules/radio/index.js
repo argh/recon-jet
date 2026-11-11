@@ -1,11 +1,15 @@
 // radio: the Bluetooth radio (hci0) as a model. The stack (dbus + bluetoothd) runs from init
-// with AutoEnable off, so the radio only comes up when asked: an up hci0 pins the wl1283's WiFi
-// rx at 1 Mbit/s (coex untuned). `set(on)` flips it live (bluetoothctl) and makes that the boot
+// with AutoEnable off, so the radio only comes up when asked: the wl1283 has one antenna, and
+// active BT airtime (discovery, GPS) starves WiFi outright. An idle-up radio is near-free now
+// that main.conf caps the LE auto-connect scan (the kernel scans for the bonded keyboard whenever
+// it is absent; the BlueZ default duty cycle cost ~80% of WiFi throughput — see docs/hardware.md).
+// `set(on)` flips it live (bluetoothctl) and makes that the boot
 // default (the marker file init reads); GPS rides the same chip and its UART, so off stops the
 // GPS daemon first (through the gps module). `refresh()` reads the controller and device lists
 // for whoever shows them (the Bluetooth and Status screens); pairing itself stays bluetoothctl
 // over ssh. `powerDown()` is the bare chip-off the gps module uses when GPS stops and Bluetooth
-// is not wanted: power off, hci0 down, and a WiFi reassociate (the coex rate stays pinned until one).
+// is not wanted: power off, hci0 down, and a WiFi reassociate (rate control can stay depressed
+// after sustained coex pressure until one).
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { Schema } from '@versionzero/module-manager';
@@ -76,7 +80,7 @@ export class Radio {
   async powerDown() {
     await run('bluetoothctl', ['power', 'off']).catch(() => {});   // radio down powers the chip off
     await run('hciconfig', ['hci0', 'down']).catch(() => {});      // belt and suspenders
-    await run('wpa_cli', ['-i', 'wlan0', 'reassociate']).catch(() => {});   // the coex rate stays pinned at 1 Mbit/s until a reassociate
+    await run('wpa_cli', ['-i', 'wlan0', 'reassociate']).catch(() => {});   // rate control can stay depressed after coex pressure until a reassociate
   }
 }
 

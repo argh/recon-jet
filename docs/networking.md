@@ -75,9 +75,13 @@ trusted-SSID list are per-device files on userdata, never committed. See `docs/v
   and keeps the marker in step. `uhid`/`hid-generic` (LE HID-over-GATT keyboards) and `hidp`
   (classic) are loaded. Pairing is `bluetoothctl` over ssh; pairings persist in the rootfs
   `/var/lib/bluetooth` and a trusted keyboard reconnects by itself (see hardware.md).
-- **Coexistence problem (rule): radio off unless in use.** With hci0 up, even idle, WiFi rx
-  bitrate pins at 1 Mbit/s (50 % ping loss, multi-second RTT); powering it off restores MCS6
-  immediately. Use the keyboard on the USB link; switch the radio off to work over WiFi.
+- **Coexistence (rule): no active BT airtime during WiFi-critical transfers.** Discovery and
+  GPS occupy the single antenna and starve WiFi to ~0 — architectural, no fix. The old "hci0 up,
+  even idle, pins WiFi at 1 Mbit/s" was NOT radio-on: it was the kernel's LE auto-connect
+  background scan (50% antenna duty by default) running whenever the bonded keyboard is asleep.
+  Capped since 2026-11-09 to ~2% duty via `main.conf` (`ScanIntervalAutoConnect=2048`,
+  `ScanWindowAutoConnect=48`; set in the rootfs Dockerfile) — an idle-up radio is now
+  WiFi-neutral, whether or not the keyboard is present (see hardware.md).
 
 ## What the Jet reaches over WiFi
 
