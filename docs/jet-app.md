@@ -104,7 +104,7 @@ steps it.
 
 Start mode (`modes.begin()`): a mode whose `firstUse()` resolves true (System, when a calibration
 file is missing), else the mode in the state file `/android-data/mainline/jet-app-state.json`
-(`{"mode": "demo"}`, written atomically on every switch), else `ui.defaultMode` (`demo` in the
+(`{"mode": "demo"}`, written atomically on every switch), else `ui.defaultMode` (`scan` in the
 default config), else the first registered. Until `begin()` has run, `modes.bootMode` (`log`) is
 drawn, so the panel continues jetd's boot log without a gap.
 
@@ -237,7 +237,7 @@ registers additively (future providers) without editing core.
 | `input.holdMs` / `.swipeDebounceMs` / `.tapCode` | `1000` / `250` / `28` | hold threshold; minimum gap between two swipes; pad tap code |
 | `input.rawKeys` | `true` | send `K 1` on connect (false: jetd's chooser and press pairs, so holds never arrive) |
 | `power.pollMs` / `.samples` / `.roundStep` | `2000` / `8` / `10` | `Q` interval (0 disables); median window; display rounding (mV, mA) |
-| `ui.defaultMode` | `demo` | start mode when nothing is persisted |
+| `ui.defaultMode` | `scan` | start mode when nothing is persisted |
 | `modes.stateFile` / `.tickMs` / `.bootMode` | `/android-data/mainline/jet-app-state.json` / `1000` / `log` | persisted state; mode tick (clock); what shows until the start mode is entered |
 | `logMode.lines` | `2000` | scrollback kept |
 | `demoMode.question` / `.spokenQuestion` / `.jpegQuality` | (a describe prompt) / (a `SAY:` remark line first, then the details) / `60` | the look request from the button / from a spoken command / the JPEG |

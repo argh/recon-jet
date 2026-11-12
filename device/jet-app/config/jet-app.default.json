@@ -3,7 +3,7 @@
   "surface": { "device": "/dev/fb0", "minFlushMs": 30, "viewfinderFps": 10 },
   "input": { "holdMs": 1000, "swipeDebounceMs": 250 },
   "power": { "pollMs": 2000, "samples": 8, "roundStep": 10 },
-  "ui": { "defaultMode": "demo" },
+  "ui": { "defaultMode": "scan" },
   "modes": { "tickMs": 1000 },
   "llm": { "asrModel": "qwen3-asr", "chatModel": "qwen-27b", "ttsModel": "kokoro", "ttsVoice": "af_heart", "visionModel": "qwen-vision" },
   "voice": { "enabled": true, "fillerMs": 700, "maxSeconds": 8 }
