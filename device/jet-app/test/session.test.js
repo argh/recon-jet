@@ -200,3 +200,32 @@ test('session: an intercepted final transcript ends the turn with no chat and no
   assert.deepEqual(routed, ['heard 3200']); assert.deepEqual(events, ['final', 'done']);
   assert.equal(llm.calls.chat.length, 0); assert.equal(llm.calls.speak.length, 0);
 });
+
+test('session: "more" sends a turn back to listening with an empty buffer; an interjected clip is spoken in order', async () => {
+  const llm = fakeLlm();
+  const s = new VoiceSession(llm, { partialMs: 100000, sentenceGapMs: 0, streamTts: false });
+  const events = []; for (const e of ['more', 'partial', 'final', 'token', 'audio', 'done', 'error']) s.on(e, (m) => events.push(m));
+  const seen = [];
+  s.intercept = (text, info) => { seen.push([text, info.phase, info.wake, Math.round(info.seconds * 10) / 10]); return info.phase === 1 ? 'more' : false; };
+  let interjected = false;
+  const responder = { name: 'op', async respond(text, { onToken, heard }) {
+    assert.equal(heard.pcm.length, 6400, 'only the second capture is the question\'s sound'); assert.equal(heard.rate, 16000);
+    onToken('It is a meter. ');
+    interjected = s.interject(Buffer.from('FILLER'));
+    onToken('A cheap one.');
+    return 'It is a meter. A cheap one.';
+  } };
+  s.start(1, { responder, wake: true });
+  assert.equal(s.interject(Buffer.from('x')), false, 'nothing to interject into while listening');
+  s.audio(Buffer.alloc(32000));
+  assert.equal(await s.end(), true);
+  assert.equal(s.busy, true, 'the turn lives on');
+  assert.deepEqual(events.map((e) => e.type), ['more']);
+  s.audio(Buffer.alloc(6400));
+  await s.end();
+  assert.deepEqual(seen, [['heard 32000', 1, true, 1], ['heard 6400', 2, true, 0.2]]);
+  assert.equal(interjected, true);
+  const audio = events.filter((e) => e.type === 'audio');
+  assert.deepEqual(audio.map((e) => (e.filler ? 'FILLER' : e.sentence)), ['It is a meter.', 'FILLER', 'A cheap one.'], 'after the sentence already waiting, before the next');
+  assert.equal(events.at(-1).type, 'done'); assert.equal(s.busy, false);
+});

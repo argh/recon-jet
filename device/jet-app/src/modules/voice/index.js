@@ -20,10 +20,23 @@
 // aborts its requests, and a new turn starts. Nothing here blocks: audio goes to jetd as it
 // arrives, the filler file is read and written asynchronously.
 //
+// A wake-word turn has two phases. jetd is already capturing when the wake word hits and its VAD
+// ends that capture at the first pause - which is right after "heya jet" unless the command came
+// in the same breath. So the first capture is only asked: is this a spoken command ("heya jet,
+// run doom")? or a sentence that kept going? If neither, it was just the call: a pickup phrase
+// answers ("Go ahead."), and when it has played the mic opens again for the question itself
+// (`session` `more`). A capture also ends when the transcript has stopped changing
+// (`endpointPartials`): the energy VAD does not hear the end of speech over a noisy room.
+//
+// Who answers a question is the turn's **responder** (session.js): the built-in one-shot chat
+// unless the caller of `startTurn({responder})` brings another; `claimWake(responder)` does the
+// same for wake-word turns, which no mode starts. Spoken commands are tried first either way.
+//
 // Debug: `voice.debugPort` (JET_VOICE_DEBUG_PORT) serves POST /talk (start a turn, as the
 // Assistant mode's front press would), POST /cancel, POST /say {text} (TTS round trip to the
 // speaker), POST /phrases (render the missing phrases), POST /action {text} (route a
-// transcript to the command registry, no mic involved), POST /look {question?} (a camera snapshot
+// transcript to the command registry, no mic involved), POST /ask {text, speak?} (a question to
+// the wake responder with no mic and, unless `speak`, no speaker), POST /look {question?} (a camera snapshot
 // through the vision model, as the Demo mode's front press), GET /state, GET /screen.png?scale=N (the
 // framebuffer as a PNG: what the panel shows).
 import { EventEmitter } from 'node:events';
@@ -36,6 +49,7 @@ import { Schema } from '@versionzero/module-manager';
 import { C } from '../ui/style.js';
 import { uyvyToRgba } from '../../lib/uyvy.js';
 import { VoiceSession, SYSTEM_PROMPT } from './session.js';
+import { toStereo48k } from '../llm/resample.js';
 import { PhraseBank, PHRASES } from './phrases.js';
 
 const s = Schema.create;
@@ -51,6 +65,9 @@ export class Voice extends EventEmitter {
       .property('sentenceGapMs', s('number').default(400).meta('description', 'silence appended to each spoken sentence (the TTS runs them together)'))
       .property('streamTts', s('boolean').default(true).meta('description', 'stream each answer sentence as the TTS renders it (first sound in ~0.15 s vs waiting for the whole clip); off = the old whole-clip path'))
       .property('fillerMs', s('number').default(700).meta('description', 'play the filler when no answer audio has arrived this long after the transcript'))
+      .property('fillGapMs', s('number').default(4000).meta('description', 'a responder\'s filler (`fill`) is skipped when the last filler was more recent than this'))
+      .property('wakeLongS', s('number').default(2.5).meta('description', 'a wake capture at least this long with three words or more is taken as the question itself; shorter, it was only the call'))
+      .property('endpointPartials', s('number').default(2).meta('description', 'end the capture when this many partial transcripts in a row repeat the one before (0 = leave it to the VAD)'))
       .property('phrases', s('any').default(PHRASES).meta('description', 'spoken replies by set: ack (a command heard), wait (slow), error (failed); rendered once in the TTS voice'))
       .property('phraseDir', s('string').default('/android-data/mainline/voice/phrases').meta('description', 'phrase cache (48 kHz stereo S16 raw clips)'))
       .property('actionWaitMs', s('number').default(6000).meta('description', 'a wait phrase every this long while a spoken command is still running (a different one each time)'))
@@ -67,7 +84,7 @@ export class Voice extends EventEmitter {
       .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  enabled; systemPrompt; partialMs; sentenceGapMs; streamTts; fillerMs; phrases; phraseDir; actionWaitMs; maxSeconds; captureDelayMs; wake; wakeCutoff; wakeWindow; debugPort; llm; deviceLink; ui; sounds; actions; logger;
+  enabled; systemPrompt; partialMs; sentenceGapMs; streamTts; fillerMs; fillGapMs; wakeLongS; endpointPartials; phrases; phraseDir; actionWaitMs; maxSeconds; captureDelayMs; wake; wakeCutoff; wakeWindow; debugPort; llm; deviceLink; ui; sounds; actions; logger;
 
   /** @type {'idle'|'listening'|'thinking'|'speaking'} */ state = 'idle';
   turn = 0;           // the current (or last) turn id; events from older turns are ignored
@@ -85,6 +102,12 @@ export class Voice extends EventEmitter {
   #stateT = 0;
   #clips = 0;         // clips queued with #play that jetd has not reported played yet
   #wakeTurn = false;  // the running turn began with the wake word
+  /** @type {{name: string, respond: Function}|null} who answers the running turn; null = the session's built-in chat */ #responder = null;
+  /** @type {{name: string, respond: Function}|null} who answers wake-word turns (`claimWake`) */ #wakeResponder = null;
+  #filledAt = -Infinity;  // when a responder's filler last went out (`fill` keeps its distance)
+  /** @type {Set<string>} filler clips used this turn: never the same one twice */ #fillUsed = new Set();
+  /** @type {Buffer[]} the answer's audio this turn (fillers excluded), for whoever keeps a record */ #spoken = [];
+  #lastPartial = ''; #partialRepeats = 0;
   #routed = false;    // the running turn went to an action, not the model
 
   /** Cached phrase clips per set ({ack, wait, error}); {} before start. */
@@ -103,7 +126,7 @@ export class Voice extends EventEmitter {
     this.deviceLink.on('connected', arm);
     if (this.deviceLink.connected) arm();
     this.#session = this.#wire(this.createSession(this.llm));
-    this.#session.intercept = (text) => this.route(text);
+    this.#session.intercept = (text, info) => this.#intercept(text, info);
     // "heya jet, stop" / "cancel": a wake that was a mistake, or a change of mind; nothing is asked
     this.actions?.register('stop', /^(?:stop|cancel|never ?mind)$/, () => {});
     if (!this.llm?.configured) this.logger?.warn('llm.base is not set: voice is off');
@@ -127,10 +150,11 @@ export class Voice extends EventEmitter {
 
   // ---- the mode's calls ----------------------------------------------------------------------
   /**
-   * Start a turn (the Assistant mode's front press): ends the capture early while listening, a
-   * barge-in while thinking/speaking. Returns false when voice is off.
+   * Start a turn (a mode's front press): ends the capture early while listening, a barge-in while
+   * thinking/speaking. Returns false when voice is off.
+   * @param {{responder?: {name: string, respond: Function}}} [options]  who answers a question (default: the built-in chat)
    */
-  startTurn() {
+  startTurn({ responder = null } = {}) {
     if (!this.configured) { this.ui.setStrip('voice: not configured', { colour: C.warn, ms: 3000 }); return false; }
     if (this.state === 'listening') { this.logger?.info({ turn: this.turn }, 'press: capture ends early'); this.deviceLink.captureStop(); return true; }
     if (this.state !== 'idle') this.#bargeIn();
@@ -138,8 +162,18 @@ export class Voice extends EventEmitter {
     // jetd's aplay must be gone before `V` spawns arecord, or the two block each other at the
     // clip's end
     else if (this.#clips > 0) { this.logger?.info({ clips: this.#clips }, 'flushing playback before capture'); this.deviceLink.send('Y'); }
-    this.#begin();
+    this.#begin({ responder });
     return true;
+  }
+
+  /**
+   * Wake-word turns belong to no mode: whoever claims them answers their questions (the last
+   * claim wins). Returns the release.
+   * @param {{name: string, respond: Function}} responder
+   */
+  claimWake(responder) {
+    this.#wakeResponder = responder;
+    return () => { if (this.#wakeResponder === responder) this.#wakeResponder = null; };
   }
 
   /** Abort the running turn (nothing is said, nothing more plays); idle stays idle. */
@@ -209,6 +243,35 @@ export class Voice extends EventEmitter {
   }
 
   /**
+   * What a capture's transcript is. For the first capture of a wake turn: a spoken command runs;
+   * a sentence that kept going is the question; anything else was only the call ('more').
+   */
+  #intercept(text, { seconds = 0, wake = false, phase = 1 } = {}) {
+    if (!wake || phase > 1) return this.route(text);
+    if (this.actions?.match(text)) return this.route(text);
+    if (seconds >= this.wakeLongS && /[a-z]/i.test(text) && text.trim().split(/\s+/).length >= 3) return this.route(text);
+    return 'more';
+  }
+
+  /** The wake word and nothing after it: answer the call, then open the mic for the question. */
+  async #pickup(turn) {
+    const live = () => this.turn === turn && this.state === 'listening';
+    this.transcript = ''; this.#lastPartial = ''; this.#partialRepeats = 0;
+    this.ui.requestRender();
+    const pcm = this.#bank?.pick('pickup');
+    this.logger?.info({ turn, phrase: Boolean(pcm) }, 'pickup');
+    if (pcm && this.deviceLink.play(pcm)) {
+      this.#clips++;
+      await this.deviceLink.playEnd().catch(() => {}).finally(() => { this.#clips--; });   // the mic must not hear us
+    } else {
+      this.#cue('ack');
+      await new Promise((r) => setTimeout(r, this.captureDelayMs));
+      if (!pcm && this.llm?.configured) this.renderPhrases().catch(() => {});
+    }
+    if (live() && !this.deviceLink.captureStart(this.maxSeconds)) this.#fail('link down');
+  }
+
+  /**
    * The session asks with every final transcript before the model answers: a registered action
    * runs instead (true, the strip names it, a failure is a cue and a message); otherwise the turn
    * is a question and `question` is emitted (the Assistant brings itself up for a wake-word one).
@@ -217,7 +280,7 @@ export class Voice extends EventEmitter {
     // the ASR renders near-silence as a word in some other script ("对。"): nothing was said
     if (!/[a-z]/i.test(text)) { this.logger?.info({ turn: this.turn, text }, 'transcript discarded'); this.#routed = true; this.ui.setStrip('nothing heard', { colour: C.dim, ms: 2000 }); return true; }
     const a = this.actions?.match(text);
-    if (!a) { this.emit('question', { turn: this.turn, text, wake: this.#wakeTurn }); return false; }
+    if (!a) { this.emit('question', { turn: this.turn, text, wake: this.#wakeTurn, responder: this.#responder?.name ?? null }); return false; }
     this.#routed = true;
     this.logger?.info({ turn: this.turn, action: a.name, text: a.text, wake: this.#wakeTurn }, 'action');
     this.ui.setStrip(a.name, { colour: C.ok, ms: 1500 });
@@ -242,16 +305,18 @@ export class Voice extends EventEmitter {
     if (this.state === 'listening') return;
     this.logger?.info({ avg: d.avg, max: d.max, state: this.state }, 'wake word');
     if (this.state !== 'idle') this.#bargeIn();
-    this.#begin({ wake: true });
+    this.#begin({ wake: true, responder: this.#wakeResponder });
   }
 
-  #begin({ wake = false } = {}) {
+  #begin({ wake = false, responder = null } = {}) {
     this.#supersedeAnnouncements();
     const turn = ++this.turn;
-    this.transcript = ''; this.answer = ''; this.audioFrames = 0; this.#wakeTurn = wake; this.#routed = false;
+    this.transcript = ''; this.answer = ''; this.audioFrames = 0; this.#wakeTurn = wake; this.#routed = false; this.#responder = responder;
+    this.#spoken = []; this.#fillUsed = new Set(); this.#filledAt = -Infinity; this.#lastPartial = ''; this.#partialRepeats = 0;
+    const who = { wake, ...(responder ? { responder } : {}) };
     this.#setState('listening');
     this.ui.setStrip('listening', { colour: C.ok });
-    if (wake) { this.#session.start(turn); return; }   // the mic is open and the user is mid-sentence: no cue over it
+    if (wake) { this.#session.start(turn, who); return; }   // the mic is open and the user is mid-sentence: no cue over it
     this.#cue('ack');
     // open the mic only after the cue has played, so jetd's noise-floor window (its first
     // 300 ms of capture) does not measure the beep
@@ -260,7 +325,7 @@ export class Voice extends EventEmitter {
       if (!this.deviceLink.captureStart(this.maxSeconds)) this.#fail('link down');
     };
     if (this.captureDelayMs > 0) setTimeout(open, this.captureDelayMs); else open();
-    this.#session.start(turn);
+    this.#session.start(turn, who);
   }
 
   #bargeIn() {
@@ -286,7 +351,23 @@ export class Voice extends EventEmitter {
   // ---- session -> device --------------------------------------------------------------------
   #wire(session) {
     const current = (m) => m.turn === this.turn && this.state !== 'idle';
-    session.on('partial', (m) => { if (current(m) && this.state !== 'speaking') { this.transcript = m.text; this.ui.requestRender(); } });
+    session.on('partial', (m) => {
+      if (!current(m) || this.state === 'speaking') return;
+      this.transcript = m.text; this.ui.requestRender();
+      // the transcript has stopped changing: they have stopped talking, whatever the VAD thinks
+      this.#partialRepeats = m.text && m.text === this.#lastPartial ? this.#partialRepeats + 1 : 0;
+      this.#lastPartial = m.text;
+      if (this.endpointPartials > 0 && this.#partialRepeats >= this.endpointPartials && this.state === 'listening') {
+        this.logger?.info({ turn: this.turn, text: m.text }, 'transcript settled: capture ends');
+        this.deviceLink.captureStop();
+      }
+    });
+    session.on('more', (m) => {
+      if (!current(m)) return;
+      this.#setState('listening');
+      this.ui.setStrip('listening', { colour: C.ok });
+      this.#pickup(m.turn);
+    });
     session.on('final', (m) => {
       if (!current(m)) return;
       this.transcript = m.text; this.ui.requestRender();
@@ -299,6 +380,7 @@ export class Voice extends EventEmitter {
       clearTimeout(this.#fillerTimer);
       if (this.state === 'thinking') { this.#setState('speaking'); this.ui.setStrip('speaking', { colour: C.ok }); }
       this.audioFrames++;
+      if (!m.filler) this.#spoken.push(m.pcm);
       this.logger?.debug({ turn: this.turn, bytes: m.bytes, sentence: m.sentence }, 'audio frame');
       this.deviceLink.play(m.pcm);
     });
@@ -307,6 +389,8 @@ export class Voice extends EventEmitter {
       const turn = this.turn;
       this.answer = m.answer ?? this.answer;
       this.logger?.info({ turn, answer: this.answer, audioFrames: this.audioFrames }, 'answer');
+      // what was spoken, for whoever keeps the record (the operator files it with the words)
+      if (this.#spoken.length) this.emit('spoken', { turn, responder: this.#responder?.name ?? null, rate: 48000, channels: 2, pcm: Buffer.concat(this.#spoken.splice(0)) });
       if (this.state !== 'speaking') return this.#finish(this.transcript ? 'no audio' : 'nothing heard');
       this.deviceLink.playEnd().then((r) => { if (this.turn === turn && this.state === 'speaking') this.#finish(`played ${r}`); }, (error) => { if (this.turn === turn && this.state === 'speaking') this.#finish(`play ${error.message}`); });
     });
@@ -360,7 +444,7 @@ export class Voice extends EventEmitter {
   }
 
   /** The answer is late: a wait phrase (or the soft beep until one is cached). */
-  #filler() { this.logger?.info({ turn: this.turn }, 'filler'); this.phrase('wait', 'thinking'); }
+  #filler() { this.logger?.info({ turn: this.turn }, 'filler'); this.#filledAt = this.now(); this.phrase('wait', 'thinking'); }
 
   /**
    * Play a random cached phrase of the set; without one, the cue named as fallback (if any) plays
@@ -375,6 +459,26 @@ export class Voice extends EventEmitter {
     if (fallbackCue) this.#cue(fallbackCue);
     if (this.llm?.configured) this.renderPhrases().catch(() => {});
   }
+
+  /**
+   * A responder's filler while its turn is thinking or between sentences ("Let me see." as a
+   * tool starts, "Stand by." while it drags on): a phrase of the set, slipped into the answer's
+   * speech in order, at most one every `fillGapMs` and never the same clip twice in a turn.
+   * Returns whether it spoke.
+   */
+  fill(set) {
+    if ((this.state !== 'thinking' && this.state !== 'speaking') || this.now() - this.#filledAt < this.fillGapMs) return false;
+    const pcm = this.#bank?.pick(set, this.#fillUsed);
+    if (!pcm) { if (!this.#bank?.status()[set] && this.llm?.configured) this.renderPhrases().catch(() => {}); return false; }
+    if (!this.#session.interject(pcm)) return false;
+    clearTimeout(this.#fillerTimer);   // this is the filler
+    this.#filledAt = this.now();
+    this.logger?.info({ set, bytes: pcm.length }, 'filler');
+    return true;
+  }
+
+  /** Play a stored clip of any S16 format (a feed item's sound) through the speaker. */
+  playAudio({ rate, channels = 1, pcm }) { this.#play(rate === 48000 && channels === 2 ? pcm : toStereo48k(pcm, { rate, channels })); }
 
   /** Render the phrases not cached yet (one TTS call each); resolves with the clips per set. */
   renderPhrases() {
@@ -461,6 +565,11 @@ export class Voice extends EventEmitter {
           if (req.method === 'POST' && req.url === '/action') {   // a spoken command without the mic: { text: "open status" }
             const a = this.actions?.match(String(json.text ?? ''));
             return a ? run(a.run().then(() => ({ matched: a.name }))) : reply(200, { matched: null });
+          }
+          if (req.method === 'POST' && req.url === '/ask') {   // a question without the mic: { text, speak? } -> the wake responder's answer
+            const responder = this.#wakeResponder ?? this.#session.chat;
+            return run(responder.respond(String(json.text ?? ''), { onToken: () => {}, signal: AbortSignal.timeout(120000), wake: false })   // not a wake turn: a debug question does not pull the wearer's screen to the channel
+              .then((answer) => { if (json.speak && answer) this.say(answer).catch(() => {}); return { responder: responder.name, answer }; }));
           }
           if (req.method === 'POST' && req.url === '/look') return run(this.#snapshotLook(String(json.question ?? 'Describe what is in front of me in one short sentence.')));
           reply(404, { error: 'no such route' });

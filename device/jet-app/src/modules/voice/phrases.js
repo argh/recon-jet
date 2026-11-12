@@ -14,6 +14,9 @@ export const PHRASES = {
   wait: ['Stand by.', 'Still working on it.', 'Hang on, this one is slow.', 'One sec.', 'Hmm, let me think.'],
   error: ['Uh, that glitched. Send it again.', 'Lost that one. Say again?', 'That did not go through. One more time.'],
   report: ['Sent you the details.', 'Report is in.', 'On your display.', 'Details are up.'],   // the answer is on the glass; the spoken remark follows
+  pickup: ['Go ahead.', 'Yeah?', 'What do you need?', 'Talk to me.', 'What now?', 'I\'m here.'],   // the wake word and nothing after it: the call is answered, then the mic opens
+  look: ['Let me see.', 'Hold it there.', 'Taking a look.', 'Hmm.'],                                    // the operator reaches for the camera
+  search: ['Looking it up.', 'Let me check.', 'Give me a second to dig.', 'Let me see what I can find.'],                      // ... or the network
 };
 
 export class PhraseBank {

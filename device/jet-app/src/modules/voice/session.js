@@ -15,6 +15,17 @@
 // AbortController per turn; events of a cancelled turn are never emitted. `say(text)` (filler,
 // debug) and `look(jpeg, question)` (the Demo mode's vision request) are independent of the
 // turn. Stage timings (ms) go to the log, as the host session logged them.
+//
+// Who answers is a strategy, the **responder**: `{name, respond(text, {onToken, signal, wake})
+// -> Promise<string>}`. The built-in one (`chat`: one system prompt, one question, no memory) is
+// what a turn gets unless `start()` is handed another (the operator: the agent loop, docs/agent.md).
+// Everything around it - transcript, sentence-by-sentence speech, cancel - is the same either way.
+//
+// Two more things a turn can do. `intercept` may answer `'more'` for a transcript that is not
+// the question yet (a wake word caught with nothing after it): the turn goes back to listening
+// with an empty buffer, `more` is emitted, and the next `end()` is the real one. And while the
+// answer is being spoken `interject(pcm)` slips a ready clip (a filler) into the speech queue,
+// in order: after the sentences already waiting, never over one.
 import { EventEmitter } from 'node:events';
 import { SentenceSplitter } from './sentences.js';
 
@@ -29,19 +40,29 @@ export class VoiceSession extends EventEmitter {
   constructor(llm, { partialMs = 1000, systemPrompt = SYSTEM_PROMPT, sentenceGapMs = 400, streamTts = true, logger } = {}) {
     super();
     this.llm = llm; this.partialMs = partialMs; this.systemPrompt = systemPrompt; this.sentenceGapMs = sentenceGapMs; this.streamTts = streamTts; this.logger = logger;
+    /** The built-in responder: the question alone under the system prompt, nothing remembered. */
+    this.chat = { name: 'chat', respond: (text, { onToken, signal }) => this.llm.chatStream([{ role: 'system', content: this.systemPrompt }, { role: 'user', content: text }], onToken, signal) };
   }
   now = () => performance.now();
   /** @type {object|null} the running turn */ #turn = null;
-  /** @type {((text: string) => boolean)|null} asked with the final transcript before the model: true means an action took the turn */ intercept = null;
+  /**
+   * Asked with the final transcript before the model: true = an action took the turn, 'more' =
+   * not the question yet (keep listening), false = a question for the responder.
+   * @type {((text: string, info: {seconds: number, wake: boolean, phase: number}) => boolean|'more')|null}
+   */
+  intercept = null;
 
   get busy() { return this.#turn !== null; }
   get turn() { return this.#turn?.id ?? null; }
 
-  /** Begin a turn: capture chunks are collected and transcribed every `partialMs`. */
-  start(id) {
+  /**
+   * Begin a turn: capture chunks are collected and transcribed every `partialMs`.
+   * @param {number} id @param {{responder?: {name: string, respond: Function}, wake?: boolean}} [options]  who answers (default: `chat`)
+   */
+  start(id, { responder = this.chat, wake = false } = {}) {
     this.cancel();
-    const t = this.#turn = { id, chunks: [], bytes: 0, abort: new AbortController(), t0: this.now(), listening: true, partial: null, partials: 0 };
-    this.logger?.info({ turn: id }, 'session start');
+    const t = this.#turn = { id, responder, wake, phase: 1, chunks: [], bytes: 0, abort: new AbortController(), t0: this.now(), listening: true, partial: null, partials: 0, say: null };
+    this.logger?.info({ turn: id, responder: responder.name }, 'session start');
     t.timer = setInterval(() => this.#partial(t), this.partialMs);
     t.timer.unref?.();
   }
@@ -62,6 +83,16 @@ export class VoiceSession extends EventEmitter {
     clearInterval(t.timer);
     t.partial?.abort();   // the ASR is needed for the final transcript now
     return this.#answer(t);
+  }
+
+  /**
+   * Put a ready clip (48 kHz stereo S16) into the running answer's speech, in order. False when
+   * no answer is being produced (listening, or no turn).
+   */
+  interject(pcm) {
+    if (!this.#turn?.say) return false;
+    this.#turn.say({ pcm });
+    return true;
   }
 
   /** Abort the running turn; no more events for it. */
@@ -122,8 +153,16 @@ export class VoiceSession extends EventEmitter {
       const text = await this.llm.transcribe(pcm, { signal });
       if (!this.#current(t)) return false;
       this.logger?.info({ turn: t.id, ms: this.#ms(tEnd), seconds: +(pcm.length / 32000).toFixed(2), partials: t.partials, text }, 'final');
+      const routed = this.intercept?.(text, { seconds: pcm.length / 32000, wake: t.wake, phase: t.phase }) ?? false;
+      if (routed === 'more') {   // the wake word and nothing after it: the question is still to come
+        this.logger?.info({ turn: t.id, text }, 'not the question yet: listening on');
+        t.chunks = []; t.bytes = 0; t.phase++; t.partials = 0; t.listening = true;
+        t.timer = setInterval(() => this.#partial(t), this.partialMs); t.timer.unref?.();
+        this.#emit(t, 'more', { text });
+        return true;
+      }
       this.#emit(t, 'final', { text });
-      if (text && this.intercept?.(text)) {   // an action took it: no model, no speech
+      if (text && routed) {   // an action took it: no model, no speech
         this.logger?.info({ turn: t.id, ms: this.#ms(t.t0), text }, 'turn routed');
         this.#emit(t, 'done', { answer: '' });
         return true;
@@ -145,6 +184,10 @@ export class VoiceSession extends EventEmitter {
         drain = drain.then(async () => {
           while (queue.length && this.#current(t) && !ttsError) {
             const sentence = queue.shift(), t0 = this.now();
+            if (typeof sentence !== 'string') {   // an interjected clip: ready as it is
+              this.#emit(t, 'audio', { pcm: sentence.pcm, bytes: sentence.pcm.length, sentence: '', filler: true });
+              continue;
+            }
             if (this.streamTts) {
               // stream the sentence as it renders: each chunk is played as it arrives, so the first
               // sound does not wait for the whole clip (the consumer plays one `W` per audio event)
@@ -168,17 +211,20 @@ export class VoiceSession extends EventEmitter {
           }
         }).catch((error) => { if (this.#current(t) && !ttsError) { ttsError = error; t.abort.abort(); } });
       };
+      // an interjection comes when the responder pauses to do something: whatever it had said so
+      // far is a finished thought, so the sentence still held in the splitter goes out first
+      t.say = (item) => { if (!this.#current(t) || ttsError) return; const held = splitter.flush(); if (held) queue.push(held); queue.push(item); speakQueued(); };
       const tChat = this.now();
-      const answer = await this.llm.chatStream([{ role: 'system', content: this.systemPrompt }, { role: 'user', content: text }], (tok) => {
+      const answer = await t.responder.respond(text, { signal, wake: t.wake, heard: { rate: 16000, channels: 1, pcm }, onToken: (tok) => {
         if (!this.#current(t) || ttsError) return;
         tokens++; firstToken ??= this.#ms(tChat);
         this.#emit(t, 'token', { text: tok });
         const ready = splitter.push(tok);
         if (ready.length) { queue.push(...ready); speakQueued(); }
-      }, signal).catch((error) => { if (ttsError) return ''; throw error; });
+      } }).catch((error) => { if (ttsError) return ''; throw error; });
       if (!this.#current(t)) return false;
       if (ttsError) throw ttsError;
-      this.logger?.info({ turn: t.id, ms: this.#ms(tChat), firstTokenMs: firstToken, tokens, chars: answer.length }, 'llm');
+      this.logger?.info({ turn: t.id, responder: t.responder.name, ms: this.#ms(tChat), firstTokenMs: firstToken, tokens, chars: answer.length }, 'llm');
       const rest = splitter.flush();
       if (rest) { queue.push(rest); speakQueued(); }
       await drain;
@@ -192,6 +238,6 @@ export class VoiceSession extends EventEmitter {
       this.logger?.warn({ turn: t.id, error: error.message }, 'turn failed');
       this.#emit(t, 'error', { message: error.message });
       return false;
-    } finally { if (this.#current(t)) this.#turn = null; }
+    } finally { if (this.#current(t) && !t.listening) this.#turn = null; }
   }
 }

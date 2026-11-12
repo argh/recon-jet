@@ -300,7 +300,7 @@ test('voice: the wake word begins a turn with no cue and no V; an action takes t
   assert.equal(voice.state, 'idle'); assert.equal(ui.strips.at(-1), 'look', 'the action keeps the strip');
   link.emit('wake', { avg: 250, max: 255 });
   assert.equal(voice.route('what time is it'), false, 'a question goes on to the model');
-  assert.deepEqual(questions, [{ turn: 2, text: 'what time is it', wake: true }]);
+  assert.deepEqual(questions, [{ turn: 2, text: 'what time is it', wake: true, responder: null }]);
   link.emit('captureEnd', 'end'); session.emit('final', { type: 'final', text: 'what time is it', turn: 2 }); session.emit('done', { type: 'done', answer: '', turn: 2 });
   assert.equal(voice.state, 'idle');
   press(voice);
@@ -349,4 +349,68 @@ test('voice: announcements - speak now when live, superseded by a user turn (dro
   gone.cancel(); gone.say('Never.');
   await sleep(1);
   assert.ok(!spoken().includes('Never.') && !spoken().includes('Old news.'));
+});
+
+test('voice: a wake word with nothing after it is answered with a pickup phrase, then the mic opens for the question', async (t) => {
+  const { voice, link, session, states } = await make({ phrases: { ack: ['ok'], wait: ['hmm'], error: ['oops'], pickup: ['go ahead'] }, wakeLongS: 2.5 });
+  t.after(() => voice.stop());
+  voice.actions = { match: (text) => (text.includes('doom') ? { name: 'doom', text, run: () => Promise.resolve() } : null) };
+  const asked = []; voice.on('question', (q) => asked.push(q.text));
+  // what the first capture of a wake turn is: a command, a sentence that kept going, or just the call
+  link.emit('wake', { avg: 250, max: 255 });
+  assert.equal(session.intercept('Touchdown.', { seconds: 1.1, wake: true, phase: 1 }), 'more', 'the tail of the wake word: only the call');
+  assert.equal(session.intercept('', { seconds: 1.0, wake: true, phase: 1 }), 'more');
+  assert.equal(session.intercept('What is that over there?', { seconds: 3.1, wake: true, phase: 1 }), false, 'a sentence that kept going is the question');
+  assert.equal(session.intercept('jet, run doom', { seconds: 1.2, wake: true, phase: 1 }), true, 'a command in the same breath runs');
+  assert.equal(session.intercept('Touchdown.', { seconds: 1.1, wake: true, phase: 2 }), false, 'the second capture is the question, whatever it is');
+  assert.deepEqual(asked, ['What is that over there?', 'Touchdown.']);
+  voice.cancel();
+
+  link.emit('wake', { avg: 250, max: 255 });
+  link.emit('captureChunk', Buffer.alloc(3200, 1)); link.emit('captureEnd', 'end');
+  assert.equal(voice.state, 'thinking');
+  const sent = link.sent.length;
+  session.ended = false;   // as the real session does on `more`: listening again, the buffer empty
+  session.emit('more', { type: 'more', text: 'Touchdown.', turn: voice.turn });
+  assert.equal(voice.state, 'listening'); assert.equal(voice.transcript, '');
+  assert.equal(link.clips.at(-1).toString(), 'say:go ahead', 'the call is answered');
+  assert.ok(!link.sent.slice(sent).includes('V 8'), 'the mic stays shut while we speak');
+  link.emit('playDone', 'done'); await sleep(1);
+  assert.equal(link.sent.at(-1), 'V 8', 'then it opens');
+  link.emit('captureChunk', Buffer.alloc(3200, 2));
+  assert.ok(session.sent.some((f) => Buffer.isBuffer(f) && f[0] === 2), 'and the question is captured into the same turn');
+  voice.cancel();
+  assert.deepEqual(states.slice(-4), ['listening', 'thinking', 'listening', 'idle']);
+});
+
+test('voice: a transcript that has stopped changing ends the capture; fillers go into the speech in order, spaced, never twice; what was spoken is announced', async (t) => {
+  const { voice, link, session } = await make({ phrases: { ack: ['ok'], wait: ['hmm', 'hm2'], error: ['oops'], look: ['let me see'] }, endpointPartials: 2, fillGapMs: 30, fillerMs: 10000 });
+  t.after(() => voice.stop());
+  const interjected = []; session.interject = (pcm) => { interjected.push(pcm.toString()); return true; };
+  press(voice);
+  assert.equal(voice.fill('look'), false, 'not while listening');
+  for (const text of ['what', 'what is', 'what is this', 'what is this']) session.emit('partial', { type: 'partial', text, turn: 1 });
+  assert.ok(!link.sent.includes('v'), 'one repeat is not settled');
+  session.emit('partial', { type: 'partial', text: 'what is this', turn: 1 });
+  assert.equal(link.sent.at(-1), 'v', 'two repeats: they have stopped talking');
+  link.emit('captureEnd', 'stop');
+  assert.equal(voice.state, 'thinking');
+  assert.equal(voice.fill('look'), true); assert.deepEqual(interjected, ['say:let me see']);
+  assert.equal(voice.fill('wait'), false, 'not on the heels of the last one');
+  await sleep(40);
+  assert.equal(voice.fill('look'), false, 'the only clip of that set was used this turn');
+  assert.equal(voice.fill('wait'), true); await sleep(40); assert.equal(voice.fill('wait'), true); await sleep(40);
+  assert.equal(voice.fill('wait'), false, 'both wait clips used');
+  assert.equal(interjected.length, 3); assert.notEqual(interjected[1], interjected[2]);
+  // the answer's audio is kept, fillers are not
+  const spoken = []; voice.on('spoken', (c) => spoken.push(c));
+  session.emit('audio', { type: 'audio', pcm: Buffer.from('AAAA'), bytes: 4, sentence: 'Hi.', turn: 1 });
+  session.emit('audio', { type: 'audio', pcm: Buffer.from('ffff'), bytes: 4, sentence: '', filler: true, turn: 1 });
+  session.emit('audio', { type: 'audio', pcm: Buffer.from('BBBB'), bytes: 4, sentence: 'There.', turn: 1 });
+  assert.equal(voice.state, 'speaking'); assert.equal(voice.fill('wait'), false);
+  session.emit('done', { type: 'done', answer: 'Hi. There.', turn: 1 });
+  assert.deepEqual(spoken.map((c) => [c.turn, c.responder, c.rate, c.channels, c.pcm.toString()]), [[1, null, 48000, 2, 'AAAABBBB']]);
+  // a stored clip of another format is resampled for the speaker
+  voice.playAudio({ rate: 24000, channels: 1, pcm: Buffer.alloc(480) });
+  assert.equal(link.clips.at(-1).length, 480 * 4, '24 kHz mono -> 48 kHz stereo');
 });

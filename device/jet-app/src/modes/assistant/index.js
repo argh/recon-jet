@@ -26,7 +26,9 @@ export class AssistantMode {
   async start() {
     this.modes.register(this);
     this.voice.on('state', () => { if (this.#current) this.ui.requestRender(); });
-    this.voice.on('question', (q) => { if (q.wake && !this.#current) this.modes.switchTo(this.id); });   // "heya jet, <question>" from any mode: the answer shows here
+    // "heya jet, <question>" from any mode: the answer shows here - unless another responder took
+    // the turn (the operator claims wake turns; its own mode shows those)
+    this.voice.on('question', (q) => { if (q.wake && !q.responder && !this.#current) this.modes.switchTo(this.id); });
   }
   enter() { this.#current = true; }
   leave() { this.#current = false; this.voice.cancel(); }
