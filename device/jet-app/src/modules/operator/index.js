@@ -31,7 +31,7 @@ export class Operator extends EventEmitter {
     name: 'operator',
     schema: s()
       .property('wake', s('boolean').default(true).meta('description', 'answer wake-word questions ("heya jet, ...") from any mode; off = the built-in one-shot chat answers them'))
-      .property('fillers', s('any').default({ look: 'look', web_search: 'search', web_read: 'search' }).meta('description', 'tool name -> phrase set spoken when that tool starts'))
+      .property('fillers', s('any').default({ look: 'look', wiki: 'search', web_search: 'search', web_read: 'search' }).meta('description', 'tool name -> phrase set spoken when that tool starts'))
       .property('fillEveryMs', s('number').default(6000).meta('description', 'while a tool is still running, a wait phrase this often'))
       .property('hold', s('string').default('streaming').values(['streaming', 'always', 'never']).meta('description', 'take a frame as a question arrives, for the look tool: only while the camera is already streaming, always, or never'))
       .property('photoW', s('number').default(160).meta('description', 'a photo the agent took is kept in the feed fitted to this width'))

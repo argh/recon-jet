@@ -1,7 +1,9 @@
-// History: the conversation as the model is sent it, and the only three ways it ever changes.
+// History: the conversation as the model is sent it, and the only four ways it ever changes.
 // It is append-only while a call runs (the server's prefix cache covers everything but the
 // newest tokens as long as nothing in the middle is edited), so the edits are few and explicit:
 //
+//   settle(keepChars)       a finished turn's tool results shrink to their first lines (the
+//                           answer that was built from them stays whole)
 //   compact(plan, summary)  the oldest turns become one `Earlier on this call: ...` message
 //   drop(keepTurns)         the same cut without a summary (the hard limit)
 //   fold(summary)           the whole of it becomes `On an earlier call: ...` (a new call)
@@ -79,7 +81,41 @@ export class History {
 
   reset() { this.#entries = []; this.#asks = []; this.startedAt = null; this.promptTokens = 0; this.cutOff = false; }
 
-  // ---- the three edits --------------------------------------------------------------------------
+  // ---- the edits --------------------------------------------------------------------------------
+  /**
+   * Roughly how many tokens the conversation is now (characters / 3.3, 400 a photo). The server's
+   * own count (`promptTokens`) is exact but only known after a call; this is for deciding before.
+   */
+  estimate() {
+    let chars = 0, images = 0;
+    for (const { m } of this.#entries) {
+      if (Array.isArray(m.content)) for (const p of m.content) { if (p.type === 'image_url') images++; else chars += p.text?.length ?? 0; }
+      else chars += m.content?.length ?? 0;
+      for (const c of m.tool_calls ?? []) chars += c.function.arguments.length + c.function.name.length + 20;
+    }
+    return Math.round(chars / 3.3) + images * 400 + this.#entries.length * 6;
+  }
+
+  /**
+   * The turn is over: what its tools returned has been used. Each result longer than `keepChars`
+   * is cut to that with a note (a search page is 500 tokens the next ten turns would carry for
+   * nothing; three of them in one turn filled an 8k context). Photos stay, the newest
+   * `keepImages` of them. This edits the middle of the history, so the cache is lost once, at a
+   * moment nobody is waiting. @returns {boolean} whether anything changed
+   */
+  settle(keepChars = 300, { keepImages = 2 } = {}) {
+    let changed = false;
+    const short = (text) => (text.length > keepChars ? (changed = true, `${text.slice(0, keepChars)}\n[shortened: this result was ${text.length} characters when you used it]`) : text);
+    for (const e of this.#entries) {
+      if (e.m.role !== 'tool') continue;
+      if (Array.isArray(e.m.content)) e.m = { ...e.m, content: e.m.content.map((p) => (p.type === 'text' ? { ...p, text: short(p.text ?? '') } : p)) };
+      else e.m = { ...e.m, content: short(e.m.content ?? '') };
+    }
+    const images = this.#entries.filter((e) => hasImage(e.m)).length;
+    if (changed || images > keepImages) { this.#cut(keepImages); changed = true; }
+    return changed;
+  }
+
   /**
    * What a compaction would replace: everything before the user message that starts the
    * `keepTurns`-th newest turn. Null when that is nothing (or only an earlier summary).
@@ -110,16 +146,18 @@ export class History {
    * The hard limit: forget the oldest turns with no summary, keeping the newest `keepTurns` (fewer
    * when that would remove nothing) and an earlier summary. Returns how many messages went.
    */
-  drop(keepTurns, { keepImages = 2 } = {}) {
+  drop(keepTurns, { keepImages = 2, under = Infinity } = {}) {
+    let gone = 0;
     for (let keep = keepTurns; keep >= 0; keep--) {
       const plan = this.plan(keep);
       if (!plan) continue;
       const from = this.#entries[0]?.summary ? 1 : 0;
       this.#entries.splice(from, plan.entries.length - from);
       this.#cut(keepImages);
-      return plan.entries.length - from;
+      gone += plan.entries.length - from;
+      if (this.estimate() <= under) break;   // else fewer turns still: one turn of searches can be the whole problem
     }
-    return 0;
+    return gone;
   }
 
   /** A new call: all that is left of the old one is its summary (or nothing, without one). */

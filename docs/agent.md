@@ -122,6 +122,31 @@ offered to the model at all.
 | `status()` | battery, charge current, GPS fix/position, WiFi, uptime, temperature: read from the models (`power`, `gps`) and `/sys`, no shell needed for the common question |
 | `remember(text)` | appends a note |
 
+Added 2026-11-12, from rehearsing a conversation that ends in several lookups:
+
+- **`wiki(query)`**: one MediaWiki API call (Wikipedia by default, `agent.wikiTool.base`): the
+  best three articles with their opening lines, ~0.3 s. The first stop for any question of fact;
+  `web_search` is for news and prices. Reason: the search service's engines get rate-limited or
+  CAPTCHA'd (five of them at once during the rehearsal, the survivor returning junk), and the
+  model then concluded things did not exist.
+- **A turn cannot outgrow the slot.** One turn of three searches and two pages was 5,000 tokens
+  and overran 8,192: the answer was cut mid-sentence and the next request was refused. Now:
+  tool results are capped at 1,600 characters; past `stepLimit` (5,600 prompt tokens) or on the
+  last allowed step the turn is told, in its last tool result, to answer with what it has
+  (lookups it asks for instead are not run; `show` still is); when the turn is over its tool
+  results are cut to their first 300 characters and the server's cache is re-primed with one
+  background request; and the hard limit drops turns until the estimate fits.
+- **Identity rules in the harness.** Naming a specific thing (a ship, a model) only from
+  lettering that is large and sharp, from the partner, or from a lookup; which thing a number
+  belongs to is never answered from memory (the model put WMSL-750 in three different ports).
+  Still weak: it "reads" distant numbers with confidence (270 for 750) and looks those up.
+  A correction from the partner is taken at once.
+- **`place`** (ContextSource): the last good GPS fix named from an offline table of towns
+  (GeoNames, cities over 15,000; `assets/places/`, CC BY 4.0) - "in or near Alameda, California,
+  US (1.7 km from its centre); Oakland is 3.2 km away". The model cannot do this itself: given
+  the coordinates of Coast Guard Island it named a hospital in San Francisco. The fix is kept
+  after the receiver is off (GPS and WiFi share a radio) and across restarts.
+
 ### `camera`
 
 `capture({w = 640, h = 480}) → {width, height, data /* RGBA */, t}` (jetd `S` + `uyvyToRgba`);
@@ -312,7 +337,25 @@ transcript and answer stay as the pending bubbles, idle too, until the next turn
 **Scan** (`src/modes/scan/`; spoken "scan", "scanner"): the world as entity cards (crop, name,
 kind, newest claim, age), most recently seen first. While scanning the viewfinder runs in the
 top right corner and the cards re-sort beside it as sightings land; off, they are the
-full-width review list.
+full-width review list and none of the following is drawn.
+
+The column under the viewfinder shows what the scanner is doing, in pictures rather than words:
+- **The viewfinder's 2 px border is the readiness to capture.** Grey while no capture can happen
+  (`scanner.state === 'looking'`: the last frame is still being analysed, or nothing is armed);
+  otherwise a grey track filling green clockwise from the top left, `(now - due.from) /
+  (due.at - due.from)` of `scanner.due`, full at the capture. The mode's `readiness` getter is
+  that 0..1 (null: no capture now) - by the clock today, the place for a head-turn angle later.
+- **The frame being analysed** (`scanner.frame`, already 120x90: blitted 1:1) slides out from
+  under the viewfinder into the slot below it (~300 ms), then a yellow quarter of its border
+  circles it (1.2 s a lap) under the caption `analyzing`, until `frame` goes null and the slot
+  clears. The caption is otherwise the count (`12 logged`). The strip says `scanning` /
+  `analyzing`.
+- **Animation**: a timer of the view's own (`frameMs` 110, ~9 fps) asks for repaints only while
+  the mode is showing, scanning, not under the menu or behind a detail, and something moves
+  (a frame in the slot, or a border not yet full); it stops itself when the border is full.
+  Nothing is ever drawn inside the viewfinder rectangle. The border geometry is `ui/ring.js`:
+  `ring(rect, thick, from, to)` → the rectangles of that span of a border, clockwise from the
+  top left, in fractions of a lap (a span past 1 wraps).
 
 | where | front (= tap) | swipe up/down | swipe right | swipe left | rear |
 |---|---|---|---|---|---|

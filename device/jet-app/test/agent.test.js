@@ -54,7 +54,7 @@ function make({ script = [], tools = [], context = [], dir = '', ...overrides } 
   const memory = Object.assign(new Memory(), { dir, maxNotes: 40, noteChars: 300, logger: null, now });
   const llm = fakeLlm(script);
   const agent = Object.assign(new Agent(), { tools, context, persona: 'PERSONA', model: 'qv', maxTokens: 300, temperature: 0.6, maxSteps: 6, toolResultChars: 2500,
-    keepImages: 2, compactAt: 5000, hardLimit: 7000, keepTurns: 3, summaryTokens: 150, callGapS: 1800, foldTimeoutMs: 300, llm, memory, logger: null, now, ...overrides });
+    settledChars: 300, stepLimit: 5600, reprime: false, keepImages: 2, compactAt: 5000, hardLimit: 7000, keepTurns: 3, summaryTokens: 150, callGapS: 1800, foldTimeoutMs: 300, llm, memory, logger: null, now, ...overrides });
   return { agent, memory, llm, tick: (ms) => { clock += ms; } };
 }
 const roles = (messages) => messages.map((m) => m.role).join(' ');
@@ -144,8 +144,9 @@ test('agent: maxSteps bounds a model that keeps calling tools', async () => {
   const { agent, llm } = make({ tools: [again], maxSteps: 3, script: Array.from({ length: 10 }, (_, i) => ({ content: i === 0 ? 'Hm.' : '', toolCalls: [call(`c${i}`, 'again')] })) });
   const result = await agent.ask('loop');
   assert.deepEqual([result.text, result.steps], ['Hm.', 3]);
-  assert.equal(llm.calls.length, 3); assert.equal(again.ran.length, 3);
-  assert.equal(agent.history.at(-1).role, 'tool', 'the last step\'s tools still ran');
+  assert.equal(llm.calls.length, 3); assert.equal(again.ran.length, 2, 'the last step was told to answer: the tool it asked for instead is not run');
+  assert.match(llm.calls[2].messages.at(-1).content, /\[No more lookups this turn: answer now, briefly, from what you have\. You may still use show\.\]$/);
+  assert.equal(agent.history.at(-1).role, 'assistant', 'and the turn ends on words, not on a dangling call');
 });
 
 test('agent: busy while a turn runs; a model error rolls the turn back', async () => {
@@ -287,7 +288,7 @@ test('agent: past compactAt the oldest turns become one summary at a user bounda
   const req = llm.calls.at(-1);
   assert.ok(!req.tools); assert.equal(req.maxTokens, 150); assert.equal(req.model, 'qv');
   assert.equal(roles(req.messages), 'system user');
-  assert.match(req.messages[1].content, /^Partner: question 1\nJet: seeing 1\nJet used look \{\}\nResult: Photo\.\nJet: answer 1\nPartner: question 2\n/);
+  assert.match(req.messages[1].content, /^Partner: question 1\nJet: seeing 1\nJet used look \{\}\nResult: Photo\.\n(\[photo, no longer attached\]\n)?Jet: answer 1\nPartner: question 2\n/);
   assert.ok(!req.messages[1].content.includes('question 4'), 'the newest keepTurns turns are not summarised');
   assert.ok(!req.messages[1].content.includes('base64'));
   // the history: summary, then turns 4..6 untouched
@@ -631,7 +632,7 @@ test('agent: tools and context sources are DI modules, injected into the arrays 
   assert.deepEqual(agent.context.map((c) => c.id), ['mood', 'world']);
   const [look, search, read, status, shell, remember] = agent.tools;
   assert.ok(look instanceof LookTool); assert.ok(search instanceof WebSearchTool); assert.ok(shell instanceof ShellTool);
-  assert.deepEqual([search.base, search.insecureTls, search.results], ['https://search.example', true, 5], 'a tool\'s config rides the agent.<tool> layer over its own defaults');
+  assert.deepEqual([search.base, search.insecureTls, search.results], ['https://search.example', true, 4], 'a tool\'s config rides the agent.<tool> layer over its own defaults');
   assert.deepEqual([read.base, read.available, read.maxChars], ['', false, 3000], 'an endpoint has no default');
   assert.deepEqual([shell.timeoutMs, shell.user, shell.group], [1234, 'nobody', 'nogroup']);
   assert.equal(status.power, mm.getModuleInstance('power'), 'a tool gets its own models');
@@ -643,7 +644,7 @@ test('agent: tools and context sources are DI modules, injected into the arrays 
   assert.deepEqual(agent.context[0].activities, ['testing']);
   assert.equal(agent.llm, llm);
   assert.deepEqual([agent.model, agent.maxTokens, agent.temperature, agent.maxSteps, agent.toolResultChars, agent.keepImages, agent.compactAt, agent.hardLimit, agent.keepTurns, agent.callGapS, agent.persona],
-    ['qwen-vision', 300, 0.6, 6, 2500, 2, 5000, 7000, 3, 1800, 'A test persona.']);
+    ['qwen-vision', 300, 0.4, 6, 1600, 2, 5000, 7000, 3, 1800, 'A test persona.']);
 
   // a turn through the container-built agent: the unconfigured reader is not offered, both sources speak
   await agent.memory.start(); await agent.start();
@@ -658,4 +659,36 @@ test('agent: tools and context sources are DI modules, injected into the arrays 
   assert.deepEqual(second.agent.tools.map((t) => t.name), ['remember', 'look']);
   assert.deepEqual(second.agent.context.map((c) => c.id), ['world']);
   assert.match(second.agent.persona, /^You are Jet, a remote operator/, 'the default persona');
+});
+
+test('agent: a turn that fills the slot is told to answer; its tool results shrink once it is over', async () => {
+  const big = 'x'.repeat(1500);
+  const search = tool('search', { run: async () => big });
+  const { agent, llm } = make({ tools: [search], toolResultChars: 1600, script: [
+    { toolCalls: [call('c1', 'search', { q: 'a' })], usage: { prompt: 3000, completion: 10 } },
+    { toolCalls: [call('c2', 'search', { q: 'b' })], usage: { prompt: 5700, completion: 10 } },   // past the step limit
+    { content: 'Here is what I have.', toolCalls: [call('c3', 'search', { q: 'c' })], usage: { prompt: 6200, completion: 20 } },   // asks for a tool anyway
+    { content: 'Second answer.', usage: { prompt: 1200, completion: 5 } },
+  ] });
+  const out = await agent.ask('find it');
+  assert.equal(out.text, 'Here is what I have.'); assert.equal(out.steps, 3, 'the third step was the answer: its tool call was not run');
+  const sent = llm.calls[2].messages;
+  assert.match(sent.at(-1).content, /\[No more lookups this turn: answer now, briefly, from what you have\. You may still use show\.\]$/, 'said in the last tool result, so the prefix is untouched');
+  assert.equal(sent.at(-3).content, big, 'the earlier result was still whole while the turn ran');
+  const h = agent.history;
+  assert.equal(roles(h), 'user assistant tool assistant tool assistant');
+  assert.equal(h.at(-1).tool_calls, undefined, 'the answer is filed without the call it did not get to make');
+  for (const m of h.filter((x) => x.role === 'tool')) assert.match(m.content, /^x{300}\n\[shortened: this result was \d+ characters when you used it\]$/);
+  await agent.ask('and again');
+  assert.ok(llm.calls[3].messages.filter((m) => m.role === 'tool').every((m) => m.content.length < 400), 'the next turn carries the short ones');
+});
+
+test('history: estimate counts text and photos; drop goes on until the conversation fits', () => {
+  const h = new History();
+  for (let i = 0; i < 4; i++) { h.push({ role: 'user', content: `q${i} ${'w'.repeat(3300)}` }, i * 10); h.push({ role: 'assistant', content: 'a' }, i * 10 + 1); }
+  assert.ok(Math.abs(h.estimate() - 4050) < 80, String(h.estimate()));
+  h.push({ role: 'tool', tool_call_id: 'x', content: [{ type: 'text', text: 'Photo.' }, { type: 'image_url', image_url: { url: 'data:...' } }] }, 99);
+  assert.ok(h.estimate() > 4400, 'a photo is about 400');
+  assert.equal(h.drop(3, { under: 2500 }), 4, 'keeping three turns was not enough: two are kept');
+  assert.ok(h.estimate() <= 2500 + 420);
 });

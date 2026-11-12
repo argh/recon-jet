@@ -7,10 +7,10 @@ import https from 'node:https';
 
 /**
  * @param {string|URL} url
- * @param {{method?: string, json?: object, timeoutMs?: number, signal?: AbortSignal, insecureTls?: boolean, maxBytes?: number}} [options]
+ * @param {{method?: string, json?: object, timeoutMs?: number, signal?: AbortSignal, insecureTls?: boolean, maxBytes?: number, headers?: object}} [options]
  * @returns {Promise<{status: number, text: string}>} rejects on a transport error, `timeout` or `cancelled`
  */
-export function request(url, { method = 'GET', json, timeoutMs = 10000, signal, insecureTls = false, maxBytes = 2_000_000 } = {}) {
+export function request(url, { method = 'GET', json, timeoutMs = 10000, signal, insecureTls = false, maxBytes = 2_000_000, headers = {} } = {}) {
   const u = new URL(url);
   const secure = u.protocol === 'https:';
   const timeout = AbortSignal.timeout(timeoutMs);
@@ -19,7 +19,7 @@ export function request(url, { method = 'GET', json, timeoutMs = 10000, signal, 
     const fail = (error) => reject(signal?.aborted ? new Error('cancelled') : timeout.aborted ? new Error(`timeout after ${timeoutMs} ms`) : error);
     const req = (secure ? https : http).request(u, {
       method, signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-      headers: { Accept: 'application/json', ...(body == null ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }) },
+      headers: { Accept: 'application/json', ...headers, ...(body == null ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }) },
       ...(secure && insecureTls ? { rejectUnauthorized: false } : {}),
     }, (res) => {
       const parts = []; let size = 0;

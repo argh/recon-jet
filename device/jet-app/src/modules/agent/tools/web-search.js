@@ -13,8 +13,8 @@ export class WebSearchTool {
     provides: 'Tool',
     schema: s()
       .property('base', s('string').default('').meta('description', 'SearXNG base URL, https://host (device or personal config layer; empty = off)'))
-      .property('results', s('number').default(5).meta('description', 'results handed to the model'))
-      .property('snippetChars', s('number').default(240).meta('description', 'each result\'s snippet is cut to this'))
+      .property('results', s('number').default(4).meta('description', 'results handed to the model'))
+      .property('snippetChars', s('number').default(200).meta('description', 'each result\'s snippet is cut to this'))
       .property('timeoutMs', s('number').default(15000).meta('description', 'search request timeout'))
       .property('insecureTls', s('boolean').default(false).meta('description', 'accept a certificate that does not verify (this service only)'))
       .property('logger', s('Logger').lax().meta('internal', true)),

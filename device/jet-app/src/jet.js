@@ -20,6 +20,7 @@ import { Actions } from './modules/actions/index.js';
 import { Agent } from './modules/agent/index.js';
 import { Scanner } from './modules/scanner/index.js';
 import { Curator } from './modules/curator/index.js';
+import { Place } from './modules/place/index.js';
 import { Feed } from './modules/feed/index.js';
 import { Operator } from './modules/operator/index.js';
 import { AssistantMode } from './modes/assistant/index.js';
@@ -54,6 +55,7 @@ export class Jet extends AppModule {
       .property('actions', s('Actions').meta('internal', true))
       .property('scanner', s('Scanner').meta('internal', true))
       .property('curator', s('Curator').meta('internal', true))
+      .property('place', s('Place').meta('internal', true))
       .property('feed', s('Feed').meta('internal', true))
       .property('agent', s('Agent').meta('internal', true))
       .property('operator', s('Operator').meta('internal', true))
@@ -68,9 +70,9 @@ export class Jet extends AppModule {
       .property('logLevel', s('string').default('info').values(['debug', 'info', 'warn', 'error']).meta('description', 'log threshold'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer (read before configuration)'))
       .property('tickRate', s('number').default(60000).meta('hidden', true)),
-    register: [DeviceLink, Surface, Input, Power, Sensors, Sounds, Wear, Gps, Actions, Ui, Modes, Llm, Voice, Scanner, Curator, Feed, Agent, Operator, AssistantMode, ScanMode, DemoMode, DoomMode, MapMode, ShellMode, LogMode, SystemMode],
+    register: [DeviceLink, Surface, Input, Power, Sensors, Sounds, Wear, Gps, Actions, Ui, Modes, Llm, Voice, Scanner, Curator, Place, Feed, Agent, Operator, AssistantMode, ScanMode, DemoMode, DoomMode, MapMode, ShellMode, LogMode, SystemMode],
   };
-  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; sounds; wear; gps; actions; scanner; curator; feed; agent; operator; assistantMode; scanMode; logMode; demoMode; mapMode; systemMode; shellMode; doomMode; logLevel; deviceConfig;
+  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; sounds; wear; gps; actions; scanner; curator; place; feed; agent; operator; assistantMode; scanMode; logMode; demoMode; mapMode; systemMode; shellMode; doomMode; logLevel; deviceConfig;
 
   async init() {
     await super.init();
