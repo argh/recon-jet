@@ -1,7 +1,7 @@
 // feed: what Jet sent and what was said, as one model (docs/agent.md). An append-only ring of
 // items - `heard` (the wearer's words), `said` (Jet's), `photo` (a picture the camera took for
 // the conversation), `card` (something put on the display to be read later, with an optional
-// picture) - that the Comms channel draws and nothing else holds. The operator posts the
+// picture) - that the Assistant mode draws and nothing else holds. The operator posts the
 // conversation, the `show` tool (show-tool.js) posts the cards. A `heard` or `said` item can
 // carry its sound (`attach`: the clip arrives after the words), kept as raw PCM beside the index
 // and read back on demand (`audio(id)`), never held in memory.

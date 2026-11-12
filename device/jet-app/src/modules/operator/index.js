@@ -30,7 +30,7 @@ export class Operator extends EventEmitter {
   static moduleInfo = {
     name: 'operator',
     schema: s()
-      .property('wake', s('boolean').default(true).meta('description', 'answer wake-word questions ("heya jet, ...") from any mode; off = they go to the Assistant'))
+      .property('wake', s('boolean').default(true).meta('description', 'answer wake-word questions ("heya jet, ...") from any mode; off = the built-in one-shot chat answers them'))
       .property('fillers', s('any').default({ look: 'look', web_search: 'search', web_read: 'search' }).meta('description', 'tool name -> phrase set spoken when that tool starts'))
       .property('fillEveryMs', s('number').default(6000).meta('description', 'while a tool is still running, a wait phrase this often'))
       .property('hold', s('string').default('streaming').values(['streaming', 'always', 'never']).meta('description', 'take a frame as a question arrives, for the look tool: only while the camera is already streaming, always, or never'))
@@ -60,7 +60,7 @@ export class Operator extends EventEmitter {
   }
   async stop() { this.#release?.(); clearInterval(this.#waitTimer); }
 
-  /** Push-to-talk, answered here (the Channel's front press); voice's own semantics apply (again = end the capture, or barge in). */
+  /** Push-to-talk, answered here (the Assistant mode's front press); voice's own semantics apply (again = end the capture, or barge in). */
   talk() { return this.voice.startTurn({ responder: this }); }
   /** Abort the running turn. */
   cancel() { return this.voice.cancel(); }

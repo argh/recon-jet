@@ -1,4 +1,4 @@
-// The card drawing shared by the Comms screens, into the real surface: tile sizes and where the
+// The card drawing shared by the two modes, into the real surface: tile sizes and where the
 // tiles land, the follow / select / window rules for both anchors, what is cut and how it is
 // marked, the pixels that say "selected", and the detail view's flow around the picture and its
 // scroll clamp, and the `fill` picture of an opened photo.
@@ -9,7 +9,7 @@ import { C } from '../src/modules/ui/style.js';
 import { to565 } from '../src/modules/surface/raster.js';
 import { stack } from './helpers.js';
 
-const RECT = { x: 2, y: 28, w: 424, h: 198 };   // what the Comms mode hands a screen on the 428x240 panel
+const RECT = { x: 2, y: 28, w: 424, h: 198 };   // a list's share of the 428x240 panel
 const full = (id) => ({ id, title: `card ${id}`, lines: ['first line', 'second line'] });
 const six = () => ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'].map(full);
 const ids = (tiles) => tiles.map((t) => t.card.id);

@@ -10,7 +10,7 @@ import { C } from '../src/modules/ui/style.js';
 import { to565 } from '../src/modules/surface/raster.js';
 import { stack } from './helpers.js';
 
-const RECT = { x: 2, y: 28, w: 424, h: 198 };   // what the Comms mode hands a screen on the 428x240 panel
+const RECT = { x: 2, y: 28, w: 424, h: 198 };   // a list's share of the 428x240 panel
 const EDGE = RECT.x + RECT.w - 4;               // where a right bubble ends: the scroll bar keeps the last 4 px
 const LONG = 'the quick brown fox jumps over the lazy dog and keeps on running far past the end of the row, over the hill, through the wood, across the river and the road, round the barn and back again, twice more for luck, until the light is gone and there is nothing left to chase but its own tail';
 const you = (id, text, extra = {}) => ({ id, side: 'right', text, ...extra });

@@ -1,11 +1,11 @@
-// Cards: the list-of-tiles drawing shared by the Comms screens (docs/agent.md), next to the
-// Chooser as the second list box of the house grammar.
+// Cards: the list of tiles and the opened card, the drawing the Scan and Assistant modes share
+// (docs/agent.md), next to the Chooser as the second list box of the house grammar.
 //
 // `CardList` lays full-width tiles out in a rectangle: thumbnail on the left when there is one,
 // the title in the big font, a few small-font lines under it, a badge at the right of the top
 // row. The selected tile is the Chooser's selected row at tile size: a filled green bar with
 // black text. A tile is as tall as what it holds (a one-line remark is one line, a titled card
-// with two lines or a thumbnail is 48 px: four of those fill the panel between the tab row and
+// with two lines or a thumbnail is 48 px: four of those fill the panel between the strip and
 // the hint), and only whole tiles are drawn. It is a view helper: the cards are handed in
 // (`set`), the only state here is which one is selected and where the window sits.
 //

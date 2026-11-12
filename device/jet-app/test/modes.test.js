@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { stack, fakeMode, fakeLink, fakeSounds, buildSystem, settle, tmpdir } from './helpers.js';
 import { readState, writeState } from '../src/modules/modes/state.js';
@@ -121,10 +122,10 @@ test('modes: inside a mode every gesture but front hold goes to onGesture; rear 
   assert.equal(log.ticks, 0);
 });
 
-test('modes: a front press starts a voice turn in Assistant only; Demo looks, System navigates', async (t) => {
+test('modes: a front press starts a voice turn in Assistant only (operator.talk()); Demo looks, System navigates', async (t) => {
   const s = await stack({ defaultMode: 'assistant' }); t.after(s.stop);
   const calls = [];
-  const voice = Object.assign(new (await import('node:events')).EventEmitter(), { state: 'idle', answer: '', transcript: '', configured: true,
+  const voice = Object.assign(new EventEmitter(), { state: 'idle', answer: '', transcript: '', configured: true,
     startTurn() { calls.push('startTurn'); this.state = 'listening'; return true; }, cancel() { calls.push('cancel'); const was = this.state !== 'idle'; this.state = 'idle'; return was; }, clear() {},
     async look(jpg, q, { onToken }) { calls.push(`look ${jpg.length > 100 ? 'jpeg' : 'small'}`); onToken('seen'); return 'seen'; } });
   const dir = tmpdir('jet-sys-');
@@ -132,18 +133,21 @@ test('modes: a front press starts a voice turn in Assistant only; Demo looks, Sy
   const system = buildSystem({ paths, wear: { enabled: false, lit: true, setEnabled() {} }, modes: s.modes, ui: s.ui, input: s.input, power: s.power, sensors: s.sensors, deviceLink: s.link, sounds: fakeSounds() });
   fs.writeFileSync(paths.ofmArgsFile, 'thr_x=20 thr_y=20\n'); fs.writeFileSync(paths.glanceFile, '180 197\n');
   const demo = Object.assign(new DemoMode(), { question: 'what?', jpegQuality: 50, modes: s.modes, ui: s.ui, surface: s.surface, deviceLink: s.link, power: s.power, sensors: s.sensors, voice, sounds: fakeSounds() });
-  const assistant = Object.assign(new AssistantMode(), { modes: s.modes, ui: s.ui, voice });
+  const feed = Object.assign(new EventEmitter(), { items: [], get: () => null });
+  const operator = { talk() { calls.push('talk'); voice.state = 'listening'; }, cancel() { calls.push('cancel'); voice.state = 'idle'; }, replay: () => false };
+  const assistant = Object.assign(new AssistantMode(), { modes: s.modes, ui: s.ui, feed, operator, voice });
   await system.start(); await demo.start(); await assistant.start();
   await s.modes.begin(); await settle();
   assert.equal(s.modes.current, assistant);
   let now = 1000;
   s.k.frontPress(now); now += 500;
-  assert.deepEqual(calls, ['startTurn']);
+  assert.deepEqual(calls, ['talk'], 'the operator answers it: operator.talk(), not a bare voice turn');
   s.k.rearPress(now); now += 500;
-  assert.deepEqual(calls, ['startTurn', 'cancel'], 'rear cancels the running turn');
+  assert.deepEqual(calls, ['talk', 'cancel'], 'rear cancels the running turn');
+  s.k.frontPress(now); now += 500;
   s.modes.switchTo('system'); await settle();
-  assert.deepEqual(calls.at(-1), 'cancel', 'leaving the mode cancels');
-  calls.length = 0;
+  assert.deepEqual(calls, ['talk', 'cancel', 'talk'], 'leaving the mode cancels nothing: the conversation belongs to no mode');
+  voice.state = 'idle'; calls.length = 0;
   s.k.frontPress(now); now += 500;
   assert.deepEqual(calls, [], 'front press in System opens a screen, no voice');
   assert.equal(system.screen, system.getScreen('status'));

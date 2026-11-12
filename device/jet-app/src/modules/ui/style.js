@@ -30,6 +30,11 @@ export function wrapWords(text, cols) {
   return lines;
 }
 
+/** What a mode draws in when it keeps the house frame: under the status strip, above the hint line. */
+export function panel(s) {
+  return { x: 2, y: TOP, w: s.width - 4, h: s.height - s.fonts.small.height - 2 - TOP };
+}
+
 /** The hint line along the bottom of the panel, in the small font (its row is cleared first, so an overlay's hint replaces the mode's). */
 export function hint(s, text, colour = C.dim) {
   const { small } = s.fonts, y = s.height - small.height - 2;

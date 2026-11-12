@@ -1,19 +1,23 @@
-// Scan: what the glasses have seen, as a view over the `world` model, and the switch for the
-// `scanner` (docs/agent.md). Front starts scanning, and stops it into review. While it is on, the camera runs in the top
-// right corner (the surface viewfinder, beside the tab row) and the entities are tiles to its
-// left - crop, name, kind, newest claim, age - re-sorted as sightings land; off, the same tiles
-// are the full-width review list. Swipe up/down selects, in review front opens the selected
-// entity (larger crop, pinned, first/last seen, where, the claims newest first; scrollable) and
-// there pins or unpins it, rear steps back: detail, selection, and at the root it is not consumed.
+// Scan mode: what the glasses have seen, as a view over the `world` model, and the switch for
+// the `scanner` (docs/agent.md). While scanning, the camera runs in the top right corner (the
+// surface viewfinder) and the entities are tiles to its left - crop, name, kind, newest claim,
+// age - re-sorted as sightings land; off, the same tiles are the full-width review list.
 //
-// A Comms screen module (`provides: 'CommsScreen'`): it subscribes to the world and the scanner
-// only while showing, and leaving it (or the mode) stops the camera and the scanning - a scan
-// costs a model slot and ~85 mA of camera, so it does not outlive the screen that shows it. The
-// camera is a jetd-side overlay the modal mode menu does not cover, so it is paused while the
-// switcher is up (as Describe does). Ages are relative, so the 1 s tick looks at what is on the
-// glass and repaints only when one of those words changes.
+// Gestures. Front is the scanner's switch (`scanner.toggle()`), whatever is selected. Swipe
+// up/down selects; swipe right opens the selected entity (larger crop, pinned, first/last seen,
+// where, the claims newest first; up/down scrolls) and swipe left closes it; inside, front pins
+// or unpins. Rear steps back: detail, selection, and at the root it is not consumed (the
+// registry ascends). What is selected or open is published as `world.focus`: it is what "this"
+// means in a question asked now.
+//
+// It subscribes to the world and the scanner only while showing, and leaving it stops the
+// camera and the scanning - a scan costs a model slot and ~85 mA of camera, so it does not
+// outlive the mode that shows it. The camera is a jetd-side overlay the modal mode menu does not
+// cover, so it is paused while the switcher is up (as Describe does), and stopped while a
+// detail has the panel. Ages are relative, so the 1 s tick looks at what is on the glass and
+// repaints only when one of those words changes.
 import { Schema } from '@versionzero/module-manager';
-import { C, MARGIN, TOP, hint } from '../../modules/ui/style.js';
+import { C, MARGIN, TOP, hint, panel } from '../../modules/ui/style.js';
 import { CardList, DetailView } from '../../modules/ui/cards.js';
 
 const s = Schema.create;
@@ -31,21 +35,20 @@ export function age(ms) {
 }
 const ago = (ms) => { const a = age(ms); return a === 'now' ? 'just now' : `${a} ago`; };
 
-export class ScanScreen {
+export class ScanMode {
   static moduleInfo = {
-    name: 'scan-screen',
-    provides: 'CommsScreen',
+    name: 'scan-mode',
     schema: s()
+      .property('modes', s('Modes').meta('internal', true))
+      .property('ui', s('Ui').meta('internal', true))
       .property('world', s('World').meta('internal', true))
       .property('scanner', s('Scanner').meta('internal', true))
       .property('surface', s('Surface').meta('internal', true))
-      .property('modes', s('Modes').meta('internal', true))
-      .property('ui', s('Ui').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  world; scanner; surface; modes; ui; logger;
+  modes; ui; world; scanner; surface; logger;
 
-  id = 'scan'; label = 'Scan';
+  id = 'scan'; label = 'Scan'; spoken = ['scan', 'scanner'];
   /** the clock, a field so tests own time */ now = () => Date.now();
   #list = new CardList({ anchor: 'start' });
   #detail = new DetailView();
@@ -64,6 +67,8 @@ export class ScanScreen {
     // deferred: a menu dismissed by picking another mode has left us (and stopped the camera) by then
     queueMicrotask(() => { if (this.#showing) this.#resume(); });
   };
+
+  async start() { this.modes.register(this); }   // before any await: registration order is the switcher's order
 
   enter() {
     this.#showing = true; this.#open = null; this.#list.follow();
@@ -88,7 +93,7 @@ export class ScanScreen {
 
   /** The entity open in the detail view; null at the list (or once it has expired). */
   get opened() { return this.#open ? this.world.get(this.#open) : null; }
-  /** The camera rectangle: the top right corner under the strip, beside the tab row. */
+  /** The camera rectangle: the top right corner under the strip. */
   get cameraRect() { return { x: this.surface.width - CAMERA.w - MARGIN, y: TOP + 2, ...CAMERA }; }
 
   /** The world as tiles, most recently seen first (the thumbnail is fetched only for a tile that is drawn). */
@@ -126,35 +131,36 @@ export class ScanScreen {
     this.#refresh(); this.ui.requestRender();
   }
 
+  /** Open or close the detail (null): the list is re-read on the way back, the camera follows. */
+  #show(id) { this.#open = id; if (id) this.#detail.reset(); else this.#refresh(); this.#sync(); }
+
   onGesture(g) {
-    const open = this.opened;
+    const open = this.opened, picked = this.#list.selected;
     switch (g) {
-      // one button, read by where you are (the pad's tap is the front button on this device): in
-      // a detail it pins; while scanning it stops (scan -> review); in review a selected card
-      // opens, and with nothing selected it starts scanning again
+      // the one button never navigates (the pad's tap is the same button on this device): at
+      // the list it is the scanner's switch, in a detail it pins. Their events repaint
       case 'press:front': case 'press:tap':
-        if (open) { this.world.pin(open.id, !open.pinned); return true; }   // its `change` event repaints
-        if (this.scanner.active || !this.#list.selected) { this.scanner.toggle(); return true; }   // its `state` event does the rest
-        this.#open = this.#list.selected.id; this.#detail.reset(); this.#sync();
-        break;
+        if (open) this.world.pin(open.id, !open.pinned); else this.scanner.toggle();
+        return true;
       case 'swipe:up': case 'swipe:down': { const d = g === 'swipe:up' ? -1 : 1; if (open) this.#detail.scroll(d); else this.#list.move(d); break; }
-      case 'swipe:left': case 'swipe:right': if (!open) return false; break;   // an open entity is a place of its own: the tabs are a step back
+      case 'swipe:right': if (open || !picked) return false; this.#show(picked.id); break;
+      case 'swipe:left': if (!open) return false; this.#show(null); break;
       case 'press:rear':
-        if (open) { this.#open = null; this.#refresh(); this.#sync(); }
+        if (open) this.#show(null);
         else if (!this.#list.following) this.#list.follow();
         else return false;
         break;
       default: return false;
     }
     // what is picked out here is what "this" means in a question asked now: the model's to
-    // know (world.focus), not this screen's to keep
-    this.world.focus(this.#open ?? this.#list.selected?.id ?? null);
+    // know (world.focus), not this view's to keep
+    this.world.focus(this.opened?.id ?? this.#list.selected?.id ?? null);
     this.ui.requestRender();
     return true;
   }
 
-  render(s, rect) {
-    const { main, small } = s.fonts, { active, state } = this.scanner, e = this.opened;
+  render(s) {
+    const rect = panel(s), { main, small } = s.fonts, { active, state } = this.scanner, e = this.opened;
     if (e) {
       const t = this.#at = this.now();
       this.#detail.render(s, rect, {
@@ -168,7 +174,7 @@ export class ScanScreen {
           ...(e.claims ?? []).toReversed().map((c) => `${clock(c.t)} ${c.text}`),
         ],
       });
-      return hint(s, `front: ${e.pinned ? 'unpin' : 'pin'}   swipe: scroll   rear: back`);
+      return hint(s, `front: ${e.pinned ? 'unpin' : 'pin'}   up/down: scroll   left: back`);
     }
     let area = rect;
     if (active) {   // the camera corner, the scanner's word under it, the tiles in what is left
@@ -181,6 +187,6 @@ export class ScanScreen {
     }
     this.#drawn = this.#list.render(s, area).map((tile) => tile.card.id);
     if (!this.#drawn.length) s.text(area.x + area.w / 2, rect.y + rect.h / 2 - main.height, active ? 'nothing yet' : 'nothing seen yet', { font: main, colour: C.dim, align: 'center' });
-    hint(s, `front: ${active ? 'stop' : this.#list.selected ? 'open' : 'scan'}${this.#drawn.length ? '   swipe: select' : ''}${this.#list.selected ? '   rear: unselect' : ''}`);
+    hint(s, `front: ${active ? 'stop' : 'scan'}${this.#list.selected ? '   right: open   rear: unselect' : this.#drawn.length ? '   swipe: select' : ''}`);
   }
 }

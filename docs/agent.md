@@ -1,7 +1,8 @@
 # Jet, the operator: agent loop, world model, comms (branch `jet-agent`)
 
 The step past call-and-response: a conversational memory, tools, and a small world model built
-from what the glasses capture, presented as a peer mode (**Comms**) next to Assistant and
+from what the glasses capture, presented as two modes: **Assistant** (the conversation; it
+replaced the one-shot push-to-talk mode of that name) and **Scan** (the world model), next to
 Describe, which it is meant to replace once it earns it. This file is the design and the module
 contracts; `docs/jet-app.md` remains the law for how jet-app code is shaped (modules own models,
 modes/screens are subscribing views, extension = `provides` + arrays-of-type).
@@ -40,11 +41,11 @@ unless told what it is for.
       ▼                                 world ◄─ scanner ◄─ camera
      feed  ◄───────────── show ───────────┘
       ▲                                   ▲
-      └──────── Comms mode (views: Channel screen, Scan screen; cards, detail) ──┘
+      └──────── views: Assistant mode (the thread), Scan mode (cards, detail) ──┘
 ```
 
 Models (modules, `src/modules/`): `camera`, `world`, `scanner`, `feed`, `agent`, `operator`.
-Views (`src/modes/comms/`): the mode and its screens. Nothing in a view holds model state.
+Views (`src/modes/assistant/`, `src/modes/scan/`): two modes. Nothing in a view holds model state.
 
 ### `llm` (extended)
 
@@ -54,7 +55,7 @@ Views (`src/modes/comms/`): the mode and its screens. Nothing in a view holds mo
 parsed object (`{}` on empty, and a parse failure is reported as `args: null, raw`). Sends the
 same thinking switches as `chatStream`, plus `stream_options: {include_usage: true}`; `usage`
 comes from the final chunk (`usage.prompt_tokens`, `timings.cache_n`). `chatStream` stays for
-the Assistant and Describe.
+voice's built-in one-shot responder and Describe.
 
 ### `agent` — the loop, the history, the memory
 
@@ -247,7 +248,7 @@ operator.talk()   operator.cancel()   operator.replay(feedItemId) → boolean  /
   been spoken its audio is attached to the `said` item (voice `spoken` event; stored 24 kHz
   mono); the picture a tool looked at is posted as a `photo`. `replay` plays an item's clip.
 - **Which picture a question is about** is fixed, not left to timing: if the wearer has an entity
-  selected (`world.focus()`, set by the Scan screen's selection) the context says so and `look`
+  selected (`world.focus()`, set by the Scan mode's selection) the context says so and `look`
   with `item` returns that entity's best recorded crop; otherwise a frame is taken as the
   question arrives (`camera.hold()`) and `look` returns *that* frame, not whatever the camera
   sees seconds later. Whether the question concerns the view at all stays the model's decision:
@@ -262,11 +263,11 @@ operator.talk()   operator.cancel()   operator.replay(feedItemId) → boolean  /
   mode reaches the agent; spoken commands (`actions`) are still tried first. **No screen
   changes for a question**: the conversation belongs to no mode (the models — `feed`, `world`,
   `agent` — are container singletons), so it is the same from Status, the map or the Scan
-  screen; the status strip shows the turn's state.
+  mode; the status strip shows the turn's state.
 
 `voice` changes that make this possible:
 - `startTurn({responder})`, `claimWake(responder)`; the session's answer stage calls
-  `responder.respond` (the built-in one-shot chat is the default, so the Assistant is unchanged);
+  `responder.respond` (the built-in one-shot chat is the default: it answers when no responder is given or claimed);
   `question` events carry which responder took the turn.
 - **A wake turn has two phases.** jetd's VAD ends the wake capture at the first pause, ~1.1 s in
   (measured: every wake capture on 2026-11-11), i.e. right after "heya jet". That first capture
@@ -279,27 +280,54 @@ operator.talk()   operator.cancel()   operator.replay(feedItemId) → boolean  /
   in a noisy room.
 - `fill(set)`, `playAudio(clip)`, event `spoken {turn, responder, rate, channels, pcm}`.
 
-### Comms mode (`comms`, "Comms")
+### The modes: Assistant (`assistant`) and Scan (`scan`)
 
-Two screens (`provides: 'CommsScreen'`, the System-mode pattern), swipe left/right between them.
+Two top-level modes in the switcher (Assistant first), each a module with its models injected,
+subscribing only while it shows. Both draw in `panel(s)` (`ui/style.js`): from the status strip
+down to the hint line.
 
 The pad's tap is the front button on this device (`input.tapCode` 28 is also Enter), so there
-is one button and it is read by where you are:
+is one button, and it never navigates into something: swipes select, open and close.
 
-- **Channel**: the conversation for review, drawn as a message thread (`ui/chat.js`): the
-  wearer's words and photos right, Jet's words and cards left, coloured by speaker, a
-  loudspeaker mark where a clip is stored. It follows the newest until a swipe selects; front on
-  a selected message opens it (whole text, picture enlarged) and replays its audio, front again
-  replays, rear closes / unselects / ascends. With nothing selected front = talk.
-- **Scan**: front starts scanning; while scanning the viewfinder runs in a corner and entity
-  cards (crop, name, kind, newest claim, age) re-sort as sightings land. Front again stops it:
-  review. In review swipe = select, front = detail (larger crop, the claims log, where,
-  first/last seen), front in detail = pin/unpin, rear = back; with nothing selected front scans
-  again. Leaving the screen stops the scan and the camera. The selection (or the open entity)
-  is published as `world.focus`: a question asked while something is selected is about that.
+**Assistant** (`src/modes/assistant/`; spoken "radio", "jet", "comms"): the conversation, drawn
+as a message thread (`ui/chat.js`): the wearer's words and photos right, Jet's words and cards
+left, coloured by speaker, a loudspeaker mark where a clip is stored. It follows the newest
+until a swipe selects.
 
-Shared drawing: `ui/cards.js` (`CardList`: tiles with thumbnail, title, lines, badge; selection
-and scroll window) used by both screens.
+| where | front (= tap) | swipe up/down | swipe right | swipe left | rear |
+|---|---|---|---|---|---|
+| thread, following | `operator.talk()` | select | - | - | not consumed (switcher) |
+| thread, a message selected | open + replay | select | open + replay | - | unselect (follow the newest) |
+| open message | replay again | scroll | - | close | close (selection stays) |
+| a turn running (anywhere) | `operator.talk()`: end the capture / barge in | as above | as above | as above | `operator.cancel()` |
+
+Open = the whole text, the picture as large as the panel allows, and the stored audio once
+(`operator.replay(id)`; an item without a clip is the operator's to refuse). A running turn is
+the pending bubbles under the thread (listening and the partial transcript right; thinking,
+then the answer as it streams, left) until the feed holds its `heard` and `said`. Leaving the
+mode cancels nothing. A wake-word question that no responder took (`operator.wake` off: voice's
+one-shot chat answers) is the one thing that raises the mode: that turn is never filed, so its
+transcript and answer stay as the pending bubbles, idle too, until the next turn.
+
+**Scan** (`src/modes/scan/`; spoken "scan", "scanner"): the world as entity cards (crop, name,
+kind, newest claim, age), most recently seen first. While scanning the viewfinder runs in the
+top right corner and the cards re-sort beside it as sightings land; off, they are the
+full-width review list.
+
+| where | front (= tap) | swipe up/down | swipe right | swipe left | rear |
+|---|---|---|---|---|---|
+| list, nothing selected | `scanner.toggle()` | select | - | - | not consumed (switcher) |
+| list, an entity selected | `scanner.toggle()` | select | open the detail | - | unselect |
+| detail | pin / unpin (`world.pin`) | scroll | - | close | close (selection stays) |
+
+The detail: larger crop, pinned, first/last seen, where, the claims newest first. It can be
+opened while scanning (the scan goes on, the viewfinder is off until it closes). The selection
+(or the open entity) is published as `world.focus`: a question asked while something is
+selected is about that; leaving the mode clears it and stops the scan and the camera.
+
+Shared drawing: `ui/list.js` (selection and scroll window), `ui/chat.js` (`ChatList`: the
+bubbles), `ui/cards.js` (`CardList`: tiles with thumbnail, title, lines, badge; `DetailView`:
+the opened item, used by both modes).
 
 ## Milestones
 
@@ -308,10 +336,10 @@ and scroll window) used by both screens.
 | M0 | Spikes: tool loop, cache, image tool results, bbox | **done** (above) |
 | M1 | `llm.chat`, `agent` (loop, history, compaction, notes, mood), generic tools | **done**, unit-tested |
 | M2 | `camera`, `world`, `scanner`, `look`/`sightings` | **done**, unit-tested |
-| M3 | `feed`, cards, Comms mode, `show` | **done**, unit-tested |
+| M3 | `feed`, cards, the modes (first as one two-tab Comms mode, since split into Assistant and Scan), `show` | **done**, unit-tested |
 | M4 | `operator`, voice responder seam, wiring, `/ask` debug route, end-to-end on the Mac against fake-jetd with a real frame | **done** (below) |
 | M5 | On the device: latency with real ASR/TTS, network whitelist for search, `setpriv`, JPEG encode time at 640x480, persona tuning with rg's prompt, fillers that match the fiction (pickup lines, generated in the background) | needs the Jet + rg |
-| M6 | Retire Assistant and Describe into Comms; `actions` exposed as a tool; entity refinement (a second look at a crop on demand); QR/barcode decoder feeding `world` | later |
+| M6 | Retire Describe (the one-shot Assistant is gone: the conversation took its name); `actions` exposed as a tool; entity refinement (a second look at a crop on demand); QR/barcode decoder feeding `world` | later |
 | M7 | Richer sends: `z-image` pictures as cards, animated; remembrance-agent style proactive recall from `world` + notes; place signatures from the sighting log | later |
 
 ### What M4 showed (2026-11-11, the whole app on the Mac, `out.png` as the camera)
@@ -380,7 +408,7 @@ The per-device layer (`/android-data/mainline/jet-app.json`) needs, beside `llm.
              "persona": "..." } }
 ```
 Without the `base` keys the web tools are simply not offered. `operator.wake: false` hands
-wake-word questions back to the Assistant.
+wake-word questions back to voice's one-shot chat; the Assistant mode raises itself to show them.
 
 ## Work to do (as of 2026-11-11)
 
@@ -406,13 +434,23 @@ In order; the first is a blocker for anything that starts the camera.
    committing to it); the ISS buffers are already sized for it. The closer look is also where
    exposure belongs: a detail shot of something small and bright wants a metered manual
    exposure with the gain pulled down (three ioctls on the sensor subdevs, no kernel change).
+   **Measured on a lens barrel (2026-11-11), which tempers all of the above**: lettering ~5 px
+   high at 640x480, ~10 px at 1280x960 (jetd now delivers `S 1280 960`, ~0.7 s), desk light, AE
+   at its ceiling (984 lines, gain 256). Tight crops of the lettering came back UNREADABLE at
+   640, at 1280, and at 1280 with the gain halved and quartered: the letters are soft at every
+   setting - focus distance and noise, not pixel count or clipping. Shown the whole frame instead,
+   the model "read" `AF MICRO NIKKOR 60mm 1:2.8 D` from one and `50mm f2.8D` from another: the
+   brand line is in the pixels, the numbers are what such lenses usually say. Two rules follow.
+   A read must be asked of a tight crop with nothing around it to guess from, and `UNREADABLE`
+   must be a legal answer. And full resolution only pays where the optics resolve the text:
+   test at other distances and in better light before building on it.
 4. **`near` counts and places** from the sighting log; the curator's candidate scoring computes
    co-occurrence on demand today.
 5. **Voice on the device, unverified**: the two-phase wake turn, fillers between sentences,
    replay; the model answered a battery question without calling `status` (a one-line device
    fact in the context would remove the temptation); "run analysis" still mis-heard as other
    words by the ASR; the time in the context is UTC.
-6. **Retire Assistant and Describe** into Comms; `actions` as a tool; z-image picture cards.
+6. **Retire Describe** (the one-shot Assistant is done); `actions` as a tool; z-image picture cards.
 
 ## Risks, as they stand after the spikes
 
