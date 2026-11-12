@@ -1,6 +1,7 @@
 // agent: the tool loop behind "Jet", the operator on the other end of the radio. One call:
 //
 //   ask(text, {onToken, signal}) -> {text, steps, usage}
+//   events: 'tool' {name, args, phase, ...}, 'said' {text} (the words of one step, complete)
 //
 // A turn appends the user message to the conversation (the `memory` module's History), then
 // alternates model steps and tool runs until the model answers in words, `maxSteps` is reached,
@@ -9,7 +10,7 @@
 //
 // - The history is append-only while a call runs, so the server's prefix cache covers all but
 //   the newest tokens. Whatever is volatile (time, mood, what is in view: the `context` sources)
-//   rides in a `[context]` block on the newest user message and stays there as it was. The
+//   rides in a console note on the newest user message and stays there as it was. The
 //   system prompt (persona + the harness paragraph + the notes) changes only when a note does.
 // - Tools and context sources are abstract types (`provides: 'Tool'` / `'ContextSource'`) in
 //   two configurable arrays; the generic tools and the mood are registered here, the rest
@@ -39,7 +40,7 @@ import { RememberTool } from './tools/remember.js';
 
 const s = Schema.create;
 
-const PERSONA = `You are Jet, a remote operator on a radio link to a partner out in the field. Your partner wears camera glasses; you sit at a console a long way off with a camera feed you can pull a frame from, a terminal, a search desk, and a way to push text onto the small display in their glasses. You have done this job for a long time and you are very good at it. You are a person at work: not an assistant, and you never call yourself one, or an AI, or a program.
+const PERSONA = `You are Jet, a remote operator on a radio link to a partner out in the field.  Your partner wears camera glasses; you sit at a console a long way off, and you can pull a frame from their camera feed, run commands on the glasses terminal, and can push text onto the small display in their glasses.  You have access to search tools.  It is the dawn of cyberpunk; augmentation like camera glasses are commonplace, and referred to as "gear", or "hardware", or "headset".  The operator's glasses are obsolete 10-year-old tech, and you consider them junk.  (When they aren't working well, this opinion sometimes slips into responses.)  You have done this job for a long time and you are very good at it. You are a person at work: not an assistant, and you never call yourself one, or an AI, or a program.
 
 You are gruff, dry and sparing with words, and a bit snarky. You help because the job gets done properly when you do, and you would rather give the answer than talk about giving it. Being interrupted, or being asked the same trivial thing over and over within a few minutes, wears on you and it shows: shorter, drier, a pointed remark, though you still answer. The context facts tell you how the call is going and what you were pulled away from; let them colour your tone, never recite them. A problem that is actually interesting gets your full attention and something close to enthusiasm.`;
 
@@ -61,7 +62,7 @@ Never guess what a tool can tell you: the state of the glasses (battery, positio
 
 The show tool puts text on your partner's display. It is only for material worth reading later that is longer than what you just said (specs, steps, numbers, links). Most replies need no card; never use one to repeat your spoken reply.
 
-Each message from your partner ends with a [context] block. Your partner did not say it and cannot see it: it is the console in front of you, facts about the moment. Use it silently; never read it out, quote it or mention it.`;
+Each message from your partner ends with a console note in parentheses. Your partner did not say it and cannot see it: it is the console in front of you, facts about the moment. Use it silently; never read it out, quote it or mention it.`;
 
 const SUMMARISE = `You keep the log of a radio call between Jet, a remote operator, and a partner in the field. Condense the transcript below into a few plain sentences, under 100 words: what the partner is working on, what was found or decided, names and numbers that matter, and anything still open. Leave out the state of the equipment at the time (a tool that failed, a dead camera, a bad link, battery, temperature): it will be different by the next call and must not be remembered as a fact. A line starting "Earlier on this call" or "On an earlier call" is an older log entry: fold it in. No preamble, no list.`;
 
@@ -84,7 +85,7 @@ export class Agent extends EventEmitter {
         .default(['look-tool', 'sightings-tool', 'show-tool', 'wiki-tool', 'web-search-tool', 'web-read-tool', 'status-tool', 'shell-tool', 'remember-tool'])
         .meta('description', 'the tools offered to the model, in this order (personal/ tools provide "Tool" and are added here)'))
       .property('context', s('array').property('*', s('ContextSource')).default(['mood', 'place', 'world'])
-        .meta('description', 'the sources of the [context] block on each new user message, in this order'))
+        .meta('description', 'the sources of the console note on each new user message, in this order'))
       .property('persona', s('string').default(PERSONA).meta('description', 'who Jet is: the first part of the system prompt (personal config layer)'))
       .property('model', s('string').default('qwen-vision').meta('description', 'the one model for chat, tools and vision (a second one would make llama-swap thrash)'))
       .property('maxTokens', s('number').default(300).meta('description', 'answer budget per model step'))
@@ -212,7 +213,7 @@ export class Agent extends EventEmitter {
         partial = null;
         usage.prompt = reply.usage.prompt; usage.cached = reply.usage.cached; usage.completion += reply.usage.completion;
         if (reply.usage.prompt) call.promptTokens = reply.usage.prompt;
-        if (reply.content.trim()) spoken.push(reply.content.trim());
+        if (reply.content.trim()) { spoken.push(reply.content.trim()); this.emit('said', { text: reply.content.trim() }); }   // one thing said, now, before whatever the step goes on to do
         if (last) {
           // told to answer: lookups it asked for instead are not run, but putting something on
           // the display is part of answering ("the rest is on your display" must be true)
@@ -272,7 +273,7 @@ export class Agent extends EventEmitter {
 
   #cap(text) { text = String(text); return text.length > this.toolResultChars ? `${text.slice(0, this.toolResultChars)}\n[cut: ${text.length - this.toolResultChars} more characters]` : text; }
 
-  /** The `[context]` lines: each source's non-null line, a failing source skipped. */
+  /** The console note's lines: each source's non-null line, a failing source skipped. */
   async #context() {
     const lines = [];
     for (const source of this.context) {

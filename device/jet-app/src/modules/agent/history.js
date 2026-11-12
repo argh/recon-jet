@@ -13,19 +13,23 @@
 // Pure state and no I/O: the agent decides when, `memory` persists it (`toJSON` / `from`).
 
 export const PHOTO_GONE = '[photo, no longer attached]';
-const CONTEXT = '[context]';
+const CONTEXT = '(Console, for you only, not said by your partner: ';
 const EARLIER = 'Earlier on this call: ', PREVIOUS = 'On an earlier call: ';
 const SUMMARY = /^(Earlier on this call|On an earlier call): /;
 
 /**
- * The newest user message as it is sent and kept: what was said, then the volatile facts. The
- * words come first - with the block in front the model took it for the start of the conversation
- * and opened its own reply with a copy.
+ * The newest user message as it is sent and kept: what was said, then the volatile facts as a
+ * parenthetical. Both choices are measured, on qwen-vision with the full prompt:
+ * - the words first: with the facts in front the model took them for the start of the
+ *   conversation and opened its reply with a copy;
+ * - a sentence in parentheses, not a bracketed `[context]` tag: the tag was the last thing in the
+ *   prompt and the model imitated it - it wrote `[look]` as text instead of calling the tool.
+ *   Tool calls on "what is that ship over there?": 3 of 8 with the tag, 8 of 8 like this.
  */
-export function withContext(lines, text) { return lines.length ? `${text}\n\n${CONTEXT}\n${lines.join('\n')}` : text; }
-/** ...and what was said, for a reader that does not want the block (the summariser). */
+export function withContext(lines, text) { return lines.length ? `${text}\n\n${CONTEXT}${lines.join(' ')})` : text; }
+/** ...and what was said, for a reader that does not want the note (the summariser). */
 export function withoutContext(content) {
-  const at = content.lastIndexOf(`\n\n${CONTEXT}\n`);
+  const at = content.lastIndexOf(`\n\n${CONTEXT}`);
   return at < 0 ? content : content.slice(0, at);
 }
 

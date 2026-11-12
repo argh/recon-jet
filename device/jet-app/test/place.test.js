@@ -26,7 +26,7 @@ test('place: a fix is named from the real table, offered to the agent with its a
   gps.emit('update', { good: false, lat: 1, lon: 1 });
   assert.equal(place.fix, null, 'a fix that fails the quality gate is not a position');
   gps.emit('update', { good: true, lat: 37.7822, lon: -122.2478 });
-  assert.equal(place.context(), "Your partner's position by GPS (fix just now): 37.7822, -122.2478: in or near Alameda, California, US (1.7 km from its centre); Oakland is 3.2 km away. Use the place name; you cannot tell places from coordinates yourself.");
+  assert.equal(place.context(), "Your partner's position by GPS (fix just now): 37.7822, -122.2478: in or near Alameda, California, US (1.7 km from its centre); Oakland is 3.2 km away. Only if the question is about where they are or what is around them: use the place name (you cannot tell places from coordinates yourself). Otherwise leave it out.");
   clock.t += 12 * 60_000;   // the receiver went off: the fix stays, older
   assert.match(place.context(), /\(fix 12 min old\): 37\.7822/);
   clock.t += 7 * 3_600_000;

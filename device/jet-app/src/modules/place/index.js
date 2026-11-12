@@ -97,6 +97,6 @@ export class Place {
     if (!f || old > this.maxAgeS * 1000) return null;
     const [a, b] = this.near;
     const where = a ? `: in or near ${a.label} (${km(a.km)} from its centre)${b && b.km < 3 * Math.max(a.km, 2) ? `; ${b.label.split(',')[0]} is ${km(b.km)} away` : ''}` : '';
-    return `Your partner's position by GPS (fix ${age(old)}): ${f.lat.toFixed(4)}, ${f.lon.toFixed(4)}${where}. Use the place name; you cannot tell places from coordinates yourself.`;
+    return `Your partner's position by GPS (fix ${age(old)}): ${f.lat.toFixed(4)}, ${f.lon.toFixed(4)}${where}. Only if the question is about where they are or what is around them: use the place name (you cannot tell places from coordinates yourself). Otherwise leave it out.`;
   }
 }

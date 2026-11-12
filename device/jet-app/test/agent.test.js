@@ -220,9 +220,9 @@ test('agent: the context block rides on the newest user message only, old ones s
   view = null;
   await agent.ask('sure?');
   const h = agent.history;
-  assert.equal(h[0].content, 'what is that?\n\n[context]\nIt is early.\nIn view lately: multimeter [e7]');
-  assert.equal(h[2].content, 'what does it read?\n\n[context]\nIt is early.\nIn view lately: solder spool [e8], multimeter [e7]', 'a failing source is skipped');
-  assert.equal(h.at(-2).content, 'sure?\n\n[context]\nIt is late.', 'a null line is left out');
+  assert.equal(h[0].content, 'what is that?\n\n(Console, for you only, not said by your partner: It is early. In view lately: multimeter [e7])');
+  assert.equal(h[2].content, 'what does it read?\n\n(Console, for you only, not said by your partner: It is early. In view lately: solder spool [e8], multimeter [e7])', 'a failing source is skipped');
+  assert.equal(h.at(-2).content, 'sure?\n\n(Console, for you only, not said by your partner: It is late.)', 'a null line is left out');
   // prefix stability: each request is the one before it plus new messages at the end, so the server's cache holds
   assert.equal(llm.calls.length, 4);
   for (let k = 1; k < llm.calls.length; k++) {
@@ -385,10 +385,10 @@ test('history: plan, compact, drop and fold cut at user boundaries; transcript s
   const h = new History();
   const say = (role, content, t) => h.push({ role, content }, t);
   assert.equal(h.plan(0), null); assert.equal(h.drop(3), 0);
-  say('user', 'one\n\n[context]\nIt is late.', 1); say('assistant', 'A', 2); say('user', 'two', 3); say('assistant', 'B', 4);
+  say('user', 'one\n\n(Console, for you only, not said by your partner: It is late.)', 1); say('assistant', 'A', 2); say('user', 'two', 3); say('assistant', 'B', 4);
   assert.equal(h.plan(2), null, 'two turns, keep two: nothing to compact');
   assert.equal(h.plan(3), null);
-  assert.deepEqual(h.plan(1).messages.map((m) => m.content), ['one\n\n[context]\nIt is late.', 'A']);
+  assert.deepEqual(h.plan(1).messages.map((m) => m.content), ['one\n\n(Console, for you only, not said by your partner: It is late.)', 'A']);
   assert.equal(transcript(h.messages), 'Partner: one\nJet: A\nPartner: two\nJet: B');
   const plan = h.plan(1);
   h.promptTokens = 6000;
@@ -453,7 +453,7 @@ test('mood: facts about the call - its age, recent asks, an interruption, the ac
   const rolls = [0, 0.99, 0.5];
   const mood = Object.assign(new Mood(), { activities: ['eating lunch', 'filling in the log'], windowS: 600, memory, now: agent.now, random: () => rolls.shift() });
   agent.context = [mood];
-  const block = () => agent.history.findLast((m) => m.role === 'user').content.split('\n').at(-1);
+  const block = () => agent.history.findLast((m) => m.role === 'user').content.split('\n').at(-1).replace(/^\(Console, for you only, not said by your partner: /, '').replace(/\)$/, '');
   await agent.ask('one');
   assert.match(block(), /^It is \w+day,? \d\d:\d\d\. A new call\. When the call came in you were eating lunch\.$/);
   tick(4 * 60_000); await agent.ask('two');
@@ -651,7 +651,7 @@ test('agent: tools and context sources are DI modules, injected into the arrays 
   llm.script.push({ toolCalls: [call('1', 'look')] }, { content: 'Pliers.' });
   assert.equal((await agent.ask('what is that?')).text, 'Pliers.');
   assert.deepEqual(llm.calls[0].tools.map((t) => t.function.name), ['look', 'web_search', 'status', 'shell', 'remember']);
-  assert.match(agent.history[0].content, /^what is that\?\n\n\[context\]\nIt is .* When the call came in you were testing\.\nIn view lately: pliers \[e3\]$/);
+  assert.match(agent.history[0].content, /^what is that\?\n\n\(Console, for you only, not said by your partner: It is .* When the call came in you were testing\. In view lately: pliers \[e3\]\)$/);
   await agent.stop(); await agent.memory.stop();
 
   // the arrays are configuration: a subset reshapes what the model is offered
