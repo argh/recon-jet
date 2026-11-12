@@ -28,6 +28,11 @@
 // (`session` `more`). A capture also ends when the transcript has stopped changing
 // (`endpointPartials`): the energy VAD does not hear the end of speech over a noisy room.
 //
+// A conversation does not need the wake word for every line: when an answer has finished
+// playing, the mic opens again by itself for `followUpS` seconds (`followUp`), with no cue, for
+// the same responder. Say something and it is the next turn; say nothing and it closes quietly
+// after `followUpQuietMs` - no "nothing heard", no error phrase: nobody asked to be listened to.
+//
 // Who answers a question is the turn's **responder** (session.js): the built-in one-shot chat
 // unless the caller of `startTurn({responder})` brings another; `claimWake(responder)` does the
 // same for wake-word turns, which no mode starts. Spoken commands are tried first either way.
@@ -68,6 +73,9 @@ export class Voice extends EventEmitter {
       .property('ttsMinRtf', s('number').default(1.15).meta('description', '... and it has been arriving at this multiple of real time or better; otherwise the sentence is played whole when complete'))
       .property('fillerMs', s('number').default(700).meta('description', 'play the filler when no answer audio has arrived this long after the transcript'))
       .property('fillGapMs', s('number').default(4000).meta('description', 'a responder\'s filler (`fill`) is skipped when the last filler was more recent than this'))
+      .property('followUp', s('boolean').default(true).meta('description', 'after an answer has played, listen again without the wake word, so a conversation flows'))
+      .property('followUpS', s('number').default(6).meta('description', 'longest follow-up capture'))
+      .property('followUpQuietMs', s('number').default(3000).meta('description', 'a follow-up window in which nothing has been said closes after this'))
       .property('wakeLongS', s('number').default(2.5).meta('description', 'a wake capture at least this long with three words or more is taken as the question itself; shorter, it was only the call'))
       .property('endpointPartials', s('number').default(2).meta('description', 'end the capture when this many partial transcripts in a row repeat the one before (0 = leave it to the VAD)'))
       .property('phrases', s('any').default(PHRASES).meta('description', 'spoken replies by set: ack (a command heard), wait (slow), error (failed); rendered once in the TTS voice'))
@@ -86,7 +94,7 @@ export class Voice extends EventEmitter {
       .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  enabled; systemPrompt; partialMs; sentenceGapMs; streamTts; ttsPrebufferMs; ttsMinRtf; fillerMs; fillGapMs; wakeLongS; endpointPartials; phrases; phraseDir; actionWaitMs; maxSeconds; captureDelayMs; wake; wakeCutoff; wakeWindow; debugPort; llm; deviceLink; ui; sounds; actions; logger;
+  enabled; systemPrompt; partialMs; sentenceGapMs; streamTts; ttsPrebufferMs; ttsMinRtf; fillerMs; fillGapMs; followUp; followUpS; followUpQuietMs; wakeLongS; endpointPartials; phrases; phraseDir; actionWaitMs; maxSeconds; captureDelayMs; wake; wakeCutoff; wakeWindow; debugPort; llm; deviceLink; ui; sounds; actions; logger;
 
   /** @type {'idle'|'listening'|'thinking'|'speaking'} */ state = 'idle';
   turn = 0;           // the current (or last) turn id; events from older turns are ignored
@@ -101,6 +109,7 @@ export class Voice extends EventEmitter {
   #waitTimer = null;  // wait phrases while a spoken command runs
   /** @type {PhraseBank|null} */ #bank = null;
   #debug = null;
+  /** @type {Map<string, (query: URLSearchParams, json: object) => unknown>} `METHOD /path` -> handler, added by other modules (`debugRoute`) */ #routes = new Map();
   #stateT = 0;
   #clips = 0;         // clips queued with #play that jetd has not reported played yet
   #wakeTurn = false;  // the running turn began with the wake word
@@ -110,6 +119,8 @@ export class Voice extends EventEmitter {
   /** @type {Set<string>} filler clips used this turn: never the same one twice */ #fillUsed = new Set();
   /** @type {Buffer[]} the answer's audio this turn (fillers excluded), for whoever keeps a record */ #spoken = [];
   #lastPartial = ''; #partialRepeats = 0;
+  #followTurn = false;   // the running turn is a follow-up window: opened by us, so it ends without comment
+  #quietTimer = null;
   #routed = false;    // the running turn went to an action, not the model
 
   /** Cached phrase clips per set ({ack, wait, error}); {} before start. */
@@ -144,7 +155,7 @@ export class Voice extends EventEmitter {
   }
 
   async stop() {
-    clearTimeout(this.#fillerTimer); clearInterval(this.#waitTimer);
+    clearTimeout(this.#fillerTimer); clearInterval(this.#waitTimer); clearTimeout(this.#quietTimer);
     if (this.wake && this.deviceLink.connected) this.deviceLink.wakeListen(false).catch(() => {});
     if (this.state !== 'idle') { this.#session.cancel(); if (this.state === 'listening') this.deviceLink.captureStop(); }
     this.#debug?.close();
@@ -177,6 +188,14 @@ export class Voice extends EventEmitter {
     this.#wakeResponder = responder;
     return () => { if (this.#wakeResponder === responder) this.#wakeResponder = null; };
   }
+
+  /**
+   * Add a route to the debug HTTP server (only served when `debugPort` is set): the handler gets
+   * the query and the JSON body and returns (a promise of) what is sent back as JSON. For a
+   * module that has something worth reaching from a development machine - the operator's dialog
+   * export - without a second listener.
+   */
+  debugRoute(method, path, handler) { this.#routes.set(`${method} ${path}`, handler); }
 
   /** Abort the running turn (nothing is said, nothing more plays); idle stays idle. */
   cancel() {
@@ -249,6 +268,9 @@ export class Voice extends EventEmitter {
    * a sentence that kept going is the question; anything else was only the call ('more').
    */
   #intercept(text, { seconds = 0, wake = false, phase = 1 } = {}) {
+    // a follow-up window that caught nothing (or only noise the ASR made a word of): it closes
+    // as if it had never opened
+    if (this.#followTurn && !/[a-z]/i.test(text)) { this.#routed = true; this.logger?.info({ turn: this.turn, text }, 'follow-up: nothing said'); return true; }
     if (!wake || phase > 1) return this.route(text);
     if (this.actions?.match(text)) return this.route(text);
     if (seconds >= this.wakeLongS && /[a-z]/i.test(text) && text.trim().split(/\s+/).length >= 3) return this.route(text);
@@ -285,6 +307,7 @@ export class Voice extends EventEmitter {
     if (!a) { this.emit('question', { turn: this.turn, text, wake: this.#wakeTurn, responder: this.#responder?.name ?? null }); return false; }
     this.#routed = true;
     this.logger?.info({ turn: this.turn, action: a.name, text: a.text, wake: this.#wakeTurn }, 'action');
+    this.emit('command', { turn: this.turn, text, action: a.name, wake: this.#wakeTurn });   // for whoever keeps the record
     this.ui.setStrip(a.name, { colour: C.ok, ms: 1500 });
     // spoken, so answered in speech: an ack now, a wait phrase every actionWaitMs while it runs
     // (three at most, never the same one twice), an error phrase if it fails; 'stop' needs no ack
@@ -310,8 +333,10 @@ export class Voice extends EventEmitter {
     this.#begin({ wake: true, responder: this.#wakeResponder });
   }
 
-  #begin({ wake = false, responder = null } = {}) {
-    this.#supersedeAnnouncements();
+  #begin({ wake = false, responder = null, followUp = false } = {}) {
+    clearTimeout(this.#quietTimer);
+    this.#followTurn = followUp;
+    if (!followUp) this.#supersedeAnnouncements();   // a window we opened ourselves is not the user's intent yet
     const turn = ++this.turn;
     this.transcript = ''; this.answer = ''; this.audioFrames = 0; this.#wakeTurn = wake; this.#routed = false; this.#responder = responder;
     this.#spoken = []; this.#fillUsed = new Set(); this.#filledAt = -Infinity; this.#lastPartial = ''; this.#partialRepeats = 0;
@@ -319,6 +344,17 @@ export class Voice extends EventEmitter {
     this.#setState('listening');
     this.ui.setStrip('listening', { colour: C.ok });
     if (wake) { this.#session.start(turn, who); return; }   // the mic is open and the user is mid-sentence: no cue over it
+    if (followUp) {   // no cue either: the conversation simply goes on
+      if (!this.deviceLink.captureStart(this.followUpS)) return this.#fail('link down');
+      this.#session.start(turn, who);
+      this.#quietTimer = setTimeout(() => {
+        if (this.turn !== turn || this.state !== 'listening' || this.transcript) return;
+        this.logger?.info({ turn }, 'follow-up: quiet, closing');
+        this.deviceLink.captureStop();
+      }, this.followUpQuietMs);
+      this.#quietTimer.unref?.();
+      return;
+    }
     this.#cue('ack');
     // open the mic only after the cue has played, so jetd's noise-floor window (its first
     // 300 ms of capture) does not measure the beep
@@ -403,16 +439,24 @@ export class Voice extends EventEmitter {
   #finish(why) {
     clearTimeout(this.#fillerTimer);
     this.logger?.info({ turn: this.turn, why }, 'turn finished');
+    const followed = this.#followTurn, answered = why.startsWith('played') && !this.#routed, responder = this.#responder;
+    this.#followTurn = false;
     this.#setState('idle');
-    if (!this.#routed) this.ui.setStrip(why === 'nothing heard' ? 'nothing heard' : null, { colour: C.dim, ms: 2000 });   // an action owns the strip after a routed turn
+    if (followed && !answered) this.ui.setStrip(null);   // a follow-up window that came to nothing: no comment
+    else if (!this.#routed) this.ui.setStrip(why === 'nothing heard' ? 'nothing heard' : null, { colour: C.dim, ms: 2000 });   // an action owns the strip after a routed turn
+    // an answer was spoken: the floor is the user's again, without the wake word
+    if (answered && this.followUp && this.configured && this.state === 'idle') this.#begin({ followUp: true, responder });
   }
 
   #fail(why) {
     clearTimeout(this.#fillerTimer);
     this.logger?.warn({ turn: this.turn, state: this.state, why }, 'turn failed');
+    const followed = this.#followTurn && !this.transcript;
+    this.#followTurn = false;
     if (this.state === 'listening') this.deviceLink.captureStop();
     this.#session.cancel();
     this.#setState('idle');
+    if (followed) { this.ui.setStrip(null); return; }   // a window we opened ourselves and nothing was said: fail quietly
     this.ui.setStrip(`voice: ${why}`, { colour: C.bad, ms: 3000 });
     this.phrase('error', 'error');
   }
@@ -574,6 +618,8 @@ export class Voice extends EventEmitter {
               .then((answer) => { if (json.speak && answer) this.say(answer).catch(() => {}); return { responder: responder.name, answer }; }));
           }
           if (req.method === 'POST' && req.url === '/look') return run(this.#snapshotLook(String(json.question ?? 'Describe what is in front of me in one short sentence.')));
+          const url = new URL(req.url, 'http://x'), extra = this.#routes.get(`${req.method} ${url.pathname}`);
+          if (extra) return run(Promise.resolve().then(() => extra(url.searchParams, json)));
           reply(404, { error: 'no such route' });
         } catch (e) { reply(400, { error: e.message }); }
       });

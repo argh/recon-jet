@@ -414,3 +414,49 @@ test('voice: a transcript that has stopped changing ends the capture; fillers go
   voice.playAudio({ rate: 24000, channels: 1, pcm: Buffer.alloc(480) });
   assert.equal(link.clips.at(-1).length, 480 * 4, '24 kHz mono -> 48 kHz stereo');
 });
+
+test('voice: after an answer has played the mic opens again without the wake word; silence closes it quietly, speech is the next turn', async (t) => {
+  const { voice, link, ui, session, states } = await make({ followUp: true, followUpS: 6, followUpQuietMs: 30, endpointPartials: 0 });
+  t.after(() => voice.stop());
+  const responder = { name: 'operator', respond: async () => 'ok' };
+  const answer = (turn) => {
+    session.emit('final', { type: 'final', text: 'hello', turn });
+    session.emit('audio', { type: 'audio', pcm: Buffer.from('AAAA'), bytes: 4, sentence: 'Hi.', turn });
+    session.emit('done', { type: 'done', answer: 'Hi.', turn });
+    link.emit('playDone', 'done');
+  };
+  voice.startTurn({ responder });
+  link.emit('captureEnd', 'end'); answer(1);
+  await sleep(1);
+  assert.equal(voice.state, 'listening', 'the floor is the user\'s again'); assert.equal(voice.turn, 2);
+  assert.equal(link.sent.at(-1), 'V 6', 'the follow-up capture, opened at once');
+  assert.deepEqual(session.sent.filter((f) => f.type === 'start').map((f) => f.turn), [1, 2]);
+  const cues = link.clips.length;
+  // nothing is said: it closes by itself, and nobody is told anything
+  await sleep(50);
+  assert.equal(link.sent.at(-1), 'v', 'quiet: the capture is stopped');
+  link.emit('captureEnd', 'stop');
+  assert.equal(session.intercept('', { seconds: 3, wake: false, phase: 1 }), true, 'an empty follow-up is nobody\'s question');
+  session.emit('final', { type: 'final', text: '', turn: 2 }); session.emit('done', { type: 'done', answer: '', turn: 2 });
+  assert.equal(voice.state, 'idle'); assert.equal(ui.strips.at(-1), null, 'no "nothing heard"');
+  assert.equal(link.clips.length, cues, 'no cue, no error phrase'); assert.equal(voice.turn, 2, 'and no window after a window that came to nothing');
+  // a turn again; this time the follow-up is used
+  voice.startTurn({ responder }); link.emit('captureEnd', 'end'); answer(3);
+  await sleep(1);
+  assert.equal(voice.turn, 4); assert.equal(voice.state, 'listening');
+  session.emit('partial', { type: 'partial', text: 'and the other one', turn: 4 });
+  await sleep(50);
+  assert.notEqual(link.sent.at(-1), 'v', 'something is being said: the quiet timer leaves it alone');
+  link.emit('captureEnd', 'end');
+  assert.equal(session.intercept('and the other one', { seconds: 2, wake: false, phase: 1 }), false, 'a question for the same responder');
+  answer(4); await sleep(1);
+  assert.equal(voice.turn, 5, 'and the conversation goes on');
+  voice.cancel();
+  // an action's turn (no answer spoken) opens no window
+  voice.actions = { match: () => ({ name: 'doom', text: 'run doom', run: () => Promise.resolve() }) };
+  voice.startTurn({ responder }); link.emit('captureEnd', 'end');
+  session.intercept('run doom', { seconds: 1, wake: false, phase: 1 });
+  session.emit('final', { type: 'final', text: 'run doom', turn: 6 }); session.emit('done', { type: 'done', answer: '', turn: 6 });
+  await sleep(1);
+  assert.equal(voice.state, 'idle'); assert.equal(voice.turn, 6);
+});
