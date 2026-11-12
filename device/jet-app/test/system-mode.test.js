@@ -57,12 +57,12 @@ async function make({ calibrated = false, glanceRaw = 150, extra = {} } = {}) {
 }
 const swipe = (input, dx, dy) => input.emit('motion', { dx, dy, t: 0 });
 
-test('system: first use when a calibration file is missing; the wizard walks pad, glance, brightness', async () => {
+test('system: first use when a calibration file is missing; the wizard walks pad, glance, interface', async () => {
   const { sys, link, input, ui, modes, paths, read, setRaw } = await make();
   assert.deepEqual(modes.registered, ['system']);
   assert.equal(await sys.firstUse(), true);
   sys.enter({ wizard: true });
-  const pad = sys.scr('pad'), glance = sys.scr('glance'), brightness = sys.scr('brightness');
+  const pad = sys.scr('pad'), glance = sys.scr('glance'), brightness = sys.scr('interface');
   assert.equal(sys.screen, pad); assert.deepEqual(pad.ctx.wizard, { n: 1, of: 3 });
   // pad: swipes arrive as motion sums plus the driver's swipe keys; keys are swallowed here
   assert.equal(sys.onGesture('swipe:right'), true);
@@ -97,7 +97,7 @@ test('system: first use when a calibration file is missing; the wizard walks pad
   // brightness: live sysfs, saved on front
   assert.equal(sys.screen, brightness); assert.deepEqual(brightness.ctx.wizard, { n: 3, of: 3 });
   assert.equal(brightness.level, 208);
-  sys.onGesture('swipe:up'); sys.onGesture('swipe:right'); sys.onGesture('swipe:down');
+  sys.onGesture('swipe:right'); sys.onGesture('swipe:right'); sys.onGesture('swipe:left');
   assert.equal(brightness.level, 256);
   await sleep(10);
   assert.equal(read('brightness'), '256\n', 'applied live');
@@ -129,15 +129,15 @@ test('system: a flat glance run is reported and not saved; no sensor is an error
   assert.match(glance.error, /ENOENT|no tmd2771/);
 });
 
-test('system: the menu opens every screen; brightness rear reverts; Status repaints on changed power and shows addresses', async () => {
+test('system: the menu opens every screen; the backlight reverts on rear; Status repaints on changed power and shows addresses', async () => {
   const { sys, power, ui, read } = await make({ calibrated: true });
   sys.enter();
   const ids = sys.menu.items.map((i) => i.id);
-  assert.deepEqual(ids, ['status', 'pad', 'glance', 'brightness', 'wear', 'bluetooth', 'location']);
+  assert.deepEqual(ids, ['status', 'pad', 'glance', 'interface', 'wear', 'bluetooth', 'location']);
   for (const id of ids) { sys.open(id); assert.equal(sys.screen, sys.scr(id)); assert.equal(sys.onGesture('press:rear'), true); assert.equal(sys.screen, null); }
   sys.onGesture('swipe:up'); assert.equal(sys.menu.item.id, 'location', 'wraps');
-  sys.open('brightness');
-  sys.onGesture('swipe:up'); assert.equal(sys.scr('brightness').level, 256);
+  sys.open('interface');
+  sys.onGesture('swipe:right'); assert.equal(sys.scr('interface').level, 256);
   assert.equal(sys.onGesture('press:rear'), true);
   await until(() => read('brightness') === '208\n', 'reverted');
   assert.equal(sys.screen, null);
@@ -200,7 +200,7 @@ test('system: screens are DI modules providing Screen, built and configured by t
   await mm.initModules(config);
   const sys = mm.getModuleInstance('harness').sys;
   assert.ok(sys instanceof SystemMode);
-  assert.deepEqual(sys.screens.map((x) => x.id), ['status', 'pad', 'glance', 'brightness', 'wear', 'bluetooth', 'location'], 'the Screen array defaults to the seven, in menu order');
+  assert.deepEqual(sys.screens.map((x) => x.id), ['status', 'pad', 'glance', 'interface', 'wear', 'bluetooth', 'location'], 'the Screen array defaults to the seven, in menu order');
   const status = sys.screens[0];
   assert.ok(status instanceof StatusScreen);
   assert.equal(status.ui, fakes.ui, 'a screen gets its own dependencies injected');
@@ -333,4 +333,33 @@ test('system: Wear toggles the off-head behaviour live through the wear module, 
   sys.onGesture('press:front');
   await until(() => screen.error, 'a failed save is shown');
   assert.equal(wear.enabled, true, 'the live change still happened');
+});
+
+test('interface: two rows - backlight and volume; up/down picks, left/right adjusts, the volume speaks at its new level, rear puts both back', async () => {
+  const dir = tmpdir('jet-if-');
+  fs.writeFileSync(path.join(dir, 'brightness'), '208\n');
+  const { Backlight } = await import('../src/modules/backlight/index.js');
+  const { InterfaceScreen } = await import('../src/modes/system/interface.js');
+  const backlight = Object.assign(new Backlight(), { file: path.join(dir, 'backlight'), sysfs: path.join(dir, 'brightness'), logger: null });
+  await backlight.start();
+  const volume = { level: 8, sets: [], async set(n) { this.sets.push(n); this.level = n; return n; } };
+  const voice = { state: 'idle', phrases: [], phrase(set) { this.phrases.push(set); } };
+  const ui = { renders: 0, requestRender() { this.renders++; }, setStrip() {} };
+  const scr = Object.assign(new InterfaceScreen(), { backlight, volume, voice, ui });
+  scr.enter({});
+  assert.deepEqual(scr.rows, ['backlight', 'volume']); assert.equal(scr.row, 0);
+  scr.onGesture('swipe:right'); assert.equal(scr.level, 256, 'the backlight row is selected first');
+  scr.onGesture('swipe:down'); assert.equal(scr.row, 1);
+  scr.onGesture('swipe:right'); scr.onGesture('swipe:right'); scr.onGesture('swipe:right');
+  await settle();
+  assert.deepEqual(volume.sets, [9, 10], 'up to ten and no further'); assert.deepEqual(voice.phrases, ['ack', 'ack'], 'each change is heard');
+  scr.onGesture('swipe:left'); await settle(); assert.equal(volume.level, 9); assert.equal(scr.level, 256, 'the other row is untouched');
+  scr.onGesture('swipe:down'); assert.equal(scr.row, 0, 'wraps');
+  assert.equal(scr.onGesture('press:rear'), false, 'rear is the mode\'s to finish');
+  await settle();
+  assert.equal(scr.level, 208); assert.equal(volume.level, 8, 'both as they were');
+  // a device with no volume model has the one row
+  const plain = Object.assign(new InterfaceScreen(), { backlight, volume: null, voice: null, ui });
+  plain.enter({}); assert.deepEqual(plain.rows, ['backlight']);
+  plain.onGesture('swipe:down'); assert.equal(plain.row, 0);
 });

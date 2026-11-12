@@ -83,7 +83,7 @@ import { SystemMode } from '../src/modes/system/index.js';
 import { StatusScreen } from '../src/modes/system/status.js';
 import { PadCalScreen } from '../src/modes/system/pad-cal.js';
 import { GlanceCalScreen } from '../src/modes/system/glance-cal.js';
-import { BrightnessScreen } from '../src/modes/system/brightness.js';
+import { InterfaceScreen } from '../src/modes/system/interface.js';
 import { WearScreen } from '../src/modes/system/wear.js';
 import { BluetoothScreen } from '../src/modes/system/bluetooth.js';
 import { LocationScreen } from '../src/modes/system/location.js';
@@ -106,7 +106,7 @@ export function fakeGps() {
  * The real SystemMode over real screens, every dependency injectable (`paths` for the files).
  * Returns the mode with `scr(id)` for reaching a screen.
  */
-export function buildSystem({ paths = {}, ui, input, power, sensors, gps = fakeGps(), radio, bluez, backlight, wear, deviceLink = fakeLink(), modes, sounds = fakeSounds(), voice = null, actions = null, logger = null } = {}) {
+export function buildSystem({ paths = {}, ui, input, power, sensors, gps = fakeGps(), radio, bluez, backlight, wear, volume = null, deviceLink = fakeLink(), modes, sounds = fakeSounds(), voice = null, actions = null, logger = null } = {}) {
   radio ??= Object.assign(new Radio(), { btMarker: paths.btMarker, gps, logger });
   bluez ??= Object.assign(new EventEmitter(), { ready: true, pairing: null, list: () => [], scan: async () => {}, pair: async () => {}, remove: async () => {}, ensure: async () => {} });
   backlight ??= Object.assign(new Backlight(), { file: paths.backlightFile, sysfs: paths.backlightSysfs, logger });
@@ -114,7 +114,7 @@ export function buildSystem({ paths = {}, ui, input, power, sensors, gps = fakeG
     Object.assign(new StatusScreen(), { netDir: paths.netDir, ui, power, sensors, gps, radio }),
     Object.assign(new PadCalScreen(), { ofmArgsFile: paths.ofmArgsFile, ofmSysfs: paths.ofmSysfs, ui, input, logger }),
     Object.assign(new GlanceCalScreen(), { glanceFile: paths.glanceFile, iioDir: paths.iioDir, ui, deviceLink, logger }),
-    Object.assign(new BrightnessScreen(), { backlight, ui }),
+    Object.assign(new InterfaceScreen(), { backlight, ui, volume, voice }),
     Object.assign(new WearScreen(), { wear, sensors, ui, logger }),
     Object.assign(new BluetoothScreen(), { radio, bluez, ui }),
     Object.assign(new LocationScreen(), { gps, ui }),

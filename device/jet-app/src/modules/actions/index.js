@@ -6,6 +6,7 @@
 //   open <screen>            navigation: a mode or a System screen ("open settings", "open status")
 //   enable|disable <setting> a toggle ("enable bluetooth", "disable wear", "enable gps")
 //   run <app>                the app tier ("run analysis", "run doom")
+//   set <level> <0-10>       a level ("set volume 7", "set backlight 3")
 //   stop | cancel            end the turn, nothing asked
 // Nouns carry aliases only where the ASR has been heard to mishear them ("run doom" comes back
 // "random", "wear" as "where"); the verbs were never confused in testing, though the ASR inflects

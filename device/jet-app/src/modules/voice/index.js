@@ -91,10 +91,11 @@ export class Voice extends EventEmitter {
       .property('deviceLink', s('DeviceLink').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
       .property('sounds', s('Sounds').meta('internal', true))
+      .property('volume', s('Volume').lax().meta('internal', true))
       .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  enabled; systemPrompt; partialMs; sentenceGapMs; streamTts; ttsPrebufferMs; ttsMinRtf; fillerMs; fillGapMs; followUp; followUpS; followUpQuietMs; wakeLongS; endpointPartials; phrases; phraseDir; actionWaitMs; maxSeconds; captureDelayMs; wake; wakeCutoff; wakeWindow; debugPort; llm; deviceLink; ui; sounds; actions; logger;
+  enabled; systemPrompt; partialMs; sentenceGapMs; streamTts; ttsPrebufferMs; ttsMinRtf; fillerMs; fillGapMs; followUp; followUpS; followUpQuietMs; wakeLongS; endpointPartials; phrases; phraseDir; actionWaitMs; maxSeconds; captureDelayMs; wake; wakeCutoff; wakeWindow; debugPort; llm; deviceLink; ui; sounds; volume; actions; logger;
 
   /** @type {'idle'|'listening'|'thinking'|'speaking'} */ state = 'idle';
   turn = 0;           // the current (or last) turn id; events from older turns are ignored
@@ -284,7 +285,7 @@ export class Voice extends EventEmitter {
     this.ui.requestRender();
     const pcm = this.#bank?.pick('pickup');
     this.logger?.info({ turn, phrase: Boolean(pcm) }, 'pickup');
-    if (pcm && this.deviceLink.play(pcm)) {
+    if (pcm && this.deviceLink.play(this.#loud(pcm))) {
       this.#clips++;
       await this.deviceLink.playEnd().catch(() => {}).finally(() => { this.#clips--; });   // the mic must not hear us
     } else {
@@ -420,7 +421,7 @@ export class Voice extends EventEmitter {
       this.audioFrames++;
       if (!m.filler) this.#spoken.push(m.pcm);
       this.logger?.debug({ turn: this.turn, bytes: m.bytes, sentence: m.sentence }, 'audio frame');
-      this.deviceLink.play(m.pcm);
+      this.deviceLink.play(this.#loud(m.pcm));   // the record (`#spoken`) keeps the signal as it came
     });
     session.on('done', (m) => {
       if (!current(m)) return;
@@ -475,9 +476,12 @@ export class Voice extends EventEmitter {
   /** A cue from the sounds module, counted like a clip of our own so a barge-in flushes it. */
   #cue(name) { this.#clips++; this.sounds.play(name).finally(() => { this.#clips--; }); }
 
+  /** Speech on its way to the speaker, at the volume model's level (as it comes, without one). */
+  #loud(pcm) { return this.volume ? this.volume.apply(pcm) : pcm; }
+
   /** One clip (the filler): queue it and close it; jetd's `w` reply is logged, not waited for. */
   #play(pcm) {
-    if (!this.deviceLink.play(pcm)) return;
+    if (!this.deviceLink.play(this.#loud(pcm))) return;
     const t0 = this.now();
     this.#clips++;
     this.deviceLink.playEnd().then((r) => this.logger?.info({ bytes: pcm.length, result: r, ms: this.now() - t0 }, 'clip played'), () => {}).finally(() => { this.#clips--; });

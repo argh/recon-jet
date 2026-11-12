@@ -8,31 +8,31 @@
 //
 // First use: when a screen says `needsSetup()` (pad or glance calibration missing on userdata),
 // `firstUse()` tells the registry to start here as a wizard that walks Pad calibration, then
-// Glance calibration, then Brightness; the same screens are reachable from the menu later.
+// Glance calibration, then Interface (brightness and volume); the same screens are reachable from the menu later.
 import { Schema } from '@versionzero/module-manager';
 import { Chooser } from '../../modules/ui/chooser.js';
 import { C } from '../../modules/ui/style.js';
 import { StatusScreen } from './status.js';
 import { PadCalScreen } from './pad-cal.js';
 import { GlanceCalScreen } from './glance-cal.js';
-import { BrightnessScreen } from './brightness.js';
+import { InterfaceScreen } from './interface.js';
 import { BluetoothScreen } from './bluetooth.js';
 import { Bluez } from '../../modules/bt/bluez.js';
 import { LocationScreen } from './location.js';
 import { WearScreen } from './wear.js';
 
 /** What the ASR makes of a screen's name when it gets it wrong, back to the screen. */
-const SCREEN_ALIAS = { stages: 'status', glands: 'glance', where: 'wear', ware: 'wear' };
+const SCREEN_ALIAS = { stages: 'status', glands: 'glance', where: 'wear', ware: 'wear', brightness: 'interface', volume: 'interface' };
 
 const s = Schema.create;
-const WIZARD = ['pad', 'glance', 'brightness'];
+const WIZARD = ['pad', 'glance', 'interface'];
 
 export class SystemMode {
   static moduleInfo = {
     name: 'system-mode',
     schema: s()
       .property('screens', s('array').property('*', s('Screen'))
-        .default(['status-screen', 'pad-cal-screen', 'glance-cal-screen', 'brightness-screen', 'wear-screen', 'bluetooth-screen', 'location-screen'])
+        .default(['status-screen', 'pad-cal-screen', 'glance-cal-screen', 'interface-screen', 'wear-screen', 'bluetooth-screen', 'location-screen'])
         .meta('description', 'the System screens, in menu order (personal/ screens provide "Screen" and are added here)'))
       .property('modes', s('Modes').meta('internal', true))
       .property('ui', s('Ui').meta('internal', true))
@@ -46,7 +46,7 @@ export class SystemMode {
       { ModuleClass: StatusScreen, relative: true },
       { ModuleClass: PadCalScreen, relative: true },
       { ModuleClass: GlanceCalScreen, relative: true },
-      { ModuleClass: BrightnessScreen, relative: true },
+      { ModuleClass: InterfaceScreen, relative: true },
       { ModuleClass: WearScreen, relative: true },
       { ModuleClass: BluetoothScreen, relative: true },
       { ModuleClass: LocationScreen, relative: true },
@@ -67,7 +67,7 @@ export class SystemMode {
     // "heya jet, open bluetooth": come here and show the screen (the Modes "open" declines names
     // that are no mode, so this gets them whatever the start order); the nouns the ASR has been
     // heard to bend ("stages", "where") are accepted as aliases
-    this.actions?.register('open screen', /^open (?:the )?(status|stages|pad|glance|glands|brightness|wear|where|ware|bluetooth|location)$/, (m) => {
+    this.actions?.register('open screen', /^open (?:the )?(status|stages|pad|glance|glands|interface|brightness|volume|wear|where|ware|bluetooth|location)$/, (m) => {
       if (this.modes.current !== this) this.modes.switchTo(this.id);
       this.wizard = null; this.open(SCREEN_ALIAS[m[1]] ?? m[1]);
     });

@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Schema } from '@versionzero/module-manager';
 import { writeIfPresent } from '../../lib/sysfs.js';
+import { parseLevel } from '../volume/index.js';
 
 const s = Schema.create;
 
@@ -13,6 +14,8 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 /** The panel's range: 16..1023 by 48 (the kopin-a230 range jetd used). */
 export const BACKLIGHT = { min: 16, max: 1023, step: 48, fallback: 208 };
 export const backlightStep = (level, d) => clamp(level + d * BACKLIGHT.step, BACKLIGHT.min, BACKLIGHT.max);
+/** A spoken 1..10 as a panel level: the ends are the panel's ends, the rest lands on its steps. */
+export const levelOf = (n) => clamp(BACKLIGHT.min + Math.round((clamp(n, 1, 10) - 1) / 9 * (BACKLIGHT.max - BACKLIGHT.min) / BACKLIGHT.step) * BACKLIGHT.step, BACKLIGHT.min, BACKLIGHT.max);
 
 export class Backlight {
   static moduleInfo = {
@@ -20,15 +23,28 @@ export class Backlight {
     schema: s()
       .property('file', s('string').default('/android-data/mainline/backlight').meta('description', 'saved backlight level (applied by jetd at boot)'))
       .property('sysfs', s('string').default('/sys/class/backlight/kopin-a230/brightness').meta('description', 'backlight control'))
+      .property('actions', s('Actions').lax().meta('internal', true))
+      .property('ui', s('Ui').lax().meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  file; sysfs; logger;
+  file; sysfs; actions; ui; logger;
 
   /** The level as this module last set it (the saved file, else the live sysfs, at start). */
   level = BACKLIGHT.fallback;
   #write = Promise.resolve();
 
-  async start() { this.level = await this.#read(); }
+  async start() {
+    this.level = await this.#read();
+    // "heya jet, set backlight 3" (also "set the brightness to seven"): 1..10 over the panel's
+    // range, applied now and saved as the boot level
+    this.actions?.register('backlight', /^set (?:the )?(?:backlight|back light|brightness|display)(?: level)? (?:to |at )?(\w+)$/, async (m) => {
+      const n = parseLevel(m[1]);
+      if (n === null || n < 1) throw new Error(`backlight is 1 to 10, not "${m[1]}"`);
+      const level = levelOf(n);
+      await this.apply(level); await this.save(level);
+      this.ui?.setStrip?.(`backlight ${n}`, { ms: 2000 });
+    });
+  }
 
   /** Set the panel now (not persisted). Writes are serialised: a swipe burst must end on the last level. */
   apply(level) {
@@ -42,7 +58,7 @@ export class Backlight {
     this.level = level;
     await fs.mkdir(path.dirname(this.file), { recursive: true });
     await fs.writeFile(this.file, `${level}\n`);
-    this.logger?.info({ level }, 'backlight saved');
+    this.logger?.info({ backlight: level }, 'backlight saved');   // not `level`: that key is the log line's severity
   }
 
   async #read() {
