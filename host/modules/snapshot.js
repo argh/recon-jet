@@ -16,7 +16,7 @@ export class SnapshotCommand extends Command {
       .property('out', s('string').meta('general').meta('valueDescription', 'out.png')
         .meta('description', 'output file (default: jet-<utc>.png in the current directory)'))
       .property('size', s('string').default('640x480')
-        .meta('description', 'frame size WxH (the media pipeline must already be configured for it)')),
+        .meta('description', 'frame size WxH: 640x480, or 1280x960 for the full sensor')),
   };
   out; size;
 

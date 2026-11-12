@@ -45,7 +45,7 @@ host -> jet:
 | `P` | ping -> `p` |
 | `M <remote\|log\|shell>` | switch mode |
 | `I <text>` | type into the shell pty (`\n`/`\r` = Enter (CR), `\t`, `\e` = ESC, `\\`) |
-| `S [w h [skip]]` | camera snapshot (default 640x480, skip 6 frames for exposure/AWB) -> `f <w> <h> UYVY <len>\n` + bytes, or `e <msg>` |
+| `S [w h [skip]]` | camera snapshot (default 640x480, skip 6 frames for exposure/AWB) -> `f <w> <h> UYVY <len>\n` + bytes, or `e <msg>`. The reply goes only to the client that asked. `S 1280 960` is the full sensor (2,457,600 bytes): jetd reprograms sensor and CSI-2 receiver for the one capture and puts 640x480 back (~0.7 s on the device, like a 640x480 one); frames the driver flagged as bad are never sent |
 | `V [max_s]` / `v` | start / stop voice capture (a turn: 16 kHz chunks until silence, max_s or `v`) |
 | `D <0\|1> [cutoff [window]]` | listen for the wake word: the mic stays open and feeds jetwake (`agent/wake`, model `mainline/wake.tflite`, defaults 0.97 / 5) except while the speaker plays; a hit is `d <avg> <max>` and a turn begins at once with the 300 ms before the hit sent first; -> `x <on\|off\|error ...>` |
 | `W <len>` + bytes / `w` | queue 48 kHz stereo S16 PCM; `w` ends the clip |
@@ -104,7 +104,9 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
   first 300 ms; speech when rms > max(3 x floor, 300); ends after 0.8 s below max(1.5 x floor,
   150) following speech, or at `max_s` (default 8), or on `v`.
 - `W`: queues 48 kHz stereo S16 for `aplay -D hw:0,0`, drained non-blocking from the poll loop;
-  `w done` when played. Mono input must be upmixed on the host (see audio.md).
+  `w done` when played. Mono input must be upmixed on the host (see audio.md). jetd never waits
+  on a helper (`aplay`, `arecord`, `jetwake`) without a bound: one that has not exited 3 s after
+  its pipe closed (1 s after SIGTERM for the others) is SIGKILLed and logged.
 - ALSA tools (and the shell) run via `chroot /mnt/data/rootfs` (the userdata rootfs symlink) when
   jetd runs from the initramfs, directly when it already runs inside the chroot.
 
@@ -143,7 +145,10 @@ line jetd reads `<len>` bytes before parsing lines again (`bin_need`).
 - `Z x y w h [fps]` streams the camera (640x480 UYVY, one open V4L2 stream) scaled
   nearest-neighbour into that rectangle at up to `fps` (default 10) and pushes only that rectangle;
   reply `Z <srcw> <srch>`. `z` stops it. `S` while the viewfinder runs returns the next streamed
-  frame instead of reopening the device. Drawn only in remote mode.
+  frame instead of reopening the device (at once on a running stream; within the first 6 frames
+  of a start it waits for them, since frame 0 is black and exposure settles by ~6). An `S` for
+  another size (`S 1280 960`) stops the viewfinder, captures, and restarts it with the same
+  rectangle: ~0.7 s without live frames, no second `Z` reply. Drawn only in remote mode.
 
 ## Raw keys
 

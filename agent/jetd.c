@@ -36,8 +36,10 @@
  *   M <mode>          switch mode (remote|log|shell)
  *   I <text>          shell: write text to the pty (\n \t \\ escapes)
  *   S [w h [skip]]    camera snapshot: one UYVY frame from /dev/video0 (default 640x480, after
- *                     skipping 6 frames for exposure to settle; the media pipeline must already
- *                     be configured for that size), sent back as
+ *                     skipping 6 frames for exposure to settle). A size other than the pipeline's
+ *                     640x480 (1280x960 = the full sensor) reconfigures sensor and receiver for
+ *                     the one capture and puts 640x480 back; a running viewfinder is stopped for
+ *                     it and restarted (about a second without live frames). Sent back as
  *                     "f <w> <h> UYVY <len>\n" followed by <len> raw bytes, or "e <message>"
  *   (drawing commands are ignored unless the remote mode is showing; the hub
  *    gets a fresh "h" hello whenever remote comes back and should redraw)
@@ -96,6 +98,7 @@
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
 #include <linux/input.h>
+#include <linux/v4l2-subdev.h>
 #include <linux/videodev2.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -1313,12 +1316,49 @@ static void mirror_audio(const void *buf, size_t len) {   /* tee of queued speak
     }
 }
 
-static void cam_snapshot(unsigned w, unsigned h, unsigned skip) {
+/* The media pipeline (sensor -> CSI2a -> /dev/video0) is set to 640x480 by init; any other size
+ * means reprogramming the sensor's scaler output and the receiver's two pads, which is what
+ * `media-ctl -V` does. Subdev nodes are found by name: their numbers depend on probe order. */
+#define CAM_W 640
+#define CAM_H 480
+static int subdev_open(const char *name) {
+    for (int i = 0; i < 16; i++) {
+        char p[64], n[64] = ""; snprintf(p, sizeof p, "/sys/class/video4linux/v4l-subdev%d/name", i);
+        FILE *f = fopen(p, "r"); if (!f) continue;
+        if (fgets(n, sizeof n, f)) n[strcspn(n, "\n")] = 0;
+        fclose(f);
+        if (strncmp(n, name, strlen(name))) continue;
+        snprintf(p, sizeof p, "/dev/v4l-subdev%d", i);
+        return open(p, O_RDWR | O_CLOEXEC);
+    }
+    errno = ENODEV; return -1;
+}
+static int subdev_fmt(int fd, unsigned pad, unsigned w, unsigned h) {
+    struct v4l2_subdev_format f = { .which = V4L2_SUBDEV_FORMAT_ACTIVE, .pad = pad };
+    f.format.width = w; f.format.height = h; f.format.code = MEDIA_BUS_FMT_UYVY8_1X16; f.format.field = V4L2_FIELD_NONE;
+    if (ioctl(fd, VIDIOC_SUBDEV_S_FMT, &f) < 0) return -1;
+    if (f.format.width != w || f.format.height != h) { errno = ERANGE; return -1; }
+    return 0;
+}
+static int cam_geometry(unsigned w, unsigned h) {
+    int ifp = subdev_open("mt9m114 ifp"), csi = subdev_open("OMAP4 ISS CSI2a"), rc = -1;
+    struct v4l2_subdev_selection sel = { .which = V4L2_SUBDEV_FORMAT_ACTIVE, .pad = 0, .target = V4L2_SEL_TGT_COMPOSE, .r = { 0, 0, w, h } };
+    if (ifp < 0 || csi < 0) goto out;
+    if (ioctl(ifp, VIDIOC_SUBDEV_S_SELECTION, &sel) < 0) goto out;
+    if (sel.r.width != w || sel.r.height != h) { errno = ERANGE; goto out; }
+    if (subdev_fmt(ifp, 1, w, h) < 0 || subdev_fmt(csi, 0, w, h) < 0 || subdev_fmt(csi, 1, w, h) < 0) goto out;
+    rc = 0;
+out:
+    { int e = errno; if (ifp >= 0) close(ifp); if (csi >= 0) close(csi); errno = e; }
+    return rc;
+}
+
+static void cam_capture(unsigned w, unsigned h, unsigned skip) {
     struct v4l2_format f = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
     struct v4l2_requestbuffers rb = { .count = 3, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP };
     void *map[3] = { 0 }; size_t maplen[3] = { 0 };
     int fd = open("/dev/video0", O_RDWR | O_NONBLOCK), type = V4L2_BUF_TYPE_VIDEO_CAPTURE, got = -1;
-    const char *err = NULL;
+    const char *err = NULL; int64_t t0 = now_ms(), t1 = t0;
 
     if (fd < 0) { sendf("e camera: open: %s\n", strerror(errno)); return; }
     f.fmt.pix.width = w; f.fmt.pix.height = h; f.fmt.pix.pixelformat = V4L2_PIX_FMT_UYVY; f.fmt.pix.field = V4L2_FIELD_NONE;
@@ -1333,14 +1373,17 @@ static void cam_snapshot(unsigned w, unsigned h, unsigned skip) {
         if (ioctl(fd, VIDIOC_QBUF, &b) < 0) { err = "QBUF"; goto out; }
     }
     if (ioctl(fd, VIDIOC_STREAMON, &type) < 0) { err = "STREAMON"; goto out; }
-    /* skip the first frames after power-up: exposure and white balance need a few to settle */
-    for (unsigned n = 0; n <= skip; n++) {
+    /* skip the first frames after power-up: exposure and white balance need a few to settle.
+     * A frame the driver flagged as bad (receiver error, buffer overrun) is never the one sent. */
+    for (unsigned n = 0, bad = 0; n <= skip; n++) {
         struct pollfd pf = { fd, POLLIN, 0 };
         struct v4l2_buffer b = { .type = type, .memory = V4L2_MEMORY_MMAP };
-        if (poll(&pf, 1, 4000) <= 0) { err = "timeout waiting for a frame"; break; }
+        if (poll(&pf, 1, 4000) <= 0) { err = "timeout waiting for a frame"; errno = ETIMEDOUT; break; }
         if (ioctl(fd, VIDIOC_DQBUF, &b) < 0) { err = "DQBUF"; break; }
+        if (n == skip && (b.flags & V4L2_BUF_FLAG_ERROR) && ++bad <= 5) n--;
         if (n == skip) {
             char hdr[64]; int hl = snprintf(hdr, sizeof hdr, "f %u %u UYVY %u\n", f.fmt.pix.width, f.fmt.pix.height, b.bytesused);
+            t1 = now_ms();
             if (send_payload_all(hdr, hl, map[b.index], b.bytesused) == 0) got = 0;
         } else {
             ioctl(fd, VIDIOC_QBUF, &b);
@@ -1351,7 +1394,13 @@ out:
     if (err) sendf("e camera: %s: %s\n", err, strerror(errno));
     for (unsigned i = 0; i < 3; i++) if (map[i]) munmap(map[i], maplen[i]);
     close(fd);
-    if (got == 0) fprintf(stderr, "jetd: snapshot %ux%u sent\n", f.fmt.pix.width, f.fmt.pix.height);
+    if (got == 0) fprintf(stderr, "jetd: snapshot %ux%u sent (capture %lld ms, send %lld ms)\n", f.fmt.pix.width, f.fmt.pix.height, (long long)(t1 - t0), (long long)(now_ms() - t1));
+}
+static void cam_snapshot(unsigned w, unsigned h, unsigned skip) {
+    if (w == CAM_W && h == CAM_H) { cam_capture(w, h, skip); return; }
+    if (cam_geometry(w, h) < 0) sendf("e camera: %ux%u: %s\n", w, h, strerror(errno));
+    else cam_capture(w, h, skip);
+    if (cam_geometry(CAM_W, CAM_H) < 0) fprintf(stderr, "jetd: camera: back to %ux%u: %s\n", CAM_W, CAM_H, strerror(errno));
 }
 
 /* ---- viewfinder: live camera scaled into a framebuffer rectangle (Z x y w h [fps], z) --------
@@ -1359,7 +1408,9 @@ out:
  * panel rectangle at most `fps` times a second and only that rectangle is pushed. An S snapshot
  * while the viewfinder runs is served from the next streamed frame. Drawn only in remote mode. */
 static int vf_fd = -1; static void *vf_map[3]; static size_t vf_len[3]; static unsigned vf_w, vf_h;
-static int vf_x, vf_y, vf_rw, vf_rh, vf_interval = 100, vf_snap; static int64_t vf_next;
+static int vf_x, vf_y, vf_rw, vf_rh, vf_interval = 100, vf_snap, vf_snap_fd = -1, vf_fps, vf_quiet; static int64_t vf_next;
+static unsigned vf_frames;   /* frames since the stream started: a snapshot waits for VF_SETTLE of them */
+#define VF_SETTLE 6           /* same as S's default skip: auto-exposure is black on frame 0 and settled by ~6 */
 static void vf_stop(void) {
     if (vf_fd < 0) return;
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE; ioctl(vf_fd, VIDIOC_STREAMOFF, &type);
@@ -1391,8 +1442,8 @@ static void vf_start(int x, int y, int w, int h, int fps) {
         if (ioctl(vf_fd, VIDIOC_QBUF, &b) < 0) { err = "QBUF"; goto fail; }
     }
     if (ioctl(vf_fd, VIDIOC_STREAMON, &type) < 0) { err = "STREAMON"; goto fail; }
-    vf_x = x; vf_y = y; vf_rw = w; vf_rh = h; vf_interval = fps > 0 ? 1000 / fps : 100; vf_next = 0; vf_snap = 0;
-    sendf("Z %u %u\n", vf_w, vf_h);
+    vf_x = x; vf_y = y; vf_rw = w; vf_rh = h; vf_fps = fps; vf_interval = fps > 0 ? 1000 / fps : 100; vf_next = 0; vf_snap = 0; vf_frames = 0;
+    if (!vf_quiet) sendf("Z %u %u\n", vf_w, vf_h);
     return;
 fail:
     sendf("e viewfinder: %s: %s\n", err, strerror(errno)); vf_stop();
@@ -1418,9 +1469,17 @@ static void vf_draw(const uint8_t *src) {
 }
 static void vf_frame(void) {
     struct v4l2_buffer b = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP };
+    if (vf_fd < 0) return;   /* stopped by a command handled earlier in this loop pass */
     if (ioctl(vf_fd, VIDIOC_DQBUF, &b) < 0) { if (errno != EAGAIN) { sendf("e viewfinder: DQBUF: %s\n", strerror(errno)); vf_stop(); } return; }
-    if (vf_snap) { char hdr[64]; int hl = snprintf(hdr, sizeof hdr, "f %u %u UYVY %u\n", vf_w, vf_h, b.bytesused); send_payload_all(hdr, hl, vf_map[b.index], b.bytesused); vf_snap = 0; }
-    if (mode == M_REMOTE && now_ms() >= vf_next) { vf_draw(vf_map[b.index]); vf_next = now_ms() + vf_interval; }
+    int bad = b.flags & V4L2_BUF_FLAG_ERROR;
+    /* a snapshot is served from a good frame once exposure has settled: at once on a stream that has
+     * been running, a few frames late right after a start (frame 0 is black) */
+    if (vf_snap && !bad && vf_frames >= VF_SETTLE) {
+        char hdr[64]; int hl = snprintf(hdr, sizeof hdr, "f %u %u UYVY %u\n", vf_w, vf_h, b.bytesused);
+        only_fd = vf_snap_fd; send_payload_all(hdr, hl, vf_map[b.index], b.bytesused); only_fd = -1; vf_snap = 0;
+    }
+    if (vf_frames < VF_SETTLE) vf_frames++;
+    if (!bad && mode == M_REMOTE && now_ms() >= vf_next) { vf_draw(vf_map[b.index]); vf_next = now_ms() + vf_interval; }
     ioctl(vf_fd, VIDIOC_QBUF, &b);
 }
 
@@ -1531,6 +1590,17 @@ static char wake_line[128]; static int wake_linelen;
 static unsigned char *play_buf; static size_t play_len, play_off, play_cap; static int play_end;
 static void listen_stop(const char *why);
 
+/* Wait for a helper to exit, but never for long: up to `ms` for it to finish by itself, then
+ * SIGKILL. A plain waitpid() on an aplay that never saw EOF, or on a helper stuck in the sound
+ * driver, froze the whole UI loop for good. SIGCHLD is ignored, so "gone" reads as ECHILD. */
+static void reap(pid_t pid, int ms) {
+    for (int64_t end = now_ms() + ms; waitpid(pid, NULL, WNOHANG) == 0; usleep(10000)) {
+        if (now_ms() < end) continue;
+        if (ms < 0) { fprintf(stderr, "jetd: helper %d survived SIGKILL, abandoned\n", (int)pid); return; }
+        fprintf(stderr, "jetd: helper %d did not exit, killed\n", (int)pid);
+        kill(pid, SIGKILL); ms = -1; end = now_ms() + 1000;
+    }
+}
 static pid_t spawn_pipe(char *const argv[], int *fd, int for_write) {
     /* O_CLOEXEC: a child must not inherit the other child's pipe (an arecord started while aplay
      * still runs kept aplay's stdin open, so aplay never saw EOF and jetd blocked in waitpid) */
@@ -1588,7 +1658,7 @@ static void chunk_ready(void) {
 }
 static void mic_close(void) {
     if (cap_pid <= 0 || turn_on || listen_on) return;
-    kill(cap_pid, SIGTERM); close(cap_fd); cap_fd = -1; waitpid(cap_pid, NULL, 0); cap_pid = 0;
+    kill(cap_pid, SIGTERM); close(cap_fd); cap_fd = -1; reap(cap_pid, 1000); cap_pid = 0;
 }
 static int mic_open(void) {
     if (cap_pid > 0) return 1;
@@ -1633,7 +1703,7 @@ static void cap_read(void) {
     ssize_t r = read(cap_fd, cap_in + cap_inlen, sizeof cap_in - cap_inlen);
     if (r <= 0) {   /* arecord died: the turn (if any) fails, listening stops */
         int t = turn_on; turn_on = 0;
-        close(cap_fd); cap_fd = -1; waitpid(cap_pid, NULL, 0); cap_pid = 0;
+        close(cap_fd); cap_fd = -1; reap(cap_pid, 500); cap_pid = 0;
         if (t) sendf("A error\n");
         if (listen_on) listen_stop("error mic gone");
         return;
@@ -1655,14 +1725,14 @@ static void cap_read(void) {
 }
 /* ---- wake word: jetwake reads our 16 kHz chunks and prints "wake <ms> <avg> <max>" per hit ---- */
 static void listen_stop(const char *why) {
-    if (wake_pid > 0) { kill(wake_pid, SIGTERM); close(wake_in); close(wake_out); wake_in = wake_out = -1; waitpid(wake_pid, NULL, 0); wake_pid = 0; }
+    if (wake_pid > 0) { kill(wake_pid, SIGTERM); close(wake_in); close(wake_out); wake_in = wake_out = -1; reap(wake_pid, 1000); wake_pid = 0; }
     listen_on = 0; wake_linelen = 0;
     sendf("x %s\n", why);
     mic_close();
 }
 static void listen_start(const char *args) {   /* "[cutoff [window]]" after D 1 */
     /* already listening: start over, the client may have a new model or cutoff */
-    if (wake_pid > 0) { kill(wake_pid, SIGTERM); close(wake_in); close(wake_out); wake_in = wake_out = -1; waitpid(wake_pid, NULL, 0); wake_pid = 0; wake_linelen = 0; }
+    if (wake_pid > 0) { kill(wake_pid, SIGTERM); close(wake_in); close(wake_out); wake_in = wake_out = -1; reap(wake_pid, 1000); wake_pid = 0; wake_linelen = 0; }
     static const char *bins[] = { "/bin/jetwake", "/mnt/data/wake/jetwake", "/android-data/wake/jetwake" };
     static const char *models[] = { "/mnt/data/mainline/wake.tflite", "/android-data/mainline/wake.tflite" };
     const char *bin = NULL, *model = NULL;
@@ -1695,7 +1765,8 @@ static void wake_read(void) {
 }
 static void play_close(const char *why) {
     if (play_pid <= 0) return;
-    close(play_fd); play_fd = -1; waitpid(play_pid, NULL, 0); play_pid = 0;
+    /* EOF on its stdin lets aplay play out what it holds (pipe + ALSA buffer, well under a second) */
+    close(play_fd); play_fd = -1; reap(play_pid, 3000); play_pid = 0;
     play_len = play_off = 0; play_end = 0;
     sendf("w %s\n", why);
 }
@@ -1780,7 +1851,19 @@ static void handle_line(char *l) {
     case 'Y': if (play_pid > 0) { kill(play_pid, SIGKILL); play_close("flushed"); } else sendf("w idle\n"); break;   /* barge-in: drop queued audio now */
     case 'M': { char name[16]; if (sscanf(l + 1, "%15s", name) == 1) for (int i = 0; i < M_COUNT; i++) if (!strcmp(name, mode_names[i])) { chooser = 0; set_mode(i); } } break;
     case 'I': console_write(l + 2); dirty = 1; break;
-    case 'S': { unsigned sw = 640, sh = 480, sk = 6; sscanf(l + 1, "%u %u %u", &sw, &sh, &sk); if (sk > 30) sk = 30; if (vf_fd >= 0) vf_snap = 1; else cam_snapshot(sw, sh, sk); } break;
+    case 'S': { unsigned sw = 640, sh = 480, sk = 6; sscanf(l + 1, "%u %u %u", &sw, &sh, &sk); if (sk > 30) sk = 30;
+        /* the frame (or the error) answers the hub that asked: every client matches an "f" to its own
+         * pending request, and megabytes sent to a slow bystander would stall this loop */
+        int who = cur_hub ? cur_hub->fd : -1;
+        if (vf_fd >= 0 && sw == vf_w && sh == vf_h) { vf_snap_fd = vf_snap && vf_snap_fd != who ? -1 : who; vf_snap = 1; break; }
+        only_fd = who;
+        if (vf_fd < 0) cam_snapshot(sw, sh, sk);
+        else {   /* another size than the live one: the viewfinder makes way for the capture and comes back */
+            int x = vf_x, y = vf_y, w = vf_rw, h = vf_rh, fps = vf_fps;
+            vf_stop(); cam_snapshot(sw, sh, sk);
+            vf_quiet = 1; vf_start(x, y, w, h, fps); vf_quiet = 0;
+        }
+        only_fd = -1; } break;
     default: break;
     }
 }
