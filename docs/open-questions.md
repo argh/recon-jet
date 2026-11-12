@@ -134,3 +134,46 @@ for working around a problem are in the other docs; this is the list of what is 
   The host's own USB log could not be read without privileges. Next: try another host port or a
   powered hub, read the host log right after a drop, and a Jet-side VBUS session restart via the
   PMIC USB PHY if the musb driver exposes one.
+
+## Memory corruption at camera stream start (2026-11-11, open, top reliability issue)
+
+The intermittent jet-app SIGSEGV ("dies entering Describe", two weeks old, taken for a V8/JIT
+bug) is **user-memory corruption coincident with a camera stream start**. Evidence from one boot
+with `print-fatal-signals` on: four deaths, each within ~1.5 s of a stream start (three
+`viewfinder started`, one cold snapshot `S` taken as a voice question arrived); three different
+programs (node, busybox `init` loop, busybox `sleep`), all in valid code on corrupted data; the
+garbage words are `0x02800280` / `0x03800380` = bytes `80 02 80 02`, i.e. dark UYVY pixels (the
+first frame after a start is black). No kernel oops, no ISS error. Heat (86-91 C, no throttle),
+audio and WiFi do not fit the timing or the signature.
+
+**Proven the same evening that it is camera data, and that it reaches the page cache**: after a
+node death during a scan, `ps` segfaulted on every run; the cached `/usr/bin/ps` differed from
+the on-disk file (O_DIRECT read) in exactly bytes 0x8000-0xBFFF - four whole 4 kB pages - and
+those pages held `80 02 80 02 ...`: dark UYVY. `echo 1 > /proc/sys/vm/drop_caches` restored it
+(hash equal, `ps` runs). So a damaged *clean* file page keeps crashing its program until it is
+evicted - the "stays crashy" of earlier episodes - and a damaged *dirty* page would be written
+to disk. After any incident: drop caches, and prefer a reboot (anonymous memory of long-lived
+processes may be hit too).
+
+Leading hypothesis for the mechanism (not proven): the sensor is powered fully off between streams, so
+`mt9m114_initialize()` runs at every start and briefly streams at its power-on geometry
+(1280-wide) with the CSI-2 receiver already armed and no frame-size limit in the context
+(`iss_csi2.c`); a 1.8-2.5 MB frame lands in a 0.6 MB buffer. The ISS buffers come from a 16 MB
+CMA area in HighMem that user pages share (`CMA_ALIGNMENT=8`: a 424 kB gap after each buffer),
+so the overflow hits whatever process owns the neighbouring pages. Alternatives: stale DMA at
+stop / CMA migration race; 1008 MHz without the MPU voltage step (real, but does not explain
+the pixel-shaped garbage).
+
+Decisive experiments, cheapest first: (1) a V4L2 test that maps three buffers, fills them with
+0xA5, queues only buffer 0, streams one frame and checks whether buffers 1-2 were written
+(userspace only, no reboot); (2) core dumps for node/init and a look at the page around the bad
+pointer (UYVY run, and its stride: 1280 = oversized frame, 640 = stale address); (3) allocate
+`sizeimage` + 2.5 MB slack in `iss_video.c` and log a dirty tail; (4) a dedicated no-map
+reserved-memory pool for the ISS; (5) `scaling_max_freq` 800000 regardless.
+
+Related, found on the way: jetd deadlocks in `play_close` (`waitpid` on an `aplay` whose pipe
+never sees EOF) when its client dies mid-playback - the glasses stay dead until that aplay is
+killed; `vf_frame` serves a snapshot from the very first frame of a stream with no skip, which
+is the "image is completely black" scan failures. Mitigations in jet-app meanwhile: the launcher
+restarts node after a death by signal; the operator takes a frame ahead of a question only
+while the camera is already streaming (`operator.hold`).
