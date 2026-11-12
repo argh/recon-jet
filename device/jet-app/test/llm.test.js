@@ -193,3 +193,19 @@ test('llm: speak turns the 24 kHz mono wav into 48 kHz stereo; errors, cancel an
   assert.equal(off.configured, false);
   await assert.rejects(off.speak('x'), /llm.base is not set/);
 });
+
+test('llm: a connection dropped before any reply is tried once more; a second drop, or one mid-reply, is final', async (t) => {
+  let drops = 1;
+  const { server, calls, base } = await fakeServer((call, res) => {
+    if (drops-- > 0) return res.socket.destroy();   // the far end hung up: "socket hang up"
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ text: 'hello' }));
+  });
+  t.after(() => server.close());
+  const llm = makeLlm(base, { retryDelayMs: 1 });
+  await llm.start(); t.after(() => llm.stop());
+  assert.equal(await llm.transcribe(Buffer.alloc(16000)), 'hello', 'the retry got through');
+  assert.equal(calls.length, 2);
+  drops = 2;
+  await assert.rejects(llm.transcribe(Buffer.alloc(16000)), /socket hang up|ECONNRESET/, 'one retry, not more');
+  assert.equal(calls.length, 4);
+});

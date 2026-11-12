@@ -1,8 +1,9 @@
 // llm: the OpenAI-compatible inference server the Jet reaches over WiFi (llama-swap or
-// anything with the same routes). Four calls, one keep-alive connection pool, no state:
+// anything with the same routes). Five calls, one keep-alive connection pool, no state:
 //
 //   transcribe(pcm16kMono)                 POST /audio/transcriptions  (wav + multipart in memory)
 //   chatStream(messages, onToken, signal)  POST /chat/completions, stream: true (SSE)
+//   chat({messages, tools, ...})           the same route with tool calls and usage (the agent's call)
 //   speak(text, signal)                    POST /audio/speech -> wav -> 48 kHz stereo S16 for jetd's `W`
 //   describe(jpeg, question, onToken)      chat with an image_url data URI, the vision model
 //
@@ -21,6 +22,9 @@ import { SseParser } from './sse.js';
 import { toStereo48k, createStereo48kStream } from './resample.js';
 
 const s = Schema.create;
+const THINK_END = /<\/think>/g;
+/** Connection-level failures worth one more try when no reply had begun. */
+const RETRYABLE = /ECONNRESET|EPIPE|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ECONNREFUSED|socket hang up/;
 
 export class Llm {
   static moduleInfo = {
@@ -40,10 +44,11 @@ export class Llm {
       .property('chatTimeoutMs', s('number').default(90000).meta('description', 'chat/describe request timeout (whole stream)'))
       .property('ttsTimeoutMs', s('number').default(30000).meta('description', 'speech request timeout'))
       .property('ttsStreamHz', s('number').default(24000).meta('description', 'sample rate of the streaming TTS `speech.audio.delta` PCM (mono); the clone emits 24 kHz'))
+      .property('retryDelayMs', s('number').default(400).meta('description', 'pause before the one retry of a request whose connection failed before any reply'))
       .property('warmCooldownMs', s('number').default(60000).meta('description', 'ignore a `warm` for a model warmed this recently (the vision model unloads after ~300 s idle)'))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  base; asrModel; chatModel; ttsModel; ttsVoice; visionModel; thinkingKwarg; reasoningEffort; maxTokens; visionMaxTokens; asrTimeoutMs; chatTimeoutMs; ttsTimeoutMs; ttsStreamHz; warmCooldownMs; logger;
+  base; asrModel; chatModel; ttsModel; ttsVoice; visionModel; thinkingKwarg; reasoningEffort; maxTokens; visionMaxTokens; asrTimeoutMs; chatTimeoutMs; ttsTimeoutMs; ttsStreamHz; retryDelayMs; warmCooldownMs; logger;
 
   #url = null; #agent = null;
   now = () => performance.now();
@@ -99,6 +104,59 @@ export class Llm {
     } });
     if (reasoning) this.logger?.debug({ model, reasoningChars: reasoning }, 'reasoning ignored');
     return text;
+  }
+
+  /**
+   * A chat completion with tools: streams like `chatStream` (`onToken` gets content deltas only,
+   * reasoning is dropped, the same thinking switches are sent) and also collects what a tool loop
+   * needs. `delta.tool_calls` arrive as fragments keyed by `index` (the id and name once, the
+   * arguments a few characters at a time): they are accumulated per index and parsed at the end -
+   * `args` is the parsed object (`{}` when the model sent none); arguments that are not a JSON
+   * object come back as `args: null` with the text in `raw`, for the caller to report to the
+   * model. `usage` is read from the final chunk (`stream_options.include_usage`); `cached` is
+   * llama.cpp's `timings.cache_n`, the prompt tokens it did not have to evaluate again.
+   * @param {{messages: object[], tools?: object[], model?: string, maxTokens?: number, temperature?: number, onToken?: (text: string) => void, signal?: AbortSignal}} request
+   * @returns {Promise<{content: string, toolCalls: Array<{id: string, name: string, args: object|null, raw?: string}>, usage: {prompt: number, completion: number, cached: number}}>}
+   */
+  async chat({ messages, tools, model = this.chatModel, maxTokens = this.maxTokens, temperature, onToken, signal }) {
+    const sse = new SseParser();
+    const calls = [];   // sparse by `index`
+    const usage = { prompt: 0, completion: 0, cached: 0 };
+    let content = '';
+    const body = JSON.stringify({ model, stream: true, stream_options: { include_usage: true }, max_tokens: maxTokens,
+      ...(temperature == null ? {} : { temperature }), ...(tools?.length ? { tools } : {}), messages,
+      ...(this.thinkingKwarg ? { chat_template_kwargs: { enable_thinking: false } } : {}),
+      ...(this.reasoningEffort ? { reasoning_effort: this.reasoningEffort } : {}) });
+    await this.#request('chat/completions', { headers: { 'Content-Type': 'application/json' }, body, signal, timeoutMs: this.chatTimeoutMs, onChunk: (chunk) => {
+      for (const ev of sse.feed(chunk)) {
+        const delta = ev.choices?.[0]?.delta;
+        if (delta?.content) {
+          content += delta.content;
+          const said = delta.content.replace(THINK_END, ' ');   // the tag is never for the listener
+          if (said) onToken?.(said);
+        }
+        for (const part of delta?.tool_calls ?? []) {
+          const call = (calls[part.index ?? 0] ??= { id: '', name: '', raw: '' });
+          if (part.id) call.id = part.id;
+          if (part.function?.name) call.name += part.function.name;
+          if (part.function?.arguments) call.raw += part.function.arguments;
+        }
+        if (ev.usage) { usage.prompt = ev.usage.prompt_tokens ?? 0; usage.completion = ev.usage.completion_tokens ?? 0; }
+        if (ev.timings?.cache_n != null) usage.cached = ev.timings.cache_n;
+      }
+    } });
+    const toolCalls = calls.filter(Boolean).map(({ id, name, raw }, i) => {
+      id ||= `call_${i}`;   // a server that omits ids still gets results matched to calls
+      if (!raw.trim()) return { id, name, args: {} };
+      try { const args = JSON.parse(raw); if (args && typeof args === 'object' && !Array.isArray(args)) return { id, name, args }; } catch { /* reported below */ }
+      return { id, name, args: null, raw };
+    });
+    // With thinking switched off the model now and then still closes a thought it never opened
+    // ("I'm checking the screen now.</think> You're looking at..."): what precedes the tag was
+    // a thought, so the answer of record is what follows it (the stream had already passed).
+    const end = content.lastIndexOf('</think>');
+    if (end >= 0) content = content.slice(end + 8).trim();
+    return { content, toolCalls, usage };
   }
 
   /**
@@ -167,15 +225,36 @@ export class Llm {
    * body is resolved as one Buffer. A non-200 rejects with the status and the start of the body;
    * the caller's signal rejects with `cancelled`, the timeout with `timeout`.
    */
-  #request(route, { headers = {}, body, signal, timeoutMs, onChunk }) {
+  #request(route, options) {
     if (!this.#url) return Promise.reject(new Error('llm.base is not set'));
+    // The link is WiFi at the edge of its range: a keep-alive socket the far end has dropped
+    // ("socket hang up", ECONNRESET) or a resolver that did not answer (EAI_AGAIN) fails the
+    // request before a byte of reply. Those are tried once more, on a fresh connection; a
+    // failure after the reply began, a timeout or a cancel is final.
+    return this.#attempt(route, options).catch(async (error) => {
+      if (!error.retryable || options.signal?.aborted) throw error;
+      this.logger?.info({ route, error: error.message }, 'llm: connection failed, trying once more');
+      await new Promise((r) => setTimeout(r, this.retryDelayMs));
+      if (options.signal?.aborted) throw new Error('cancelled');
+      return this.#attempt(route, options);
+    });
+  }
+
+  #attempt(route, { headers = {}, body, signal, timeoutMs, onChunk }) {
     const timeout = AbortSignal.timeout(timeoutMs);
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     const u = new URL(route, this.#url);
     const mod = u.protocol === 'https:' ? https : http;
     return new Promise((resolve, reject) => {
-      const fail = (error) => reject(signal?.aborted ? new Error('cancelled') : timeout.aborted ? new Error(`${route}: timeout after ${timeoutMs} ms`) : error);
+      let replied = false;
+      const fail = (error) => {
+        if (signal?.aborted) return reject(new Error('cancelled'));
+        if (timeout.aborted) return reject(new Error(`${route}: timeout after ${timeoutMs} ms`));
+        if (!replied && RETRYABLE.test(`${error.code ?? ''} ${error.message}`)) error.retryable = true;
+        reject(error);
+      };
       const req = mod.request(u, { method: 'POST', agent: this.#agent, signal: combined, headers: { 'Content-Length': Buffer.byteLength(body), ...headers } }, (res) => {
+        replied = true;
         const parts = [];
         const streaming = onChunk && res.statusCode === 200;
         res.on('data', (c) => (streaming ? onChunk(c) : parts.push(c)));
