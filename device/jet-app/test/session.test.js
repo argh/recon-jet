@@ -229,3 +229,29 @@ test('session: "more" sends a turn back to listening with an empty buffer; an in
   assert.deepEqual(audio.map((e) => (e.filler ? 'FILLER' : e.sentence)), ['It is a meter.', 'FILLER', 'A cheap one.'], 'after the sentence already waiting, before the next');
   assert.equal(events.at(-1).type, 'done'); assert.equal(s.busy, false);
 });
+
+test('session: a streamed sentence plays as it arrives only while the TTS is ahead of real time; a slow one is held and played whole', async () => {
+  // 192 bytes = 1 ms of 48 kHz stereo; each chunk is 200 ms of audio, and the fake clock says when it arrived
+  const chunk = () => Buffer.alloc(200 * 192, 1);
+  let clock = 0;
+  const run = async (arrivalMs) => {
+    const order = [];
+    const llm = { configured: true,
+      async transcribe() { return 'hi'; },
+      async speakStream(text, onPcm) { for (const at of arrivalMs) { clock = base + at; order.push(`chunk@${at}`); onPcm(chunk()); } clock = base + arrivalMs.at(-1) + 1; order.push('end'); } };
+    const s = new VoiceSession(llm, { partialMs: 100000, sentenceGapMs: 0, streamTts: true, prebufferMs: 300, minRtf: 1.15 });
+    s.now = () => clock;
+    const base = clock;
+    s.on('audio', () => order.push('play'));
+    const done = new Promise((r) => s.on('done', r));
+    s.start(1, { responder: { name: 'x', respond: async (text, { onToken }) => { onToken('Copy that. '); return 'Copy that.'; } } });
+    s.audio(Buffer.alloc(6400)); await s.end(); await done;
+    return order;
+  };
+  // fast: 200 ms of audio every 100 ms. Two chunks = 400 ms in hand after 200 ms -> released; the rest pass straight through
+  assert.deepEqual(await run([100, 200, 300, 400]), ['chunk@100', 'chunk@200', 'play', 'play', 'chunk@300', 'play', 'chunk@400', 'play', 'end']);
+  // slow: 200 ms of audio every 400 ms. Never ahead: nothing plays until the sentence is complete
+  assert.deepEqual(await run([400, 800, 1200]), ['chunk@400', 'chunk@800', 'chunk@1200', 'end', 'play', 'play', 'play']);
+  // a late start is counted against it: six chunks in a burst after 900 ms are 1.2 s of audio in 1.15 s, not ahead enough
+  assert.deepEqual(await run([900, 950, 1000, 1050, 1100, 1150]), ['chunk@900', 'chunk@950', 'chunk@1000', 'chunk@1050', 'chunk@1100', 'chunk@1150', 'end', 'play', 'play', 'play', 'play', 'play', 'play']);
+});

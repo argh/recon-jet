@@ -37,9 +37,10 @@ export class VoiceSession extends EventEmitter {
    * @param {{partialMs?: number, systemPrompt?: string, sentenceGapMs?: number, logger?: object}} [options]
    *   sentenceGapMs: silence after each sentence's audio; the TTS voices run "Roger. Say..." together
    */
-  constructor(llm, { partialMs = 1000, systemPrompt = SYSTEM_PROMPT, sentenceGapMs = 400, streamTts = true, logger } = {}) {
+  constructor(llm, { partialMs = 1000, systemPrompt = SYSTEM_PROMPT, sentenceGapMs = 400, streamTts = true, prebufferMs = 300, minRtf = 1.15, logger } = {}) {
     super();
     this.llm = llm; this.partialMs = partialMs; this.systemPrompt = systemPrompt; this.sentenceGapMs = sentenceGapMs; this.streamTts = streamTts; this.logger = logger;
+    this.prebufferMs = prebufferMs; this.minRtf = minRtf;
     /** The built-in responder: the question alone under the system prompt, nothing remembered. */
     this.chat = { name: 'chat', respond: (text, { onToken, signal }) => this.llm.chatStream([{ role: 'system', content: this.systemPrompt }, { role: 'user', content: text }], onToken, signal) };
   }
@@ -189,17 +190,28 @@ export class VoiceSession extends EventEmitter {
               continue;
             }
             if (this.streamTts) {
-              // stream the sentence as it renders: each chunk is played as it arrives, so the first
-              // sound does not wait for the whole clip (the consumer plays one `W` per audio event)
-              let chunks = 0;
+              // Stream the sentence as it renders - but only while the server is rendering faster
+              // than it will be played. A chunk played the moment it arrives underruns the
+              // speaker whenever the next one is late, and the server is often slower than real
+              // time (it shares a GPU with the answer and the scans: 3.3 s for a one-second
+              // sentence was measured). So chunks are held until `prebufferMs` of audio is in
+              // hand AND it has been arriving at `minRtf` times real time or better; a sentence
+              // that never gets there is played whole when it is complete. Stutter becomes a
+              // slightly later start.
+              let chunks = 0, held = [], heldBytes = 0, released = false;
+              const out = (pcm) => { chunks++; firstAudio ??= this.#ms(tEnd); this.#emit(t, 'audio', { pcm, bytes: pcm.length, sentence: chunks === 1 ? sentence : '' }); };
               await this.llm.speakStream(sentence, (pcm) => {
                 if (!this.#current(t)) return;
-                chunks++; firstAudio ??= this.#ms(tEnd);
-                this.#emit(t, 'audio', { pcm, bytes: pcm.length, sentence: chunks === 1 ? sentence : '' });
+                if (released) return out(pcm);
+                held.push(pcm); heldBytes += pcm.length;
+                const audioMs = heldBytes / 192, elapsed = Math.max(1, this.now() - t0);   // 48 kHz stereo S16: 192 bytes/ms
+                if (audioMs >= this.prebufferMs && audioMs / elapsed >= this.minRtf) { released = true; for (const h of held.splice(0)) out(h); }
               }, signal);
               if (!this.#current(t)) return;
+              const rtf = +((heldBytes / 192) / Math.max(1, this.now() - t0)).toFixed(2);
+              for (const h of held.splice(0)) out(h);
               gap(); sentences++;
-              this.logger?.info({ turn: t.id, ms: this.#ms(t0), chunks, sentence }, 'tts');
+              this.logger?.info({ turn: t.id, ms: this.#ms(t0), chunks, sentence, ...(released ? { streamed: true } : { held: true, rtf }) }, 'tts');
             } else {
               const spoken = await this.llm.speak(sentence, signal);
               if (!this.#current(t)) return;

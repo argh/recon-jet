@@ -64,6 +64,8 @@ export class Voice extends EventEmitter {
       .property('partialMs', s('number').default(1000).meta('description', 'partial transcript interval while listening'))
       .property('sentenceGapMs', s('number').default(400).meta('description', 'silence appended to each spoken sentence (the TTS runs them together)'))
       .property('streamTts', s('boolean').default(true).meta('description', 'stream each answer sentence as the TTS renders it (first sound in ~0.15 s vs waiting for the whole clip); off = the old whole-clip path'))
+      .property('ttsPrebufferMs', s('number').default(300).meta('description', 'a streamed sentence starts playing once this much audio is in hand ...'))
+      .property('ttsMinRtf', s('number').default(1.15).meta('description', '... and it has been arriving at this multiple of real time or better; otherwise the sentence is played whole when complete'))
       .property('fillerMs', s('number').default(700).meta('description', 'play the filler when no answer audio has arrived this long after the transcript'))
       .property('fillGapMs', s('number').default(4000).meta('description', 'a responder\'s filler (`fill`) is skipped when the last filler was more recent than this'))
       .property('wakeLongS', s('number').default(2.5).meta('description', 'a wake capture at least this long with three words or more is taken as the question itself; shorter, it was only the call'))
@@ -84,7 +86,7 @@ export class Voice extends EventEmitter {
       .property('actions', s('Actions').meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  enabled; systemPrompt; partialMs; sentenceGapMs; streamTts; fillerMs; fillGapMs; wakeLongS; endpointPartials; phrases; phraseDir; actionWaitMs; maxSeconds; captureDelayMs; wake; wakeCutoff; wakeWindow; debugPort; llm; deviceLink; ui; sounds; actions; logger;
+  enabled; systemPrompt; partialMs; sentenceGapMs; streamTts; ttsPrebufferMs; ttsMinRtf; fillerMs; fillGapMs; wakeLongS; endpointPartials; phrases; phraseDir; actionWaitMs; maxSeconds; captureDelayMs; wake; wakeCutoff; wakeWindow; debugPort; llm; deviceLink; ui; sounds; actions; logger;
 
   /** @type {'idle'|'listening'|'thinking'|'speaking'} */ state = 'idle';
   turn = 0;           // the current (or last) turn id; events from older turns are ignored
@@ -92,7 +94,7 @@ export class Voice extends EventEmitter {
   answer = '';
   audioFrames = 0;    // answer audio frames received this turn
   /** The session factory (tests inject a fake). @type {(llm: object) => VoiceSession} */
-  createSession = (llm) => new VoiceSession(llm, { partialMs: this.partialMs, systemPrompt: this.systemPrompt, sentenceGapMs: this.sentenceGapMs, streamTts: this.streamTts, logger: this.logger });
+  createSession = (llm) => new VoiceSession(llm, { partialMs: this.partialMs, systemPrompt: this.systemPrompt, sentenceGapMs: this.sentenceGapMs, streamTts: this.streamTts, prebufferMs: this.ttsPrebufferMs, minRtf: this.ttsMinRtf, logger: this.logger });
   now = () => Date.now();
   /** @type {VoiceSession|null} */ #session = null;
   #fillerTimer = null;
