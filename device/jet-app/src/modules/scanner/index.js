@@ -100,6 +100,13 @@ export function parseScan(text) {
   return { scene: str(scene, 200), items };
 }
 
+/** Mean brightness of an RGBA frame, 0..255, from a sparse sample (every 16th pixel of every 16th row). */
+export function brightness({ width, height, data }) {
+  let sum = 0, n = 0;
+  for (let y = 0; y < height; y += 16) for (let x = 0, i = y * width * 4; x < width; x += 16, i += 64, n++) sum += (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
+  return n ? sum / n : 0;
+}
+
 /** The line format the prompt asks for: `SCENE: ...` and `name | kind | x1,y1,x2,y2 | note` rows (a note may hold a `|`). */
 function parseLines(text) {
   let scene = '';
@@ -129,6 +136,8 @@ export class Scanner extends EventEmitter {
       .property('minGapMs', s('number').default(3000).meta('description', 'while scanning: never start a scan sooner than this after the last finished'))
       .property('maxScanS', s('number').default(180).meta('description', 'scanning switches itself off after this long'))
       .property('jpegQuality', s('number').default(70).meta('description', 'quality of the frame sent to the model'))
+      .property('minLuma', s('number').default(14).meta('description', 'a frame whose mean brightness (0..255) is under this is not scanned'))
+      .property('darkRetryMs', s('number').default(500).meta('advanced').meta('description', 'a dark frame of our own capture is retaken once after this long'))
       .property('camera', s('Camera').meta('internal', true))
       .property('world', s('World').meta('internal', true))
       .property('llm', s('Llm').meta('internal', true))
@@ -137,7 +146,7 @@ export class Scanner extends EventEmitter {
       .property('logger', s('Logger').lax().meta('internal', true)),
     register: [Camera, World, { ModuleClass: LookTool, relative: true }],
   };
-  model; prompt; maxItems; maxTokens; intervalS; minGapMs; maxScanS; jpegQuality; camera; world; llm; sensors; gps; logger;
+  model; prompt; maxItems; maxTokens; intervalS; minGapMs; maxScanS; jpegQuality; minLuma; darkRetryMs; camera; world; llm; sensors; gps; logger;
 
   /** scanning is switched on (a scan may or may not be running right now) */ active = false;
   /** scans that filed a frame / that did not, since start */ scans = 0; failures = 0;
@@ -209,7 +218,17 @@ export class Scanner extends EventEmitter {
   }
 
   async #scan(image) {
+    const own = !image;
     image ??= await this.camera.capture();
+    // The first frames of a camera stream are black (auto-exposure has not found its level; jetd
+    // has been seen to hand one out). A black frame costs a model call, comes back as "the image
+    // is completely black", and its crops replace good thumbnails with dark ones: not worth
+    // sending. Our own capture gets one more try; a frame handed to us is the caller's choice.
+    if (own && brightness(image) < this.minLuma) {
+      await new Promise((r) => setTimeout(r, this.darkRetryMs));
+      image = await this.camera.capture();
+    }
+    if (brightness(image) < this.minLuma) throw new Error('the frame is too dark to scan');
     const fix = this.gps?.goodFix?.();   // where we are as the frame is taken, not ~4 s later
     const jpeg = this.camera.jpeg(image, { quality: this.jpegQuality });
     const known = this.world.entities();

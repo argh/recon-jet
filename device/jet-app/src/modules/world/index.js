@@ -259,6 +259,21 @@ export class World extends EventEmitter {
   }
 
   /**
+   * Whether two entities are known to be different things (a check compared them and said so),
+   * and with `set` the recording of it: a pair is asked about once.
+   * @returns {boolean}
+   */
+  distinct(a, b, set = false) {
+    const ea = this.#entities.get(a), eb = this.#entities.get(b);
+    if (!ea || !eb || a === b) return false;
+    if (set && !ea.distinct?.includes(b)) {
+      ea.distinct = [...(ea.distinct ?? []), b].slice(-24); eb.distinct = [...(eb.distinct ?? []), a].slice(-24);
+      this.#changed();
+    }
+    return Boolean(ea.distinct?.includes(b));
+  }
+
+  /**
    * Two entities turned out to be one thing: `from`'s observations join `into` (which keeps its
    * name and id; the other name is remembered as an alias), and `from` is gone.
    * @returns {object|null} the merged entity
@@ -271,6 +286,7 @@ export class World extends EventEmitter {
     into.seen += from.seen; into.firstSeen = Math.min(into.firstSeen, from.firstSeen); into.lastSeen = Math.max(into.lastSeen, from.lastSeen);
     into.pinned ||= from.pinned;
     if (from.where && !into.where) into.where = from.where;
+    if (from.distinct || into.distinct) into.distinct = [...new Set([...(into.distinct ?? []), ...(from.distinct ?? [])])].filter((id) => id !== intoId && id !== fromId).slice(-24);
     if (normaliseName(from.name) !== normaliseName(into.name)) into.aliases = [...new Set([...(into.aliases ?? []), from.name, ...(from.aliases ?? [])])].slice(-6);
     from.obs = [];   // its crops live on under `into`
     this.#drop(fromId);
@@ -398,8 +414,8 @@ export class World extends EventEmitter {
   /** The thumbnail again, from the newest crop the entity still has (after a merge or a split). */
   #rethumb(e) {
     const o = e.obs?.findLast((x) => x.area), jpg = o && this.crop(o.id);
+    if (!jpg) return;   // no crop left to make one from: the thumbnail it has stays (a picture that vanishes from a list reads as a fault)
     this.#thumbs.delete(e.id);
-    if (!jpg) { if (this.dir) this.#dead.add(e.id); return; }
     try {
       const d = jpegJs.decode(jpg, { useTArray: true, formatAsRGBA: true });
       const thumb = crop({ width: d.width, height: d.height, data: d.data }, { x: 0, y: 0, w: d.width, h: d.height }, { maxW: this.thumbW, maxH: this.thumbH });

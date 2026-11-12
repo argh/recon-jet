@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import jpegJs from 'jpeg-js';
 import { ModuleManager, Schema } from '@versionzero/module-manager';
-import { Scanner, parseScan } from '../src/modules/scanner/index.js';
+import { Scanner, parseScan, brightness } from '../src/modules/scanner/index.js';
 import { LookTool } from '../src/modules/scanner/look-tool.js';
 import { Camera } from '../src/modules/camera/index.js';
 import { World } from '../src/modules/world/index.js';
@@ -314,4 +314,21 @@ test('parseScan: the line format the prompt asks for (scene, rows, a header echo
     { name: 'solder spool', kind: 'spool', box: [625, 131, 745, 277], note: 'silver wire | white label' },
     { name: 'resistor', kind: 'component', box: null, note: 'colour bands' },
   ]);
+});
+
+test('scanner: a black frame is not scanned - our own capture is retaken once, a frame handed in is refused', async () => {
+  const dark = { width: 64, height: 48, data: new Uint8Array(64 * 48 * 4), t: 1 };
+  const lit = { width: 64, height: 48, data: new Uint8Array(64 * 48 * 4).fill(140), t: 2 };
+  assert.ok(brightness(dark) < 1); assert.ok(Math.abs(brightness(lit) - 140) < 2);
+  const frames = [dark, lit];
+  const llm = { calls: 0, async chat() { this.calls++; return { content: 'SCENE: a desk\nred mug | mug | 100,100,300,300 | on the desk', usage: {} }; } };
+  const observed = [];
+  const sc = Object.assign(new Scanner(), { model: 'm', prompt: 'Scan {maxItems}.', maxItems: 6, maxTokens: 400, intervalS: 10, minGapMs: 0, maxScanS: 180, jpegQuality: 70, minLuma: 14, darkRetryMs: 1,
+    camera: { captures: 0, async capture() { this.captures++; return frames.shift() ?? dark; }, jpeg: () => Buffer.from('J') }, llm, logger: null,
+    world: { entities: () => [], observe(f) { observed.push(f.image); return [{ id: 'e1' }]; } } });
+  assert.equal((await sc.scanOnce()).length, 1);
+  assert.equal(sc.camera.captures, 2); assert.equal(observed[0], lit, 'the second, lit frame was the one scanned');
+  assert.deepEqual(await sc.scanOnce(), [], 'dark twice: no scan');
+  assert.equal(sc.failures, 1); assert.match(sc.lastError, /too dark/); assert.equal(llm.calls, 1, 'and no model call spent on it');
+  assert.deepEqual(await sc.scanOnce({ image: dark }), []); assert.equal(llm.calls, 1);
 });

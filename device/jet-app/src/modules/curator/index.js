@@ -19,8 +19,17 @@
 // joined something NOT in the recent frames (you looked away and back - or the name was reused
 // for something else) is where the string match is most often wrong. Those two go first.
 //
-// One request at a time, at most `perMinute`: the model has four slots and a conversation must
-// never wait behind housekeeping.
+// What the first day on the device added (2026-11-11, 135 checks):
+// - Two established entities that are one thing ("Nikon DSLR camera", "Nikon D800 camera") were
+//   never compared: each observation was confirmed against its own entity and the check ended.
+//   So after "same as its own" the likely others are asked too, once per pair: a "different" is
+//   remembered on both entities (`world.distinct`), a "same" merges the two.
+// - 22 of the 135 were splits, mostly leaving two entities of one name: one "different" against
+//   one crop is the model disliking a change of angle as often as a different object. A split
+//   now needs "different" against two crops of the entity; with only one to compare, it is left.
+//
+// One request at a time, at most `perMinute`, and none while a voice turn is running: the
+// speech and the answer share the server with this, and housekeeping waits.
 import { EventEmitter } from 'node:events';
 import jpegJs from 'jpeg-js';
 import { Schema } from '@versionzero/module-manager';
@@ -59,9 +68,10 @@ export class Curator extends EventEmitter {
       .property('minArea', s('number').default(4800).meta('description', 'crops smaller than this many pixels are not evidence (80x60): such an observation is left as filed'))
       .property('world', s('World').meta('internal', true))
       .property('llm', s('Llm').meta('internal', true))
+      .property('voice', s('Voice').lax().meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  enabled; apply; model; perMinute; maxCandidates; pairHeight; recentS; minArea; world; llm; logger;
+  enabled; apply; model; perMinute; maxCandidates; pairHeight; recentS; minArea; world; llm; voice; logger;
 
   now = () => Date.now();
   /** counters, for a status readout and the tests */ stats = { checked: 0, questions: 0, same: 0, merged: 0, split: 0, moved: 0, unsure: 0, failed: 0 };
@@ -69,9 +79,14 @@ export class Curator extends EventEmitter {
   #running = false; #timer = null; #lastAt = -Infinity;
   #abort = new AbortController();
   #onObserved = (f) => this.#observed(f);
+  #onVoice = () => this.#pump();
 
-  async start() { if (this.enabled) this.world.on('observed', this.#onObserved); }
-  async stop() { this.world.off('observed', this.#onObserved); clearTimeout(this.#timer); this.#abort.abort(); }
+  async start() {
+    if (!this.enabled) return;
+    this.world.on('observed', this.#onObserved);
+    this.voice?.on?.('state', this.#onVoice);   // back to idle: carry on
+  }
+  async stop() { this.world.off('observed', this.#onObserved); this.voice?.off?.('state', this.#onVoice); clearTimeout(this.#timer); this.#abort.abort(); }
 
   /** Observations waiting for their check. */
   get pending() { return this.#queue.length; }
@@ -93,12 +108,14 @@ export class Curator extends EventEmitter {
 
   #pump() {
     if (this.#running || this.#timer || !this.#queue.length || this.#abort.signal.aborted) return;
+    if (this.voice && this.voice.state !== 'idle') return;   // a conversation is on: `state` brings us back
     const wait = Math.max(0, this.#lastAt + 60000 / this.perMinute - this.now());
     this.#timer = setTimeout(() => { this.#timer = null; this.#next(); }, wait);
     this.#timer.unref?.();
   }
 
   async #next() {
+    if (this.voice && this.voice.state !== 'idle') return;
     const job = this.#queue.shift();
     if (!job) return;
     this.#running = true; this.#lastAt = this.now();
@@ -108,25 +125,22 @@ export class Curator extends EventEmitter {
   }
 
   // ---- one check --------------------------------------------------------------------------------
-  /** The entities this observation could be: its own (if it has other evidence) first, then the likeliest others. */
+  /** What an observation is compared with: up to two crops of its own entity, and the likeliest other entities. */
   #candidates(entity, obs, frame) {
     const mine = new Set(words(obs.name));
     const near = new Set(this.world.sightings().filter((x) => x.entityIds.some((id) => frame.includes(id))).flatMap((x) => x.entityIds));
-    const evidence = (e) => e.obs.filter((o) => o.id !== obs.id && (o.area ?? 0) >= this.minArea).sort((a, b) => b.area - a.area)[0];
-    const out = [];
-    const own = evidence(entity);
-    if (own) out.push({ entity, crop: own });
+    const evidence = (e) => e.obs.filter((o) => o.id !== obs.id && (o.area ?? 0) >= this.minArea).sort((a, b) => b.area - a.area);
     const scored = [];
     for (const e of this.world.entities()) {
       // not itself, and nothing else seen in the same frame: one frame does not show a thing twice
       if (e.id === entity.id || frame.includes(e.id)) continue;
-      const crop = evidence(e);
+      const crop = evidence(e)[0];
       if (!crop) continue;
       const score = (e.kind && e.kind === obs.kind ? 2 : 0) + 2 * words([e.name, ...(e.aliases ?? [])].join(' ')).filter((w) => mine.has(w)).length + (near.has(e.id) ? 1 : 0);
       if (score >= 2) scored.push({ score, entity: e, crop });
     }
     scored.sort((a, b) => b.score - a.score || b.entity.lastSeen - a.entity.lastSeen);
-    return [...out, ...scored.slice(0, this.maxCandidates - out.length)];
+    return { own: evidence(entity).slice(0, 2), others: scored.slice(0, this.maxCandidates) };
   }
 
   async #check({ obs: id, frame }) {
@@ -135,27 +149,50 @@ export class Curator extends EventEmitter {
     const { entity, obs } = found, x = (obs.area ?? 0) >= this.minArea ? this.world.crop(id) : null;
     frame = frame.map((o) => this.world.observation(o)?.entity.id).filter(Boolean);   // the entities that frame showed, as they stand now
     if (!x) return this.world.mark(id, 'no evidence');
-    const candidates = this.#candidates(entity, obs, frame).map((c) => ({ ...c, jpeg: this.world.crop(c.crop.id) })).filter((c) => c.jpeg);
-    if (!candidates.length) return this.world.mark(id, 'nothing to compare');
+    const { own, others } = this.#candidates(entity, obs, frame);
+    if (!own.length && !others.length) return this.world.mark(id, 'nothing to compare');
     const left = decode(x), t0 = this.now(), asked = [];
-    const ownOffered = candidates[0].entity.id === entity.id;
-    let picked = null, why = '', unsure = false;
-    for (const c of candidates) {
-      const { verdict, why: reason } = await this.#same(left, decode(c.jpeg));
-      asked.push(`${c.entity.id} ${c.entity.name}: ${verdict}`);
-      if (verdict === 'same') { picked = c.entity; why = reason; break; }
-      // not sure about the entity it is filed under: leave it there, and do not shop it around
-      if (verdict === 'unsure') { unsure = true; if (c.entity.id === entity.id) break; } else why ||= reason;
+    const ask = async (label, cropId) => {
+      const jpeg = this.world.crop(cropId);
+      if (!jpeg) return { verdict: 'unsure', why: '' };
+      const r = await this.#same(left, decode(jpeg));
+      asked.push(`${label}: ${r.verdict}`);
+      return r;
+    };
+    let why = '';
+    // 1. is it what it was filed under? 'none': it is all its entity has. 'doubt': different
+    //    from the one crop there is to compare with - not enough to split on.
+    let mine = 'none';
+    if (own.length) {
+      const first = await ask(`${entity.id} ${entity.name}`, own[0].id);
+      mine = first.verdict; why = first.why;
+      if (mine === 'different') {
+        if (!own[1]) mine = 'doubt';
+        else { const second = await ask(`${entity.id} ${entity.name} (2)`, own[1].id); mine = second.verdict; if (second.verdict !== 'different') why = second.why; }
+      }
+    }
+    // 2. is it (also) something else we know? A pair already found different is not asked again.
+    let picked = null;
+    if (mine !== 'unsure') {
+      for (const c of others) {
+        if (mine === 'same' && this.world.distinct(entity.id, c.entity.id)) continue;
+        const r = await ask(`${c.entity.id} ${c.entity.name}`, c.crop.id);
+        if (r.verdict === 'same') { picked = c.entity; why = r.why; break; }
+        if (r.verdict === 'different' && (mine === 'same' || mine === 'none') && this.apply) this.world.distinct(entity.id, c.entity.id, true);
+      }
     }
     // what the answers mean for the world
-    const action = picked ? (picked.id === entity.id ? 'same' : entity.obs.length > 1 ? 'moved' : 'merged')
-      : unsure ? 'unsure' : ownOffered ? 'split' : 'same';   // nothing known is the same: filed right as its own thing
+    const whole = mine === 'same' || mine === 'none' || entity.obs.length < 2;   // the verdict is about the whole entity, not this one observation
+    const action = picked ? (whole ? 'merged' : 'moved') : mine === 'different' ? 'split' : mine === 'unsure' || mine === 'doubt' ? 'unsure' : 'same';
     this.stats.checked++; this.stats[action]++;
     this.logger?.info({ obs: id, as: `${entity.id} ${obs.name}`, asked, action, why, applied: this.apply, ms: Math.round(this.now() - t0) }, 'curator: check');
     this.world.mark(id, why ? `${action}: ${why}` : action);
     if (!this.apply) return;
-    if (action === 'merged') this.world.merge(entity.id, picked.id);
-    else if (action === 'moved') { const n = this.world.split(id); if (n) this.world.merge(n.id, picked.id); }
+    if (action === 'merged') {
+      // two entities are one: the one seen less joins the one seen more (its name is the better established)
+      const [from, into] = mine === 'same' && entity.seen >= picked.seen ? [picked.id, entity.id] : [entity.id, picked.id];
+      this.world.merge(from, into);
+    } else if (action === 'moved') { const n = this.world.split(id); if (n) this.world.merge(n.id, picked.id); }
     else if (action === 'split') this.world.split(id);
   }
 

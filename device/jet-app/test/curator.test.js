@@ -51,25 +51,64 @@ test('curator: a new entity that is a known thing under another name is merged i
   assert.deepEqual(curator.stats, { checked: 1, questions: 1, same: 0, merged: 1, split: 0, moved: 0, unsure: 0, failed: 0 });
 });
 
-test('curator: a name reused for something else is split off; a look back at the same thing is confirmed', async (t) => {
-  const { world, llm, curator, clock } = make({ answers: ['DIFFERENT - left is a mug, right a magazine', 'DIFFERENT - a mug', 'SAME - same cover'] });
+test('curator: a split needs "different" against two crops of the entity; against the only one it is left alone', async (t) => {
+  const { world, llm, curator, clock } = make({ answers: ['DIFFERENT - left is a mug, right a magazine', 'DIFFERENT - a mug, not a magazine', 'DIFFERENT - a mug'] });
   await curator.start(); t.after(() => curator.stop());
   world.observe({ image: frame(), items: [item('Make magazine', 'magazine', 'cover with tools')] });
   await curator.idle();
   clock.t += 5 * 60_000;
   world.observe({ image: frame(), items: [item('Make magazine', 'magazine', 'white mug with a logo')] });   // the string match files the mug under the magazine
-  assert.equal(world.entities().length, 1);
   await curator.idle();
-  assert.equal(llm.calls.length, 1, 'compared with the entity it was filed under');
-  assert.deepEqual(world.entities().map((e) => [e.id, e.name, e.obs.map((o) => o.id)]), [['e2', 'Make magazine', ['o2']], ['e1', 'Make magazine', ['o1']]], 'two things now');
-  assert.deepEqual(world.get('e1').claims.map((c) => c.text), ['cover with tools'], 'the claim went with its observation');
+  assert.equal(llm.calls.length, 1); assert.equal(world.entities().length, 1, 'one crop to compare with: a change of angle looks the same to the model, so no split');
+  assert.equal(world.observation('o2').obs.checked, 'unsure: left is a mug, right a magazine'); assert.equal(curator.stats.unsure, 1);
+  clock.t += 1000;
+  world.observe({ image: frame(), items: [item('Make magazine', 'magazine', 'the mug again')] });
+  await curator.idle();
+  assert.equal(llm.calls.length, 3, 'two crops of the entity now: both asked');
+  assert.deepEqual(world.entities().map((e) => [e.id, e.obs.map((o) => o.id)]), [['e2', ['o3']], ['e1', ['o1', 'o2']]], 'different from both: it is something else');
+  assert.equal(curator.stats.split, 1);
+});
+
+test('curator: two established entities that are one thing are found and merged; a pair found different is asked about once', async (t) => {
+  const { world, llm, curator, clock } = make({ answers: ['SAME - same camera', 'SAME - same body and lens', 'DIFFERENT - a lamp and a camera', 'SAME - same lamp'] });
+  // two names for one camera, each with a history, never in one frame
+  world.observe({ image: frame(), items: [item('Nikon D800 camera', 'instrument', 'black body')] }); clock.t += 1000;
+  world.observe({ image: frame(), items: [item('Nikon D800 camera', 'instrument', 'strap lug')] }); clock.t += 5 * 60_000;
+  world.observe({ image: frame(), items: [item('Nikon DSLR camera', 'instrument', 'macro lens')] }); clock.t += 1000;
+  world.observe({ image: frame(), items: [item('Nikon DSLR camera', 'instrument', 'lens barrel')] }); clock.t += 1000;
+  world.observe({ image: frame(), items: [item('Nikon DSLR camera', 'instrument', 'rear dial')] }); clock.t += 1000;
+  await curator.start(); t.after(() => curator.stop());
+  world.observe({ image: frame(), items: [item('Nikon DSLR camera', 'instrument', 'top plate')] });
+  await curator.idle();
+  assert.equal(llm.calls.length, 2, 'its own entity, then the other Nikon');
+  assert.deepEqual(world.entities().map((e) => [e.id, e.name, e.seen, e.aliases]), [['e2', 'Nikon DSLR camera', 6, ['Nikon D800 camera']]], 'the one seen less joined the one seen more');
+  assert.equal(curator.stats.merged, 1);
+  // a different thing of the same kind: asked once, remembered on both
   clock.t += 5 * 60_000;
-  world.observe({ image: frame(), items: [item('Make magazine', 'magazine', 'the cover again')] });   // joins the latest of that name: the mug
+  world.observe({ image: frame(), items: [item('desk lamp', 'instrument', 'a')] });
   await curator.idle();
-  assert.equal(llm.calls.length, 3, 'its own entity (the mug) first, then the other of that name');
-  assert.equal(world.observation('o3').entity.id, 'e1', 'moved to the magazine'); assert.equal(world.observation('o3').obs.checked, 'moved: same cover');
-  assert.deepEqual(world.get('e2').obs.map((o) => o.id), ['o2']);
-  assert.equal(curator.stats.split, 1); assert.equal(curator.stats.moved, 1);
+  assert.equal(llm.calls.length, 3, 'new: compared with the camera');
+  assert.equal(world.distinct('e3', 'e2'), true); assert.equal(world.distinct('e2', 'e3'), true);
+  clock.t += 1000;
+  world.observe({ image: frame(), items: [item('desk lamp', 'instrument', 'b')] });
+  await curator.idle();
+  assert.equal(llm.calls.length, 4, 'only its own entity this time: the pair is known');
+  assert.equal(world.entities().length, 2);
+});
+
+test('curator: checks wait while a voice turn is running', async (t) => {
+  const { world, llm, curator, clock } = make({ answers: ['SAME - x'] });
+  const { EventEmitter } = await import('node:events');
+  const voice = Object.assign(new EventEmitter(), { state: 'speaking' });
+  curator.voice = voice;
+  await curator.start(); t.after(() => curator.stop());
+  world.observe({ image: frame(), items: [item('Weller station', 'instrument', 'a')] }); clock.t += 5 * 60_000;
+  world.observe({ image: frame(), items: [item('grey station', 'instrument', 'b')] });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(llm.calls.length, 0); assert.equal(curator.pending, 2, 'held');
+  voice.state = 'idle'; voice.emit('state', { to: 'idle' });
+  await curator.idle();
+  assert.ok(llm.calls.length >= 1, 'released'); assert.equal(world.entities().length, 1);
 });
 
 test('curator: an observation filed under the wrong entity moves to the one the model picks', async (t) => {
@@ -88,18 +127,19 @@ test('curator: an observation filed under the wrong entity moves to the one the 
 });
 
 test('curator: the doubtful go first - a look back, then a new entity, then what joined the current set; the same frame is never a candidate', async (t) => {
-  const { world, llm, curator, clock } = make({ answers: Array(6).fill('DIFFERENT - not it') });
+  const { world, llm, curator, clock } = make({ answers: Array(8).fill('UNSURE - cannot tell') });
   world.observe({ image: frame(), items: [item('desk lamp', 'lamp', 'a'), item('floor lamp', 'lamp', 'b')] }); clock.t += 5 * 60_000;
   world.observe({ image: frame(), items: [item('steel ruler', 'tool', 'c')] }); clock.t += 1000;
   await curator.start(); t.after(() => curator.stop());
+  const order = []; curator.on('checked', (obs) => order.push(obs));
   // one frame: the ruler again (current set), a new lamp, and the desk lamp after five minutes away
   world.observe({ image: frame(), items: [item('steel ruler', 'tool', 'd'), item('reading lamp', 'lamp', 'e'), item('desk lamp', 'lamp', 'f')] });
   await curator.idle();
-  // order: o6 (the desk lamp, looked back: its own entity, then the floor lamp - split off), o5 (new: the floor lamp
-  // and the old desk-lamp entity, which o6 turned out not to be; never the things still in its own frame),
-  // o4 (the ruler, current set: its own entity)
-  assert.deepEqual([world.observation('o6'), world.observation('o5'), world.observation('o4')].map((x) => x.obs.checked), ['split: not it', 'same: not it', 'split: not it']);
-  assert.equal(curator.stats.questions, 5);
+  assert.deepEqual(order, ['o6', 'o5', 'o4'], 'the look back, the new one, the current set');
+  // o6: its own entity is unsure -> left there, not shopped around (1). o5: new, only the floor lamp is a candidate -
+  // the desk lamp is in its own frame (1). o4: its own entity (1).
+  assert.equal(llm.calls.length, 3); assert.equal(curator.stats.questions, 3);
+  assert.equal(world.entities().length, 4, 'unsure changes nothing');
 });
 
 test('curator: small crops are not evidence; apply off only logs; a failing model is counted and the queue goes on', async (t) => {
