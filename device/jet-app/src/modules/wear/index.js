@@ -93,7 +93,7 @@ export class Wear extends EventEmitter {
     this.lit = false;
     this.logger?.info({ backlight: this.#level, led: this.#ledLevel }, 'display dark: not worn');
     this.#write(this.backlightSysfs, 0);
-    this.surface.pauseViewfinder();
+    this.surface.pauseViewfinder('wear');
     if (this.led) { this.#write(path.join(this.led, 'trigger'), 'timer'); this.#write(path.join(this.led, 'delay_on'), LED_ON_MS); this.#write(path.join(this.led, 'delay_off'), LED_PERIOD_MS - LED_ON_MS); }
     this.sounds.play('removed');
     this.emit('change', false);
@@ -105,7 +105,7 @@ export class Wear extends EventEmitter {
     this.logger?.info({ backlight: level, why }, 'display lit');
     this.#write(this.backlightSysfs, level > 0 ? level : FALLBACK_LEVEL);
     if (this.led) { this.#write(path.join(this.led, 'trigger'), 'none'); if (this.#ledLevel != null) this.#write(path.join(this.led, 'brightness'), this.#ledLevel); }
-    this.surface.resumeViewfinder();
+    this.surface.resumeViewfinder('wear');
     this.emit('change', true);
     return this.#chain;
   }

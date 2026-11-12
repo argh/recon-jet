@@ -28,7 +28,7 @@ test('uyvy -> rgba: grey, pure colours, subsampling', () => {
 test('demo: front press takes a snapshot, encodes it and streams the answer; rear clears; stale looks are dropped', async () => {
   const link = fakeLink();
   const ui = { renders: 0, strips: [], requestRender() { this.renders++; }, setStrip(t) { this.strips.push(t); } };
-  const surface = { width: 428, height: 240, viewfinderRect: null, viewfinder(x, y, w, h) { this.viewfinderRect = { x, y, w, h }; return Promise.resolve({ w: 640, h: 480 }); }, stopViewfinder() { this.viewfinderRect = null; } };
+  const surface = { width: 428, height: 240, viewfinderRect: null, viewfinder(x, y, w, h) { this.viewfinderRect = { x, y, w, h }; return Promise.resolve({ w: 640, h: 480 }); }, stopViewfinder() { this.viewfinderRect = null; }, resumeViewfinder() {} };
   let resolveLook; const looks = [];
   const voice = { look(jpg, q, { onToken }) { looks.push({ jpg, q }); onToken('It '); onToken('is a wall.'); return new Promise((r) => { resolveLook = r; }); } };
   const demo = Object.assign(new DemoMode(), { question: 'what?', jpegQuality: 50, modes: { register() {} }, ui, surface, deviceLink: link, power: { smoothed: null }, sensors: { glance: null, view: null }, voice, sounds: fakeSounds() });
@@ -66,10 +66,11 @@ test('demo: the live camera is modal — it pauses under the mode menu, resumes 
   const ui = { requestRender() {}, setStrip() {} };
   const surface = Object.assign(new EventEmitter(), {
     width: 428, height: 240, viewfinderRect: null, paused: false,
-    viewfinder(x, y, w, h) { if (!this.paused) this.viewfinderRect = { x, y, w, h }; return Promise.resolve({ w: 640, h: 480 }); },
-    stopViewfinder() { this.viewfinderRect = null; },
-    pauseViewfinder() { this.paused = true; this.viewfinderRect = null; },
-    resumeViewfinder() { this.paused = false; this.viewfinderRect = { x: 262, y: 14, w: 160, h: 120 }; },
+    want: null, holds: [],
+    viewfinder(x, y, w, h) { this.want = { x, y, w, h }; if (!this.paused) this.viewfinderRect = this.want; return Promise.resolve({ w: 640, h: 480 }); },
+    stopViewfinder() { this.want = null; this.viewfinderRect = null; },
+    pauseViewfinder(who) { this.holds.push(who); this.paused = true; this.viewfinderRect = null; },
+    resumeViewfinder(who) { this.holds = this.holds.filter((h) => h !== who); this.paused = this.holds.length > 0; if (!this.paused) this.viewfinderRect = this.want; },
   });
   const demo = Object.assign(new DemoMode(), { modes, ui, surface, deviceLink: fakeLink(), power: { smoothed: null }, sensors: {}, voice: {}, sounds: fakeSounds() });
   await demo.start();                 // register() made demo the current mode
@@ -88,13 +89,16 @@ test('demo: the live camera is modal — it pauses under the mode menu, resumes 
   modes.current = { id: 'other' };    // ...then switchTo moves current away (same tick, before the deferred resume)
   demo.leave();
   await new Promise((r) => setTimeout(r, 0));
-  assert.equal(surface.paused, true, 'a pick does not resume the camera for a frame');
+  assert.equal(surface.viewfinderRect, null, 'a pick does not resume the camera for a frame');
+  assert.equal(surface.paused, false, 'and the menu\'s hold went with Describe: the next mode\'s camera is not parked');
+  surface.viewfinder(300, 16, 120, 90);
+  assert.deepEqual(surface.viewfinderRect, { x: 300, y: 16, w: 120, h: 90 });
 });
 
 test('demo: the "run analysis" command comes to this mode first, then describes', async () => {
   const link = fakeLink();
   const ui = { renders: 0, strips: [], requestRender() { this.renders++; }, setStrip(t) { this.strips.push(t); } };
-  const surface = { width: 428, height: 240, viewfinderRect: null, viewfinder(x, y, w, h) { this.viewfinderRect = { x, y, w, h }; return Promise.resolve({ w: 640, h: 480 }); }, stopViewfinder() { this.viewfinderRect = null; } };
+  const surface = { width: 428, height: 240, viewfinderRect: null, viewfinder(x, y, w, h) { this.viewfinderRect = { x, y, w, h }; return Promise.resolve({ w: 640, h: 480 }); }, stopViewfinder() { this.viewfinderRect = null; }, resumeViewfinder() {} };
   // spoken: the SAY line comes first and never reaches the glass; its TTS starts as soon as the line is complete
   // (while the details still stream) and the clip plays right after the "report" phrase
   const voice = { asked: [], phrases: [], synthed: [], played: [], warmed: 0, synthAt: null,

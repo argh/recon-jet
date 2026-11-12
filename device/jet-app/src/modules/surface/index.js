@@ -36,7 +36,9 @@ export class Surface extends EventEmitter {
   /** @type {Raster|null} */ raster = null;
   /** @type {{w:number, h:number, bpp:number, stride:number}|null} from jetd's `E` reply */ geometry = null;
   /** @type {import('./raster.js').Rect|null} jetd's camera rectangle while streaming */ viewfinderRect = null;
-  /** the camera stream is held off (display dark); what the mode asked for waits in #vf for `resumeViewfinder()` */ viewfinderPaused = false;
+  /** the camera stream is held off (someone holds it: `pauseViewfinder`); what the mode asked for waits in #vf */
+  get viewfinderPaused() { return this.#holds.size > 0; }
+  /** @type {Set<string>} who is holding the camera off: the dark display ('wear'), the mode menu ('menu') */ #holds = new Set();
   active = false;
   #fd = -1; #shown = null; #force = null; #lastFlush = 0; #timer = null; #vf = null;
 
@@ -180,12 +182,21 @@ export class Surface extends EventEmitter {
 
   stopViewfinder() { this.#vf = null; this.#halt('stopped'); }
 
-  /** Hold the camera off (the display is dark); the mode's request is kept for `resumeViewfinder()`. */
-  pauseViewfinder() { if (!this.viewfinderPaused) { this.viewfinderPaused = true; this.#halt('paused'); } }
+  /**
+   * Hold the camera off; the mode's request is kept for when the last hold is lifted. A hold
+   * belongs to whoever took it (`who`): the dark display and the mode menu both hold the camera
+   * off, and one letting go must not start it under the other - nor may a mode that leaves
+   * through the menu take its hold with it (Describe did, and the next mode's camera stayed
+   * parked for good).
+   */
+  pauseViewfinder(who = 'default') {
+    const was = this.viewfinderPaused;
+    this.#holds.add(who);
+    if (!was) this.#halt('paused');
+  }
 
-  resumeViewfinder() {
-    if (!this.viewfinderPaused) return;
-    this.viewfinderPaused = false;
+  resumeViewfinder(who = 'default') {
+    if (!this.#holds.delete(who) || this.viewfinderPaused) return;
     if (this.#vf) this.#stream().catch((error) => this.logger?.warn({ error: error.message }, 'viewfinder resume'));
   }
 

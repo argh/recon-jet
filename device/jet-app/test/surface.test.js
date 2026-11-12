@@ -194,5 +194,18 @@ test('surface: a paused viewfinder is stopped at jetd but remembered; resume res
   s.pauseViewfinder(); s.stopViewfinder(); s.resumeViewfinder(); await new Promise((r) => setImmediate(r));
   assert.deepEqual(sent, ['z'], 'stopped while paused: nothing to resume');
   assert.equal(s.viewfinderRect, null);
+  // holds have owners: the menu and the dark display both hold the camera off, and only the last to let go starts it
+  sent.length = 0;
+  s.pauseViewfinder('menu'); s.pauseViewfinder('wear');
+  await s.viewfinder(0, 0, 4, 4);
+  s.resumeViewfinder('menu'); await new Promise((r) => setImmediate(r));
+  assert.deepEqual(sent, [], 'the display is still dark'); assert.equal(s.viewfinderPaused, true);
+  s.resumeViewfinder('nobody'); assert.equal(s.viewfinderPaused, true, 'a hold is lifted only by who took it');
+  s.resumeViewfinder('wear'); await new Promise((r) => setImmediate(r));
+  assert.deepEqual(sent, ['Z 0 0 4 4 10']); assert.equal(s.viewfinderPaused, false);
+  // a mode that leaves through the menu lifts the menu's hold: the next mode's request is not parked
+  s.pauseViewfinder('menu'); s.stopViewfinder(); s.resumeViewfinder('menu');
+  sent.length = 0;
+  assert.ok(await s.viewfinder(4, 0, 4, 4), 'the next mode gets its camera'); assert.deepEqual(sent, ['Z 4 0 4 4 10']);
   await s.stop();
 });

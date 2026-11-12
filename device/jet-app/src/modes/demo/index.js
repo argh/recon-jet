@@ -66,8 +66,8 @@ export class DemoMode {
     // resume is deferred so a menu dismissed by *picking another mode* (leave() stops the camera)
     // does not briefly re-open it.
     this.modes.on?.('switcher', (open) => {
-      if (open) { if (this.modes.current === this) this.surface.pauseViewfinder(); return; }
-      queueMicrotask(() => { if (this.modes.current === this) this.surface.resumeViewfinder(); });
+      if (open) { if (this.modes.current === this) this.surface.pauseViewfinder('menu'); return; }
+      queueMicrotask(() => { if (this.modes.current === this) this.surface.resumeViewfinder('menu'); });
     });
     // a new view while Describe is up strongly predicts a describe is coming — pre-warm the vision
     // model (debounced in the llm module) so the look is warm, not a ~7 s cold load. Gated to this
@@ -86,7 +86,9 @@ export class DemoMode {
     this.#camera();
     this.voice.warmVision?.();   // entering Describe: pre-load vision so the first look is warm
   }
-  leave() { this.surface.stopViewfinder(); this.#look++; this.state = 'idle'; this.answer = ''; this.error = null; }
+  // left through the menu: the menu's hold on the camera was taken on our behalf and is ours to
+  // lift (nothing is asked for any more, so nothing starts) - or the next mode's camera stays parked
+  leave() { this.surface.stopViewfinder(); this.surface.resumeViewfinder('menu'); this.#look++; this.state = 'idle'; this.answer = ''; this.error = null; }
 
   /** The camera rectangle: right side, under the strip. */
   get cameraRect() { return { x: this.surface.width - CAMERA.w - MARGIN, y: TOP, ...CAMERA }; }
