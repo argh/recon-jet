@@ -13,19 +13,22 @@ function build({ wake = true } = {}) {
       if (this.gate) await this.gate;
       if (signal?.aborted) throw new Error('cancelled');
       onToken?.('Copy. '); onToken?.('It is a meter.');
+      this.emit('said', { text: 'Copy. It is a meter.' });
       return { text: 'Copy. It is a meter.', steps: 1, usage: {} };
     },
   });
   const voice = Object.assign(new EventEmitter(), { state: 'idle', played: [], claimed: null, turns: [], fills: [], warmed: 0, cancelled: 0,
-    playAudio(clip) { this.played.push(clip); },
+    playAudio(clip) { this.played.push(clip); }, routes: {}, debugRoute(method, path, handler) { this.routes[`${method} ${path}`] = handler; },
     claimWake(r) { this.claimed = r; return () => { this.claimed = null; }; },
     startTurn(o) { this.turns.push(o); return true; }, cancel() { this.cancelled++; return true; },
     fill(set) { this.fills.push(set); return true; }, warm() { this.warmed++; } });
-  const feed = { items: [], attached: [], clips: {},
-    post(item) { item = { id: `f${this.items.length + 1}`, ...item }; this.items.push(item); return item; },
+  const feed = Object.assign(new EventEmitter(), { items: [], attached: [], clips: {}, exported: [], cleared: 0,
+    post({ before, ...item }) { item = { id: `f${this.items.length + 1}`, ...item }; const at = this.items.findIndex((x) => x.id === before); if (at >= 0) this.items.splice(at, 0, item); else this.items.push(item); this.emit('post', item); return item; },
+    async export(n) { this.exported.push(n); return [{ id: 'f1', t: 1, kind: 'said', body: 'hi', wav: Buffer.from('RIFF'), jpeg: Buffer.from('JPG') }]; },
+    clear() { this.cleared++; return 3; },
     get(id) { return this.items.find((i) => i.id === id) ?? null; },
     attach(id, parts) { this.attached.push([id, parts]); const i = this.get(id); if (i) i.audio = { rate: parts.audio.rate }; return i; },
-    async audio(id) { return this.clips[id] ?? null; } };
+    async audio(id) { return this.clips[id] ?? null; } });
   const camera = { holds: 0, streaming: true, hold() { this.holds++; } };
   const world = { focused: null, focus() { return this.focused; } };
   const op = Object.assign(new Operator(), { wake, fillers: { look: 'look', web_search: 'search' }, fillEveryMs: 20, hold: 'streaming', photoW: 160, photoH: 120, agent, voice, feed, camera, world });
@@ -141,4 +144,29 @@ test('operator: replay plays an item\'s clip, not during a turn and not without 
   voice.state = 'idle'; assert.equal(op.replay('f1'), true);
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(voice.played, [feed.clips.f1]);
+});
+
+test('operator: the record is in the order things happened; spoken commands are on it; the dialog can be taken off the device', async () => {
+  const { op, agent, voice, feed } = build();
+  await op.start();
+  // a turn of several steps: a look, words, a card, more words
+  agent.ask = async function () {
+    this.emit('tool', { name: 'look', phase: 'start' });
+    this.emit('said', { text: 'That is a Weller station.' });
+    feed.post({ kind: 'card', title: 'Specs', body: '160 W' });
+    this.emit('said', { text: 'The specs are on your display.' });
+    return { text: 'That is a Weller station. The specs are on your display.', steps: 3, usage: {} };
+  };
+  await op.respond('what is this');
+  assert.deepEqual(feed.items.map((i) => `${i.kind}:${i.title ?? i.body}`), ['heard:what is this', 'said:That is a Weller station.', 'card:Specs', 'said:The specs are on your display.']);
+  assert.equal(agent.listenerCount('said'), 0, 'it only listens while its turn runs');
+  voice.emit('spoken', { turn: 1, responder: 'operator', rate: 16000, channels: 1, pcm: Buffer.alloc(320) });
+  assert.equal(feed.attached[0][0], 'f2', 'the turn\'s sound goes with the first thing said');
+  voice.emit('command', { turn: 3, text: 'run doom', action: 'doom', wake: true });
+  assert.deepEqual(feed.items.at(-1), { id: 'f5', kind: 'heard', body: 'run doom' });
+  const reply = await voice.routes['GET /dialog'](new URLSearchParams('n=4'));
+  assert.deepEqual(feed.exported, [4]);
+  assert.deepEqual(reply, { items: [{ id: 'f1', t: 1, kind: 'said', body: 'hi', wav: Buffer.from('RIFF').toString('base64'), jpeg: Buffer.from('JPG').toString('base64') }] });
+  await voice.routes['GET /dialog'](new URLSearchParams('')); assert.equal(feed.exported.at(-1), 10, 'ten by default');
+  assert.deepEqual(await voice.routes['POST /dialog/clear'](new URLSearchParams('')), { cleared: 3 });
 });

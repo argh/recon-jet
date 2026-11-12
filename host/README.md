@@ -6,6 +6,9 @@ device config; `docs/networking.md`). Nothing on a Mac is in that path. What liv
 **into** the device for development and debugging — as opposed to `tools/`, which is build,
 install and on-device helpers.
 
+(`dialog` is the one exception to what follows: the conversation belongs to jet-app, so that
+command asks jet-app's debug HTTP port, `voice.debugPort`, not jetd.)
+
 `jet.js` is a one-shot client of jetd's line protocol (TCP 7777, spec at the top of
 `agent/jetd.c`): connect, do one thing, exit. It opens no ports and is inert by default —
 attaching to a live device never disturbs jet-app; only `mode`/`backlight`/`console` (and `live`'s user-driven injections) send
@@ -23,6 +26,8 @@ node jet.js mode <remote|log|shell|setup>
 node jet.js backlight <0-1023>
 node jet.js raw P Q              # protocol lines verbatim (power-user escape hatch)
 node jet.js live                 # the glass in a browser: mirror + audio + controls (docs/live.md)
+node jet.js dialog [-n 10] [dir]  # the last N items of the conversation into dir: dialog.json, dialog.md, audio (WAV), pictures (JPEG)
+node jet.js dialog --clear       # empty the conversation on the device
 ```
 
 `JET_HOST` / `--host` pick the device (default `jet.local`; `. work/env.sh` sets it), `JET_PORT`

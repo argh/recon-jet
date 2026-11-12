@@ -175,3 +175,22 @@ test('feed: a clip is attached after the words, read back on demand, persisted, 
   await back.start();
   assert.equal((await back.audio('f2')).pcm.length, 3200); assert.equal(back.get('f3').image.width, 2);
 });
+
+test('feed: export hands the newest out as WAV and JPEG; clear empties it, files too', async () => {
+  const dir = path.join(tmpdir('jet-feed-'), 'feed');
+  const feed = Object.assign(new Feed(), { dir, maxItems: 50, saveMs: 5, jpegQuality: 75 });
+  await feed.start();
+  feed.post({ kind: 'heard', body: 'specs please', audio: { rate: 16000, channels: 1, pcm: Buffer.alloc(3200, 1) } });
+  feed.post({ kind: 'said', body: 'On your display.' });
+  feed.post({ kind: 'card', title: 'Specs', body: '418 ft', image: { width: 4, height: 3, data: new Uint8Array(48).fill(90) } });
+  assert.deepEqual(feed.items.map((x) => x.kind), ['heard', 'said', 'card'], 'in the order they were posted');
+  const out = await feed.export(2);
+  assert.deepEqual(out.map((x) => [x.kind, Boolean(x.wav), Boolean(x.jpeg)]), [['said', false, false], ['card', false, true]]);
+  const all = await feed.export(10);
+  assert.equal(all[0].wav.toString('latin1', 0, 4), 'RIFF'); assert.equal(all[0].wav.length, 44 + 3200); assert.equal(all[0].wav.readUInt32LE(24), 16000);
+  assert.equal(all[2].jpeg.readUInt16BE(0), 0xffd8); assert.equal(all[0].audio, undefined, 'the export carries files, not the in-memory fields');
+  const changes = []; feed.on('change', (x) => changes.push(x));
+  assert.equal(feed.clear(), 3); assert.deepEqual(feed.items, []); assert.deepEqual(changes, [null]);
+  await feed.flush();
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['feed.json']);
+});

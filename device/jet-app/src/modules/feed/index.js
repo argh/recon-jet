@@ -16,6 +16,7 @@ import path from 'node:path';
 import jpeg from 'jpeg-js';
 import { Schema } from '@versionzero/module-manager';
 import { ShowTool } from './show-tool.js';
+import { pcmToWav } from '../llm/wav.js';
 
 const s = Schema.create;
 const KINDS = ['heard', 'said', 'photo', 'card'];
@@ -96,7 +97,7 @@ export class Feed extends EventEmitter {
     if (text(entity)) item.entity = text(entity);
     if (image?.data && image.width > 0 && image.height > 0) item.image = image;
     Object.freeze(item);
-    this.#items.push(item);
+    this.#items.push(item);   // always at the end: the feed is a message thread, in the order things happened
     if (item.image) this.#job(() => this.#writeImage(item));
     while (this.#items.length > this.maxItems) {
       const old = this.#items.shift();
@@ -125,6 +126,33 @@ export class Feed extends EventEmitter {
     this.#saveSoon();
     this.emit('change', item);
     return item;
+  }
+
+  /** Forget everything (a clean slate before a recording); the files go too. Emits `change` with null. */
+  clear() {
+    const old = this.#items.splice(0);
+    this.#clips.clear();
+    for (const x of old) {
+      if (x.image) this.#job(() => fs.rm(this.#jpg(x.id), { force: true }));
+      if (x.audio) this.#job(() => fs.rm(this.#pcm(x.id), { force: true }));
+    }
+    this.#saveSoon();
+    this.emit('change', null);
+    return old.length;
+  }
+
+  /**
+   * The newest `n` items as files for taking off the device: each item's fields, its sound as
+   * a WAV and its picture as a JPEG (Buffers; absent where there is none).
+   * @returns {Promise<Array<{id: string, t: number, kind: string, title?: string, body?: string, entity?: string, wav?: Buffer, jpeg?: Buffer}>>}
+   */
+  async export(n = 10) {
+    const out = [];
+    for (const { image, audio, ...item } of this.#items.slice(-Math.max(1, n))) {
+      const clip = audio ? await this.audio(item.id) : null;
+      out.push({ ...item, ...(clip ? { wav: pcmToWav(clip.pcm, clip.rate, clip.channels) } : {}), ...(image ? { jpeg: Buffer.from(jpeg.encode(image, 85).data) } : {}) });
+    }
+    return out;
   }
 
   /** An item's clip, read from disk. @returns {Promise<{rate: number, channels: number, pcm: Buffer}|null>} */

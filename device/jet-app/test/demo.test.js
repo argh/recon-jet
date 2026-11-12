@@ -136,3 +136,17 @@ test('demo: the "run analysis" command comes to this mode first, then describes'
   await registered[0].run([], 'look');
   assert.deepEqual(modes.switched, ['demo'], 'already current: no switch');
 });
+
+test('demo: an analysis goes on the record - the picture, then what was said about it', async () => {
+  const link = fakeLink();
+  const feed = { items: [], post(item) { this.items.push(item); return item; } };
+  const voice = { look: async (jpg, q, { onToken }) => { onToken('SAY: Tidy desk.\nA meter and a spool.'); return 'SAY: Tidy desk.\nA meter and a spool.'; }, synth: async () => Buffer.alloc(4), playClip() {}, phrase() {}, warm() {} };
+  const demo = Object.assign(new DemoMode(), { question: 'what?', spokenQuestion: 'what? SAY:', jpegQuality: 50, modes: { register() {} }, ui: { requestRender() {}, setStrip() {} },
+    surface: { width: 428, height: 240, viewfinderRect: null, viewfinder() { return Promise.resolve({ w: 640, h: 480 }); }, stopViewfinder() {}, resumeViewfinder() {} },
+    deviceLink: link, power: { smoothed: null }, sensors: { glance: null, view: null }, voice, sounds: fakeSounds(), feed });
+  await demo.start(); demo.enter();
+  await demo.describe({ spoken: true });
+  assert.deepEqual(feed.items.map((i) => i.kind), ['photo', 'said']);
+  assert.deepEqual([feed.items[0].image.width, feed.items[0].image.height], [160, 120], 'the frame, small');
+  assert.equal(feed.items[1].body, 'Tidy desk. A meter and a spool.', 'the remark and the details');
+});

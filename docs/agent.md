@@ -77,9 +77,11 @@ agent.history                      // read-only view, for tests and debugging
   A throw becomes the tool result `error: <message>` (the model sees it and may retry). Results
   are capped (`toolResultChars`, 2500).
 - **ContextSource** (abstract type, `context` array-of-type): `{ id, context() → string | null }`.
-  The agent joins the non-null lines under a `[context]` header **after** the words of the newest
-  user message — time, mood, what is in view. (In front of them the model took the block for the
-  start of the conversation and opened its reply with a copy of it.) History keeps each block as
+  The agent joins the non-null lines into a parenthetical console note **after** the words of the
+  newest user message — time, mood, place, what is in view. (In front of them the model took the
+  block for the start of the conversation and opened its reply with a copy of it. And not a
+  bracketed `[context]` tag: the model imitated the tag and wrote `[look]` as text instead of
+  calling the tool - 3 tool calls in 8 with the tag, 8 in 8 with the parenthetical.) History keeps each block as
   it was (it was true then); it is never rewritten, so the prefix cache survives.
 - **System prompt** = `persona` (config) + a fixed harness paragraph (spoken replies, when to
   use `show`, never narrate tool use) + the notes. Changes only when a note is added.
@@ -279,6 +281,13 @@ operator.talk()   operator.cancel()   operator.replay(feedItemId) → boolean  /
   sees seconds later. Whether the question concerns the view at all stays the model's decision:
   the held frame is used only if it calls `look`. `look item e7` also serves "the mug I saw a
   minute ago" from any screen.
+- **The record is a message thread** (2026-11-12): each thing Jet says is filed as it is said
+  (the agent's `said` event, one per step), so a turn reads in the order it happened - you, the
+  photo, his words about it, the card, what he said after. The turn's audio goes with the first
+  `said`. Spoken commands (`voice` `command`) and Describe-mode analyses are filed too: every
+  conversation with Jet is in the feed, whichever mode it came from. `GET /dialog?n=` and
+  `POST /dialog/clear` on the debug port serve `feed.export` / `feed.clear`; `jet dialog [-n 10]
+  [dir]` on the host writes them out (WAV, JPEG, `dialog.json`, `dialog.md`).
 - **Fillers**: a tool starting gets its phrase (`look` → "Let me see.", `web_*` → "Looking it
   up."), and a `wait` phrase follows every `fillEveryMs` (6 s) while it runs. They go through
   `voice.fill`, which slips the clip into the answer's speech queue in order (after the sentence
@@ -303,7 +312,11 @@ operator.talk()   operator.cancel()   operator.replay(feedItemId) → boolean  /
 - **Endpointing by transcript**: a capture also ends when `endpointPartials` (2) partial
   transcripts in a row repeat the one before; the energy VAD ran a 2 s question to the 8 s limit
   in a noisy room.
-- `fill(set)`, `playAudio(clip)`, event `spoken {turn, responder, rate, channels, pcm}`.
+- **Follow-up window**: when an answer has finished playing the mic opens again by itself
+  (`followUp`, `followUpS` 6) for the same responder, no cue and no wake word; silence closes it
+  after `followUpQuietMs` (3 s) without a word or an error phrase.
+- `fill(set)`, `playAudio(clip)`, `debugRoute(method, path, handler)`, events `spoken {turn,
+  responder, rate, channels, pcm}` and `command {text, action}`.
 
 ### The modes: Assistant (`assistant`) and Scan (`scan`)
 

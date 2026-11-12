@@ -12,6 +12,7 @@ import { ModeCommand } from './mode.js';
 import { BacklightCommand } from './backlight.js';
 import { RawCommand } from './raw.js';
 import { LiveCommand } from './live.js';
+import { DialogCommand } from './dialog.js';
 
 const s = Schema.create;
 
@@ -34,6 +35,7 @@ export class JetApp {
       { ModuleClass: BacklightCommand, relative: true },
       { ModuleClass: RawCommand, relative: true },
       { ModuleClass: LiveCommand, relative: true },
+      { ModuleClass: DialogCommand, relative: true },
     ],
   };
   command;

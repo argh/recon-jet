@@ -56,6 +56,13 @@ export class Operator extends EventEmitter {
   async start() {
     this.agent.on('tool', (e) => this.#onTool(e));
     this.voice.on?.('spoken', (clip) => this.#onSpoken(clip));
+    // a spoken command is part of the conversation too, whichever mode it was said in
+    this.voice.on?.('command', ({ text }) => this.feed.post({ kind: 'heard', body: text }));
+    // the dialog, for taking off the device (`jet dialog`): text, and sound and pictures as base64
+    this.voice.debugRoute?.('GET', '/dialog', async (query) => ({
+      items: (await this.feed.export(Number(query.get('n')) || 10)).map(({ wav, jpeg, ...item }) => ({ ...item, ...(wav ? { wav: wav.toString('base64') } : {}), ...(jpeg ? { jpeg: jpeg.toString('base64') } : {}) })),
+    }));
+    this.voice.debugRoute?.('POST', '/dialog/clear', () => ({ cleared: this.feed.clear() }));
     if (this.wake) this.#release = this.voice.claimWake(this);
   }
   async stop() { this.#release?.(); clearInterval(this.#waitTimer); }
@@ -100,8 +107,14 @@ export class Operator extends EventEmitter {
       if (!this.world?.focus() && (this.hold === 'always' || (this.hold === 'streaming' && this.camera?.streaming))) this.camera.hold();
       this.voice.warm?.();   // the TTS may have been unloaded: start it loading while the model thinks
       const t0 = Date.now();
-      const { text: answer, steps } = await this.agent.ask(text, { onToken, signal });
-      if (answer) this.#saidId = this.feed.post({ kind: 'said', body: answer }).id;
+      // the record reads like a message thread: each thing Jet says is filed as it is said, so
+      // the photo he took, his words about it, the card he sent and what he said after are in
+      // the order they happened. The turn's sound goes with the first of them.
+      const onSaid = ({ text: words }) => { const id = this.feed.post({ kind: 'said', body: words }).id; this.#saidId ??= id; };
+      this.agent.on('said', onSaid);
+      let answer, steps;
+      try { ({ text: answer, steps } = await this.agent.ask(text, { onToken, signal })); }
+      finally { this.agent.off('said', onSaid); }
       this.logger?.info({ ms: Date.now() - t0, steps, wake, chars: answer.length }, 'operator: answered');
       return answer;
     })();

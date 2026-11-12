@@ -7,6 +7,7 @@ import jpeg from 'jpeg-js';
 import { Schema } from '@versionzero/module-manager';
 import { C, MARGIN, TOP, hint, row, paragraph } from '../../modules/ui/style.js';
 import { uyvyToRgba } from '../../lib/uyvy.js';
+import { crop } from '../../modules/camera/index.js';
 
 const s = Schema.create;
 const CAMERA = { w: 160, h: 120 };
@@ -45,9 +46,10 @@ export class DemoMode {
       .property('voice', s('Voice').meta('internal', true))
       .property('sounds', s('Sounds').meta('internal', true))
       .property('actions', s('Actions').meta('internal', true))
+      .property('feed', s('Feed').lax().meta('internal', true))
       .property('logger', s('Logger').lax().meta('internal', true)),
   };
-  question; spokenQuestion; jpegQuality; modes; ui; surface; deviceLink; power; sensors; voice; sounds; actions; logger;
+  question; spokenQuestion; jpegQuality; modes; ui; surface; deviceLink; power; sensors; voice; sounds; actions; feed; logger;
 
   id = 'demo'; label = 'Describe'; spoken = ['analysis'];
   /** @type {'idle'|'looking'|'answering'} */ state = 'idle';
@@ -123,6 +125,9 @@ export class DemoMode {
       const { data: jpg } = jpeg.encode(image, this.jpegQuality);
       this.logger?.info({ src: `${frame.w}x${frame.h}`, jpegBytes: jpg.length, ms: Date.now() - t0 }, 'demo: snapshot');
       if (id !== this.#look) return;
+      // an analysis is a conversation with Jet like any other: the picture and the answer go on
+      // the record (the feed), whichever mode asked
+      this.feed?.post({ kind: 'photo', image: crop(image, { x: 0, y: 0, w: image.width, h: image.height }, { maxW: 160, maxH: 120 }), body: spoken ? '' : 'describe' });
       this.state = 'answering';
       // spoken: the remark comes first, so its TTS runs while the details are still being written
       let full = '', remark = null;
@@ -137,6 +142,7 @@ export class DemoMode {
       if (id !== this.#look) return;
       const { details, say } = splitRemark(answer || full);
       this.answer = details || '(no answer)';
+      if (details || say) this.feed?.post({ kind: 'said', body: [say, details].filter(Boolean).join(' ') });
       this.logger?.info({ ms: Date.now() - t0, answer: this.answer, say: say || undefined }, 'demo: look');
       if (spoken) this.#remark(remark ?? (say ? this.#synth(say) : null));
     } catch (error) {
