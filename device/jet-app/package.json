@@ -10,7 +10,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "node src/main.js",
-    "test": "node --test test/*.test.js",
+    "test": "node --test --test-concurrency=2 test/*.test.js",
     "bundle": "sh deploy/bundle.sh",
     "deploy": "sh deploy/install.sh"
   },
