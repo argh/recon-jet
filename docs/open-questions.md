@@ -155,7 +155,45 @@ evicted - the "stays crashy" of earlier episodes - and a damaged *dirty* page wo
 to disk. After any incident: drop caches, and prefer a reboot (anonymous memory of long-lived
 processes may be hit too).
 
-Leading hypothesis for the mechanism (not proven): the sensor is powered fully off between streams, so
+**Mechanism proven 2026-11-11 (after a hard reboot), `tools/issprobe`: 20 of 20 stream starts
+overflow.** Six mapped 614400-byte buffers filled with 0xA5, only buffer 0 queued, one frame
+dequeued: every time the never-queued buffer 1 was completely overwritten with dark UYVY, the
+first frame carried the ERROR flag, and its line period was 2560 bytes (1280-wide). The physical
+view (`/dev/mem`, CMA at 0xbf000000) shows image data contiguous from buffer 0 for exactly
+1,843,200 bytes = 1280x720x2, the sensor's default mode: 1.2 MB past the buffer on every start,
+across the gap after it, the next buffer and into the gap after that. Steady-state frames are
+640-wide and clean; only the first frame of a stream is oversized. Cause in the code:
+`iss_pipeline_enable` arms the CSI-2 context before the sensor's `s_stream(1)`, whose
+`mt9m114_initialize()` streams 1280x720 before the 640x480 geometry is programmed; the context
+has no frame-size limit.
+
+**Fixed and flashed 2026-11-11** (overlay `omap4iss`): the CSI-2 context is enabled only after
+every subdev has started (`defer_ctx`, a module parameter, default on; off restores the old
+order for diagnosis); capture buffers are never smaller than 1280x960x2, so a wrong-mode frame
+stays inside its plane; and a `0xdeadbeef` sentinel in the slack (4 kB after the expected frame,
+4 kB at the plane's end) is checked at each buffer completion - a disturbed one is a ratelimited
+kernel warning and an ERROR-flagged buffer. Verified with `tools/issprobe` on the flashed boot:
+10 of 10 starts clean and 640-wide, sentinel silent; with `defer_ctx` off the warning fires and
+the overrun stays inside the plane. Cost: ~110 ms more per stream start (first frame at ~280 ms),
+7.2 MB of the 16 MB CMA while three buffers stream (five fit; nothing else allocates at stream
+time; a 1280x960 capture needs the same). Revert: `work/iss-fix/boot-emmc-stock.img` by `dd`, or
+the `camera-off` marker. What remains of this section below is the history of the diagnosis.
+
+Still open from it: 1008 MHz without the MPU voltage step; jetd's `play_close` deadlock; jetd's
+`vf_frame` serving frame 0 of a stream, which is black (auto-exposure: mean luma 10 at frame 0,
+99 at frame 1, settled by frames 6-9, ~0.6 s after STREAMON).
+
+**Exposure** (measured the same day): `/dev/video0` has no controls; the sensor subdevs do -
+`auto_exposure` (auto/manual) and AWB on the ifp subdev, `exposure` (1..1012 lines) and
+`analogue_gain` (1..511) on the pixel array, readable live while AE runs. On the desk AE sits
+at 984 lines and gain 248: near the maximum, averaging the whole frame to luma ~124, which is
+what blooms small bright detail on a dark surface. No kernel change is needed to take a metered
+manual shot: let AE settle, read the two values, switch to manual, write a reduced gain,
+capture, restore auto. AE target, gain caps and the metering window exist in the chip
+(`CAM_AET_TARGET_AVERAGE_LUMA`, `CAM_AET_AE_MAX_VIRT_AGAIN`, `CAM_STAT_AE_INITIAL_WINDOW_*`) but
+not in the mainline driver: each is a small patch to a built-in driver, i.e. a new zImage.
+
+The hypothesis as first written: the sensor is powered fully off between streams, so
 `mt9m114_initialize()` runs at every start and briefly streams at its power-on geometry
 (1280-wide) with the CSI-2 receiver already armed and no frame-size limit in the context
 (`iss_csi2.c`); a 1.8-2.5 MB frame lands in a 0.6 MB buffer. The ISS buffers come from a 16 MB

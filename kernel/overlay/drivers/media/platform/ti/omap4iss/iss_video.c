@@ -304,9 +304,80 @@ static int iss_video_queue_setup(struct vb2_queue *vq,
 	if (sizes[0] == 0)
 		return -EINVAL;
 
+	/*
+	 * Containment: the CSI2 receiver has no frame size limit, so a frame
+	 * longer than the format says (a lost frame end merges two frames, a
+	 * sensor in the wrong mode) runs past the buffer into memory that CMA
+	 * shares with user pages. Never allocate less than the largest frame
+	 * the sensor can send; the payload stays sizeimage.
+	 */
+	if (video->type == V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		sizes[0] = max_t(unsigned int, sizes[0], ISS_VIDEO_MIN_CAPTURE_BUF);
+
 	*count = min(*count, video->capture_mem / PAGE_ALIGN(sizes[0]));
 
 	return 0;
+}
+
+/*
+ * The two guard regions of a capture plane, as word-aligned byte offsets: the
+ * first ISS_VIDEO_GUARD_BYTES after the frame, and the last ones of the plane.
+ * Both are empty when the plane is no larger than the frame.
+ */
+static void iss_video_guard_ranges(struct vb2_buffer *vb, unsigned long r[4])
+{
+	unsigned long end = vb2_plane_size(vb, 0) & ~3UL;
+
+	r[0] = min(ALIGN(vb2_get_plane_payload(vb, 0), 4), end);
+	r[1] = min(r[0] + ISS_VIDEO_GUARD_BYTES, end);
+	r[2] = max(r[1], end - min(end, (unsigned long)ISS_VIDEO_GUARD_BYTES));
+	r[3] = end;
+}
+
+/*
+ * iss_video_guard_arm - write the canary behind the frame of a capture buffer
+ *
+ * dma-contig planes have a kernel mapping here (no DMA_ATTR_NO_KERNEL_MAPPING);
+ * without one the sentinel is simply off.
+ */
+static void iss_video_guard_arm(struct vb2_buffer *vb)
+{
+	u32 *va = vb2_plane_vaddr(vb, 0);
+	unsigned long r[4], o;
+
+	if (!va)
+		return;
+
+	iss_video_guard_ranges(vb, r);
+	for (o = r[0]; o < r[1]; o += 4)
+		va[o / 4] = ISS_VIDEO_GUARD_WORD;
+	for (o = r[2]; o < r[3]; o += 4)
+		va[o / 4] = ISS_VIDEO_GUARD_WORD;
+}
+
+/*
+ * iss_video_guard_check - byte offset of the first disturbed canary word, or -1
+ *
+ * Called from the interrupt handler when a frame completes: at most
+ * 2 * ISS_VIDEO_GUARD_BYTES / 4 word compares, no sleeping.
+ */
+static long iss_video_guard_check(struct vb2_buffer *vb)
+{
+	const u32 *va = vb2_plane_vaddr(vb, 0);
+	unsigned long r[4], o;
+
+	if (!va)
+		return -1;
+
+	iss_video_guard_ranges(vb, r);
+	for (o = r[0]; o < r[1]; o += 4)
+		if (va[o / 4] != ISS_VIDEO_GUARD_WORD)
+			return o;
+	for (o = r[2]; o < r[3]; o += 4)
+		if (va[o / 4] != ISS_VIDEO_GUARD_WORD)
+			return o;
+
+	return -1;
 }
 
 static void iss_video_buf_cleanup(struct vb2_buffer *vb)
@@ -339,6 +410,8 @@ static int iss_video_buf_prepare(struct vb2_buffer *vb)
 
 	vb2_set_plane_payload(vb, 0, size);
 	buffer->iss_addr = addr;
+	if (video->type == V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		iss_video_guard_arm(vb);
 	return 0;
 }
 
@@ -474,6 +547,19 @@ struct iss_buffer *omap4iss_video_buffer_next(struct iss_video *video)
 			atomic_inc_return(&pipe->frame_number);
 	else
 		buf->vb.sequence = atomic_read(&pipe->frame_number);
+
+	if (video->type == V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+		long dirty = iss_video_guard_check(&buf->vb.vb2_buf);
+
+		if (dirty >= 0) {
+			dev_warn_ratelimited(video->iss->dev,
+				"%s: frame overran its %lu bytes: sentinel dirty at offset %ld of a %lu byte plane\n",
+				video->video.name,
+				vb2_get_plane_payload(&buf->vb.vb2_buf, 0), dirty,
+				vb2_plane_size(&buf->vb.vb2_buf, 0));
+			pipe->error = true;
+		}
+	}
 
 	vb2_buffer_done(&buf->vb.vb2_buf, pipe->error ?
 			VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);

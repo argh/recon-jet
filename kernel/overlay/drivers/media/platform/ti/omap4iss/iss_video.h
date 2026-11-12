@@ -19,6 +19,22 @@
 
 #define ISS_VIDEO_DRIVER_NAME		"issvideo"
 
+/*
+ * Smallest capture buffer ever allocated: one full-resolution frame of the
+ * Jet's sensor (MT9M114, 1280x960 at 16 bits per pixel), whatever the format
+ * in use. See iss_video_queue_setup().
+ */
+#define ISS_VIDEO_MIN_CAPTURE_BUF	(1280 * 960 * 2)
+
+/*
+ * Sentinel: the slack that ISS_VIDEO_MIN_CAPTURE_BUF leaves behind the frame
+ * absorbs an overlong frame silently. A canary is written right after the
+ * expected frame end and at the end of the plane when a buffer is queued, and
+ * checked when the buffer completes. See iss_video_guard_arm().
+ */
+#define ISS_VIDEO_GUARD_WORD		0xdeadbeef
+#define ISS_VIDEO_GUARD_BYTES		4096
+
 struct iss_device;
 struct iss_video;
 struct v4l2_mbus_framefmt;

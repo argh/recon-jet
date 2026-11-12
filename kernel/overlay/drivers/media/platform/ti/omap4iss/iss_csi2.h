@@ -134,6 +134,7 @@ struct iss_csi2_device {
 	u32 output; /* output to IPIPEIF, memory or both? */
 	bool dpcm_decompress;
 	unsigned int frame_skip;
+	bool ctx_deferred;	/* streaming, context 0 waits for the source to start */
 
 	struct iss_csiphy *phy;
 	struct iss_csi2_ctx_cfg contexts[ISS_CSI2_MAX_CTX_NUM + 1];
@@ -147,6 +148,7 @@ struct iss_csi2_device {
 void omap4iss_csi2_isr(struct iss_csi2_device *csi2);
 int omap4iss_csi2_reset(struct iss_csi2_device *csi2);
 int omap4iss_csi2_complexio_rearm(struct iss_csi2_device *csi2);
+void omap4iss_csi2_start_capture(struct iss_csi2_device *csi2);
 int omap4iss_csi2_init(struct iss_device *iss);
 int omap4iss_csi2_create_links(struct iss_device *iss);
 void omap4iss_csi2_cleanup(struct iss_device *iss);

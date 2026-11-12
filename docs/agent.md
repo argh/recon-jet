@@ -386,16 +386,11 @@ wake-word questions back to the Assistant.
 
 In order; the first is a blocker for anything that starts the camera.
 
-1. **Camera memory corruption** (`docs/open-questions.md`, "Memory corruption at camera stream
-   start"). (a) Prove the mechanism: the V4L2 test - three mapped buffers filled with 0xA5, only
-   buffer 0 queued, one frame streamed, buffers 1-2 checked for pixel data, ~20 runs, then a
-   reboot. (b) Fix it where it is: arm the CSI-2 context only after the sensor's `s_stream`, or
-   stop the sensor's init-time streaming burst (rebuilt `omap4-iss.ko` / `mt9m114`, reboot).
-   (c) Fallback or belt-and-braces: a dedicated no-map reserved-memory pool for the ISS so its
-   buffers never share pages with user memory (DTS, new boot image). Also: cap
-   `scaling_max_freq` at 800000 (1008 MHz runs without its voltage step); jetd's `play_close`
-   deadlock when a client dies mid-playback; jetd serving a snapshot from the first (black)
-   frame of a stream.
+1. ~~Camera memory corruption~~ **fixed and flashed 2026-11-11** (`docs/open-questions.md`): the
+   first frame of every stream was the sensor's 1280x720 default written into a 640x480 buffer.
+   Left over: jetd serves a snapshot from frame 0 of a stream (black: skip ~6 frames and
+   ERROR-flagged buffers, as `cam_snapshot` does); jetd's `play_close` deadlock when a client
+   dies mid-playback; cap `scaling_max_freq` at 800000.
 2. **Roll-up / rename**: an entity's observations (crops + notes, errors included) condensed
    into a name, a summary and a confidence; "soldering station (model unread)" is a legal name.
    Text-only roll-ups launder the majority error, so it works from the crops.
@@ -408,7 +403,9 @@ In order; the first is a blocker for anything that starts the camera.
    this?". The second is the plan: it spends pixels where the first pass saw something to read,
    costs ~100-200 tokens an item, and is what would have read "WESD51". Cost on the device: a
    1280x960 capture is 2.4 MB of UYVY per scan to convert and hold (measure on the A9 before
-   committing to it), and it doubles the size of the buffer question in item 1 - do that first.
+   committing to it); the ISS buffers are already sized for it. The closer look is also where
+   exposure belongs: a detail shot of something small and bright wants a metered manual
+   exposure with the gain pulled down (three ioctls on the sensor subdevs, no kernel change).
 4. **`near` counts and places** from the sighting log; the curator's candidate scoring computes
    co-occurrence on demand today.
 5. **Voice on the device, unverified**: the two-phase wake turn, fillers between sentences,

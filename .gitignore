@@ -14,6 +14,7 @@ tools/*/fbbench
 tools/*/reboot2
 tools/*/wdtarm
 tools/*/su
+tools/*/issprobe
 *.o
 *.ko
 .DS_Store

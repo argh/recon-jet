@@ -495,6 +495,15 @@ static int iss_pipeline_enable(struct iss_pipeline *pipe,
 	if (pipe->do_propagation) {
 		omap4iss_csi2_complexio_rearm(&iss->csi2a);
 		omap4iss_csi2_complexio_rearm(&iss->csi2b);
+
+		/*
+		 * ... and only now let the receiver write to memory: anything
+		 * the sensor sent while it was starting is not the configured
+		 * frame, and errors seen meanwhile belong to no buffer.
+		 */
+		pipe->error = false;
+		omap4iss_csi2_start_capture(&iss->csi2a);
+		omap4iss_csi2_start_capture(&iss->csi2b);
 	}
 
 	mutex_unlock(&iss->media_dev.graph_mutex);

@@ -17,6 +17,16 @@
 #include "iss_csi2.h"
 
 /*
+ * Diagnostic knob (/sys/module/omap4_iss/parameters/defer_ctx): 0 restores the
+ * old start order, context armed before the sensor starts, which lets the
+ * sensor's start-up frame overrun the buffer. Only useful to show that the
+ * buffer sentinel in iss_video.c fires.
+ */
+static bool defer_ctx = true;
+module_param(defer_ctx, bool, 0644);
+MODULE_PARM_DESC(defer_ctx, "enable the CSI2 context only after the sensor has started (default 1)");
+
+/*
  * csi2_if_enable - Enable CSI2 Receiver interface.
  * @enable: enable flag
  *
@@ -560,6 +570,33 @@ int omap4iss_csi2_complexio_rearm(struct iss_csi2_device *csi2)
 	return 0;
 }
 
+/*
+ * omap4iss_csi2_start_capture - enable context 0 once the source is streaming
+ *
+ * The pipeline is started from the video node upstream, so the receiver is set
+ * up before the sensor's s_stream(1) runs. A context has no frame size limit:
+ * it writes whatever arrives between a frame start and the next frame end to
+ * the buffer address. The MT9M114 is powered off between streams, and its
+ * power-up sequence (mt9m114_initialize) ends in a config change that streams
+ * at the sensor's default 1280x720 before the requested geometry is programmed.
+ * With the context already armed, that 1843200-byte frame went into a
+ * 614400-byte 640x480 buffer and over the 1.2 MB of memory behind it (CMA:
+ * the next buffer, and user or page cache pages in between).
+ *
+ * So csi2_set_stream() leaves the context disabled, and the pipeline code calls
+ * this after every subdev has started: the first frame captured is one the
+ * source sends in its configured format. A context enabled in mid-stream starts
+ * at the next frame start, as it does after a buffer underrun (csi2_queue).
+ */
+void omap4iss_csi2_start_capture(struct iss_csi2_device *csi2)
+{
+	if (!csi2->available || !csi2->ctx_deferred)
+		return;
+
+	csi2->ctx_deferred = false;
+	csi2_ctx_enable(csi2, 0, 1);
+}
+
 static int csi2_configure(struct iss_csi2_device *csi2)
 {
 	const struct iss_v4l2_subdevs_group *pdata;
@@ -709,6 +746,10 @@ static void csi2_isr_ctx(struct iss_csi2_device *csi2,
 	iss_reg_write(csi2->iss, csi2->regs1, CSI2_CTX_IRQSTATUS(n), status);
 
 	if (omap4iss_module_sync_is_stopping(&csi2->wait, &csi2->stopping))
+		return;
+
+	/* Context not started yet: no buffer is being filled, nothing to complete. */
+	if (csi2->ctx_deferred)
 		return;
 
 	/* Propagate frame number */
@@ -1136,9 +1177,16 @@ static int csi2_set_stream(struct v4l2_subdev *sd, int enable)
 		if (csi2->output & CSI2_OUTPUT_MEMORY &&
 		    !(video_out->dmaqueue_flags & ISS_VIDEO_DMAQUEUE_QUEUED))
 			break;
-		/* Enable context 0 and IRQs */
+		/*
+		 * Enable the interface and IRQs, but not context 0 yet: the
+		 * source is started after us, and what it sends while starting
+		 * is not the configured frame (see omap4iss_csi2_start_capture).
+		 */
 		atomic_set(&csi2->stopping, 0);
-		csi2_ctx_enable(csi2, 0, 1);
+		if (defer_ctx)
+			csi2->ctx_deferred = true;
+		else
+			csi2_ctx_enable(csi2, 0, 1);
 		csi2_if_enable(csi2, 1);
 		iss_video_dmaqueue_flags_clr(video_out);
 		break;
@@ -1149,6 +1197,7 @@ static int csi2_set_stream(struct v4l2_subdev *sd, int enable)
 		if (omap4iss_module_sync_idle(&sd->entity, &csi2->wait,
 					      &csi2->stopping))
 			ret = -ETIMEDOUT;
+		csi2->ctx_deferred = false;
 		csi2_ctx_enable(csi2, 0, 0);
 		csi2_if_enable(csi2, 0);
 		csi2_irq_ctx_set(csi2, 0);
