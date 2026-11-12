@@ -75,6 +75,10 @@ export class Surface extends EventEmitter {
       this.geometry = g;
       this.raster = new Raster(g.w, g.h, { pitch: g.stride >> 1 });
       this.#shown = null; this.#force = null; this.viewfinderRect = null;
+      // jetd's viewfinder outlives the client that asked for it: after a crash and a restart the
+      // camera is still streaming into a rectangle nobody here knows about, over every screen.
+      // Whatever is wanted now is asked for again below.
+      this.deviceLink.viewfinderStop();
       this.#close();
       try { this.#fd = fs.openSync(this.device, 'w'); }
       catch (error) { this.logger?.error({ error: error.message, device: this.device }, 'framebuffer open failed; nothing will be drawn'); }

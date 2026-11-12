@@ -155,8 +155,10 @@ export class DeviceLink extends EventEmitter {
   /** External surface: push one framebuffer rectangle to the panel. */
   flushRect(x, y, w, h) { return this.send(`F ${x} ${y} ${w} ${h}`); }
   /** Live camera into a panel rectangle; resolves with the source size `{w, h}`. */
-  viewfinder(x, y, w, h, fps = 10) { return this.#request('Z', `Z ${x} ${y} ${w} ${h} ${fps}`); }
-  viewfinderStop() { return this.send('z'); }
+  viewfinder(x, y, w, h, fps = 10) { return this.#request('Z', `Z ${x} ${y} ${w} ${h} ${fps}`).then((r) => { this.streaming = true; return r; }); }
+  viewfinderStop() { this.streaming = false; return this.send('z'); }
+  /** The camera is streaming (a viewfinder is up): a snapshot taps that stream instead of starting the sensor. Cleared on `z`; a link that drops and returns is re-armed by whoever owns the viewfinder. */
+  streaming = false;
   /** Resolves once connected (immediately if already). */
   async ready(signal) { if (!this.#sock) await once(this, 'connected', { signal }); }
 

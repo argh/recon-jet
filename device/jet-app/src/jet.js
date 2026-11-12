@@ -1,6 +1,6 @@
 // Jet: the main module. Referencing each subsystem here is what instantiates it; the public
 // modes are listed in the order the switcher shows them, from the everyday ones down to the
-// plumbing (Assistant, Describe, Doom, Shell, Log, System); the boot view is looked up by id.
+// plumbing (Comms, Assistant, Describe, Doom, Shell, Log, System); the boot view is looked up by id.
 // Once every module has started (and every mode has registered), `main()` enters the start mode.
 import { AppModule, Schema } from '@versionzero/module-manager';
 import { DeviceLink } from './modules/device-link/index.js';
@@ -16,6 +16,12 @@ import { Sounds } from './modules/sounds/index.js';
 import { Wear } from './modules/wear/index.js';
 import { Gps } from './modules/gps/index.js';
 import { Actions } from './modules/actions/index.js';
+import { Agent } from './modules/agent/index.js';
+import { Scanner } from './modules/scanner/index.js';
+import { Curator } from './modules/curator/index.js';
+import { Feed } from './modules/feed/index.js';
+import { Operator } from './modules/operator/index.js';
+import { CommsMode } from './modes/comms/index.js';
 import { LogMode } from './modes/log/index.js';
 import { DemoMode } from './modes/demo/index.js';
 import { SystemMode } from './modes/system/index.js';
@@ -45,6 +51,12 @@ export class Jet extends AppModule {
       .property('wear', s('Wear').meta('internal', true))
       .property('gps', s('Gps').meta('internal', true))
       .property('actions', s('Actions').meta('internal', true))
+      .property('scanner', s('Scanner').meta('internal', true))
+      .property('curator', s('Curator').meta('internal', true))
+      .property('feed', s('Feed').meta('internal', true))
+      .property('agent', s('Agent').meta('internal', true))
+      .property('operator', s('Operator').meta('internal', true))
+      .property('commsMode', s('CommsMode').meta('internal', true))
       .property('logMode', s('LogMode').meta('internal', true))
       .property('demoMode', s('DemoMode').meta('internal', true))
       .property('mapMode', s('MapMode').meta('internal', true))
@@ -55,9 +67,9 @@ export class Jet extends AppModule {
       .property('logLevel', s('string').default('info').values(['debug', 'info', 'warn', 'error']).meta('description', 'log threshold'))
       .property('deviceConfig', s('string').default('/android-data/mainline/jet-app.json').meta('description', 'per-device config layer (read before configuration)'))
       .property('tickRate', s('number').default(60000).meta('hidden', true)),
-    register: [DeviceLink, Surface, Input, Power, Sensors, Sounds, Wear, Gps, Actions, Ui, Modes, Llm, Voice, AssistantMode, DemoMode, DoomMode, MapMode, ShellMode, LogMode, SystemMode],
+    register: [DeviceLink, Surface, Input, Power, Sensors, Sounds, Wear, Gps, Actions, Ui, Modes, Llm, Voice, Scanner, Curator, Feed, Agent, Operator, CommsMode, AssistantMode, DemoMode, DoomMode, MapMode, ShellMode, LogMode, SystemMode],
   };
-  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; sounds; wear; gps; actions; logMode; demoMode; mapMode; systemMode; assistantMode; shellMode; doomMode; logLevel; deviceConfig;
+  deviceLink; surface; input; power; sensors; ui; modes; llm; voice; sounds; wear; gps; actions; scanner; curator; feed; agent; operator; commsMode; logMode; demoMode; mapMode; systemMode; assistantMode; shellMode; doomMode; logLevel; deviceConfig;
 
   async init() {
     await super.init();

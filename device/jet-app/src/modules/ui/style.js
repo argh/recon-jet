@@ -1,8 +1,10 @@
 // The visual grammar (docs/interaction-design.md): palette, layout constants and text helpers
 // shared by the system layer and every mode. Colour carries meaning: green = selected/active/ok,
-// yellow = title/attention, red = problem, grey = hint.
+// yellow = title/attention, red = problem, grey = hint. Two fills say who is speaking in a
+// conversation (ui/chat.js): blue = the wearer (`you`), slate = Jet (`jet`); both are dark enough
+// for white text and far enough apart in hue and weight to tell at a glance on a dim panel.
 
-export const C = { white: 0xffffff, dim: 0xa0a0a0, faint: 0x404040, title: 0xffff00, ok: 0x00ff80, warn: 0xffa000, bad: 0xff4040, panel: 0x101820, black: 0x000000 };
+export const C = { white: 0xffffff, dim: 0xa0a0a0, faint: 0x404040, title: 0xffff00, ok: 0x00ff80, warn: 0xffa000, bad: 0xff4040, panel: 0x101820, you: 0x0050a8, jet: 0x343840, black: 0x000000 };
 export const MARGIN = 6;
 export const STRIP_H = 10;   // the system status strip along the top (ui.setStrip)
 export const TOP = STRIP_H + 4;   // first free row under the strip

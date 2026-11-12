@@ -145,7 +145,7 @@ test('surface: acquires geometry, writes changed rows only, leaves the viewfinde
   assert.equal(s.flush(), null);
   s.active = true;
   assert.deepEqual(s.flush(), { x: 0, y: 0, w: 8, h: 4 });
-  assert.deepEqual(sent, ['F 0 0 8 4']);
+  assert.deepEqual(sent, ['z', 'F 0 0 8 4'], 'a viewfinder left over from a dead client is stopped on acquire');
   assert.ok(fb().every((p) => p === 0xf800));
   sent.length = 0;
   s.fillRect(0, 0, 8, 4, 0xff0000); s.fillRect(2, 1, 2, 1, 0x0000ff);   // the red is unchanged, only the blue differs
