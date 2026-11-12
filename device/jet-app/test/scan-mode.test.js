@@ -3,22 +3,31 @@
 // while scanning (paused under the switcher, stopped on leave, stopped while a detail has the
 // panel), swipe right/left opening and closing the detail, front pinning there, the order rear
 // steps back in, the selection published as the world's focus, that it follows its models only
-// while showing, the 1 s tick repainting only on a changed age, and the DI shape.
+// while showing, the 1 s tick repainting only on a changed age, the scanner's column (the
+// viewfinder border as readiness to capture, the frame under analysis in its slot, the
+// animation timer only while something moves), the border geometry, and the DI shape.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { ModuleManager, Schema } from '@versionzero/module-manager';
 import { ScanMode, age } from '../src/modes/scan/index.js';
+import { ring } from '../src/modules/ui/ring.js';
+import { C } from '../src/modules/ui/style.js';
 import { stack, fakeMode, fakeLink, settle } from './helpers.js';
 
 const TAP = 330;   // a pad tap of its own: the default tap code (28) is also Enter, which input reads as a front press
 const T0 = 1_000_000;
 
 const fakeScanner = () => Object.assign(new EventEmitter(), {
-  active: false, state: 'off', stops: 0,
+  active: false, state: 'off', stops: 0, frame: null, due: null,
   set(state) { this.state = state; this.emit('state', state); },
   start() { if (!this.active) { this.active = true; this.set('idle'); } },
-  stop() { this.stops++; if (this.active) { this.active = false; this.set('off'); } },
+  stop() { this.stops++; if (this.active) { this.active = false; this.due = null; this.set('off'); } },
+  arm(from, at) { this.due = { from, at }; this.emit('due', this.due); },
+  /** a capture: the wait is over, the frame is being analysed */
+  take(frame) { this.due = null; this.frame = frame; this.emit('frame', frame); this.set('looking'); },
+  /** its analysis ended */
+  done() { this.frame = null; this.emit('frame', null); this.set('idle'); },
   toggle() { if (this.active) this.stop(); else this.start(); return this.active; },
 });
 const entity = (id, name, kind, lastSeen, claims = [], extra = {}) => ({ id, name, kind, firstSeen: T0 - 600_000, lastSeen, seen: 3, pinned: false, claims: claims.map((text, i) => ({ t: T0 - 60_000 * (claims.length - i), text, source: 'scan' })), ...extra });
@@ -62,7 +71,7 @@ test('scan: front toggles the scanner; the camera runs in the corner while scann
   assert.equal(s.modes.spoken('scanner'), scan);
   assert.deepEqual(subs(), [1, 1, 1, 1], 'showing: it follows the world, the scanner, the surface and the switcher');
   const tiles = [], fill = s.surface.fillRect.bind(s.surface);
-  s.surface.fillRect = (x, y, w, h, colour) => { if (h > 20) tiles.push({ x, y, w, h }); return fill(x, y, w, h, colour); };
+  s.surface.fillRect = (x, y, w, h, colour) => { if (w > 20 && h > 20) tiles.push({ x, y, w, h }); return fill(x, y, w, h, colour); };
   let f = await frame();
   assert.deepEqual(f.slice(0, -1), ['now', 'multimeter', 'tool - reads 2.210 kOhm', '1m', 'solder spool', 'material - 0.8 mm leaded'], 'the entities, most recent first: age, name, kind and newest claim');
   assert.deepEqual(tiles[0], { x: 2, y: 14, w: 420, h: 48 }, 'the review list has the panel from the strip down, full width');
@@ -75,10 +84,10 @@ test('scan: front toggles the scanner; the camera runs in the corner while scann
   assert.equal(s.ui.strip.text, 'scanning');
   tiles.length = 0;
   f = await frame();
-  assert.ok(f.includes('watching') && f.includes('2 in the log')); assert.equal(hintOf(f), 'front: stop   swipe: select');
+  assert.ok(f.includes('2 logged')); assert.equal(hintOf(f), 'front: stop   swipe: select');
   assert.deepEqual(tiles[0], { x: 2, y: 14, w: 290, h: 48 }, 'while scanning the tiles stop short of the camera corner');
   scanner.set('looking'); await settle();
-  assert.equal(s.ui.strip.text, 'looking'); assert.ok((await frame()).includes('looking...'));
+  assert.equal(s.ui.strip.text, 'analyzing');
   assert.equal(sent('Z 302 16 120 90 10'), 1, 'a scan starting does not restart the camera');
   list[1].lastSeen = clock.t = T0 + 1000; list[1].claims.push({ t: clock.t, text: 'half left', source: 'scan' });
   world.emit('change'); scanner.set('idle');
@@ -208,6 +217,125 @@ test('scan: the tick repaints only when an age on the glass reads differently', 
   assert.equal(asked, 1);
 
   assert.deepEqual([0, 9999, 10_000, 59_000, 60_000, 3_599_000, 3_600_000, 86_400_000 * 2, -5].map(age), ['now', 'now', '10s', '50s', '1m', '59m', '1h', '2d', 'now']);
+});
+
+test('ring: a span of a border, clockwise from the top left, as rectangles', () => {
+  const r = { x: 10, y: 20, w: 40, h: 20 }, area = (rects) => rects.reduce((n, b) => n + b.w * b.h, 0);   // a lap is 120 px
+  assert.deepEqual(ring(r, 2, 0, 0), [], 'nothing');
+  assert.deepEqual(ring(r, 2, 0, 0.25), [{ x: 10, y: 20, w: 30, h: 2 }], 'a quarter: 30 px along the top');
+  assert.deepEqual(ring(r, 2, 0, 0.5), [{ x: 10, y: 20, w: 40, h: 2 }, { x: 48, y: 20, w: 2, h: 20 }], 'half: the top, then down the right');
+  assert.deepEqual(ring(r, 2, 0.5, 0.75), [{ x: 20, y: 38, w: 30, h: 2 }], 'the bottom runs right to left');
+  assert.deepEqual(ring(r, 2, 0, 1), [{ x: 10, y: 20, w: 40, h: 2 }, { x: 48, y: 20, w: 2, h: 20 }, { x: 10, y: 38, w: 40, h: 2 }, { x: 10, y: 20, w: 2, h: 20 }], 'the whole border');
+  assert.deepEqual(ring(r, 2, 0.875, 1.125), [{ x: 10, y: 20, w: 2, h: 15 }, { x: 10, y: 20, w: 15, h: 2 }], 'a span past the corner wraps: up the left, on along the top');
+  assert.deepEqual(ring(r, 2, 2.875, 3.125), ring(r, 2, 0.875, 1.125), 'the start is taken modulo a lap');
+  assert.equal(area(ring(r, 2, 0.3, 5)), area(ring(r, 2, 0, 1)), 'never more than one lap');
+  assert.deepEqual(ring(r, 2, 0.5, 0.2), [], 'a negative span is nothing');
+});
+
+test('scan: the viewfinder border is the readiness to capture, the frame under analysis sits in the slot under it, and the animation runs only while something moves', async (t) => {
+  const list = [entity('e7', 'multimeter', 'tool', T0 - 5000)];
+  const { s, scanner, scan, clock, frame, g } = await make(t, { entities: list });
+  scan.frameMs = 100_000;   // the timer is observed, not waited for
+  const cam = { x: 302, y: 16, w: 120, h: 90 }, slot = { x: 302, y: 128, w: 120, h: 90 };
+  const px = (x, y) => s.surface.raster.px[y * s.surface.raster.pitch + x];
+  const c16 = (c) => ((c >> 8) & 0xf800) | ((c >> 5) & 0x07e0) | ((c >> 3) & 0x1f), [OK, FAINT, TITLE, DIM] = [C.ok, C.faint, C.title, C.dim].map(c16);
+  /** the colour of the viewfinder border `d` px along its walk (the lap is 2 * (124 + 94) = 436 px) */
+  const border = (d) => (d < 124 ? px(300 + d, 14) : d < 218 ? px(423, 14 + d - 124) : d < 342 ? px(423 - (d - 218), 107) : px(300, 107 - (d - 342)));
+  const inside = (r) => { let n = 0; for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) if (px(x, y)) n++; return n; };
+  assert.deepEqual(scan.slotRect, slot, 'the slot: the camera\'s footprint, under it and a caption row, above the hint line');
+  assert.equal(scan.readiness, null); assert.equal(scan.animating, false, 'review: nothing to animate');
+  await frame();
+  assert.equal(border(200), 0, 'and no column');
+
+  await g('frontPress');
+  assert.deepEqual(s.surface.viewfinderRect, cam);
+  assert.equal(scan.readiness, null); assert.equal(scan.animating, false, 'scanning but no capture armed: nothing moves, no timer');
+  await frame();
+  assert.deepEqual([border(1), border(200), border(400)], [DIM, DIM, DIM], 'nothing armed: the plain grey border');
+  scanner.arm(T0, T0 + 10_000);
+  assert.equal(scan.animating, true, 'a capture is due: the border fills, the timer runs');
+  clock.t = T0 + 3000;
+  assert.equal(scan.readiness, 0.3);
+  let f = await frame();
+  assert.deepEqual([border(1), border(129), border(132), border(300)], [OK, OK, FAINT, FAINT], '30%: green from the top left corner clockwise for 131 px of the 436, the rest the track');
+  assert.ok(f.includes('1 logged') && !f.includes('analyzing'));
+  assert.equal(inside(slot), 0, 'the slot is empty');
+  clock.t = T0 + 9000; await frame();
+  assert.deepEqual([border(1), border(391), border(394), border(430)], [OK, OK, FAINT, FAINT], '90%');
+  assert.equal(inside(cam), 0, 'nothing is ever drawn in the viewfinder: those pixels are jetd\'s');
+
+  await g('frontHold');
+  assert.equal(scan.animating, false, 'under the mode menu nothing animates');
+  await g('frontHold');
+  assert.equal(scan.animating, true);
+  await g('down'); await g('right');
+  assert.equal(scan.animating, false, 'nor behind an open detail');
+  await g('left'); await g('rearPress');
+  assert.equal(scan.animating, true);
+
+  // the capture: no further one can happen while this frame is analysed
+  const image = { width: 120, height: 90, data: new Uint8Array(120 * 90 * 4).fill(255) };
+  clock.t = T0 + 10_000; scanner.take(image);
+  assert.equal(scan.readiness, null); assert.equal(scan.animating, true, 'the analysed frame is animated');
+  assert.equal(s.ui.strip.text, 'analyzing');
+  f = await frame();
+  assert.deepEqual([border(1), border(200), border(400)], [DIM, DIM, DIM], 'analysing: the viewfinder border is grey, brighter than the empty track');
+  assert.ok(f.includes('analyzing') && !f.includes('1 logged'));
+  assert.equal(inside(cam), 0, 'the slide starts behind the viewfinder: nothing of it is drawn there');
+  clock.t += 150; await frame();
+  assert.deepEqual([px(310, 107), px(310, 108), px(310, 161), px(310, 162)], [DIM, 0xffff, 0xffff, 0], 'halfway down: the part of the frame that has come out from under the viewfinder');
+  assert.equal(inside(cam), 0);
+  clock.t += 150; await frame();
+  assert.deepEqual([px(302, 128), px(421, 217), px(302, 220)], [0xffff, 0xffff, 0], 'arrived: the frame fills the slot, 1:1');
+  const circle = (d) => (d < 124 ? px(300 + d, 126) : d < 218 ? px(423, 126 + d - 124) : d < 342 ? px(423 - (d - 218), 219) : px(300, 219 - (d - 342)));
+  assert.deepEqual([circle(1), circle(108), circle(111), circle(300)], [TITLE, TITLE, FAINT, FAINT], 'a bright quarter of its border, starting at the top left');
+  clock.t += 600; await frame();
+  assert.deepEqual([circle(1), circle(219), circle(326), circle(329)], [FAINT, TITLE, TITLE, FAINT], 'half a lap later it is on the far side');
+  assert.equal(inside(cam), 0);
+
+  scanner.done();
+  assert.equal(scan.animating, false, 'analysed, and no capture armed yet: still');
+  f = await frame();
+  assert.equal(inside({ x: 300, y: 126, w: 124, h: 94 }), 0, 'the slot is cleared, border and all');
+  assert.ok(f.includes('1 logged'));
+  scanner.arm(clock.t, clock.t + 5000);
+  assert.equal(scan.animating, true);
+  clock.t += 5000;
+  assert.equal(scan.readiness, 1, 'due: full');
+  scanner.arm(clock.t - 5000, clock.t - 1);   // re-armed already past (a head turn brought it forward): nothing left to fill
+  assert.equal(scan.animating, false, 'a full border does not keep the timer');
+  await frame();
+  assert.deepEqual([border(1), border(430)], [OK, OK]);
+
+  scanner.arm(clock.t, clock.t + 5000);
+  await g('frontPress');
+  assert.equal(scanner.active, false); assert.equal(scan.animating, false, 'scanning stopped: the timer is gone');
+  await frame();
+  assert.equal(border(200), 0, 'and the column with it: the review list is full width');
+  await g('frontPress'); scanner.arm(clock.t, clock.t + 5000);
+  assert.equal(scan.animating, true);
+  s.modes.switchTo('other'); await settle();
+  assert.equal(scan.animating, false, 'left the mode: the timer is gone');
+  assert.deepEqual([scanner.listenerCount('frame'), scanner.listenerCount('due'), scanner.listenerCount('state')], [0, 0, 0]);
+  scanner.take(image);   // a `look` scans without us
+  assert.equal(scan.animating, false);
+});
+
+test('scan: the animation timer asks for a repaint each period and stops itself once the border is full', async (t) => {
+  const { s, scanner, scan, clock, g } = await make(t);
+  scan.frameMs = 5;
+  await g('frontPress');
+  let asked = 0; const request = s.ui.requestRender.bind(s.ui);
+  s.ui.requestRender = () => { asked++; request(); };
+  scanner.arm(T0, T0 + 1000); await settle(); asked = 0;
+  await new Promise((r) => setTimeout(r, 40));
+  assert.ok(asked >= 2, 'repaints while the border fills');
+  clock.t = T0 + 1000;
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(scan.animating, false, 'full: the timer stopped itself');
+  asked = 0;
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(asked, 0, 'and nothing repaints');
 });
 
 test('scan: a DI module, built and wired by the container', async () => {

@@ -12,7 +12,7 @@
 // is what shutdown should do anyway.
 import { EventEmitter } from 'node:events';
 import { Schema } from '@versionzero/module-manager';
-import { Camera } from '../camera/index.js';
+import { Camera, crop } from '../camera/index.js';
 import { World } from '../world/index.js';
 import { LookTool } from './look-tool.js';
 
@@ -136,6 +136,8 @@ export class Scanner extends EventEmitter {
       .property('minGapMs', s('number').default(3000).meta('description', 'while scanning: never start a scan sooner than this after the last finished'))
       .property('maxScanS', s('number').default(180).meta('description', 'scanning switches itself off after this long'))
       .property('jpegQuality', s('number').default(70).meta('description', 'quality of the frame sent to the model'))
+      .property('frameW', s('number').default(120).meta('advanced').meta('description', 'the frame under analysis is offered to views fitted to this width'))
+      .property('frameH', s('number').default(90).meta('advanced').meta('description', '... and this height'))
       .property('minLuma', s('number').default(14).meta('description', 'a frame whose mean brightness (0..255) is under this is not scanned'))
       .property('darkRetryMs', s('number').default(500).meta('advanced').meta('description', 'a dark frame of our own capture is retaken once after this long'))
       .property('camera', s('Camera').meta('internal', true))
@@ -146,12 +148,25 @@ export class Scanner extends EventEmitter {
       .property('logger', s('Logger').lax().meta('internal', true)),
     register: [Camera, World, { ModuleClass: LookTool, relative: true }],
   };
-  model; prompt; maxItems; maxTokens; intervalS; minGapMs; maxScanS; jpegQuality; minLuma; darkRetryMs; camera; world; llm; sensors; gps; logger;
+  model; prompt; maxItems; maxTokens; intervalS; minGapMs; maxScanS; jpegQuality; frameW; frameH; minLuma; darkRetryMs; camera; world; llm; sensors; gps; logger;
 
   /** scanning is switched on (a scan may or may not be running right now) */ active = false;
   /** scans that filed a frame / that did not, since start */ scans = 0; failures = 0;
   /** @type {string|null} why the last scan failed; null after a good one */ lastError = null;
   /** the clock, a field so tests own time */ now = () => Date.now();
+  /**
+   * The frame being analysed right now, small (fits `frameW`x`frameH`), for a view to show what
+   * "looking" is looking at; null between scans. Set when the frame is taken (`frame` event),
+   * cleared when its scan ends.
+   * @type {{width: number, height: number, data: Uint8Array}|null}
+   */
+  frame = null;
+  /**
+   * When the next scan is due while scanning is on and none is running: `{from, at}` (ms) - a
+   * view draws the wait as progress. A head turn can bring it forward. Null when off or looking.
+   * @type {{from: number, at: number}|null}
+   */
+  due = null;
   /** @type {Promise<object[]>|null} the scan in flight */ #running = null;
   #state = 'off'; #timer = null; #deadline = null; #lastEnd = -Infinity; #viewPending = false;
   #onView = () => { if (this.#running) this.#viewPending = this.active; else this.#trigger(); };
@@ -176,7 +191,7 @@ export class Scanner extends EventEmitter {
   stop() {
     if (!this.active) return;
     this.active = false; this.#viewPending = false;
-    clearTimeout(this.#timer); clearTimeout(this.#deadline); this.#timer = this.#deadline = null;
+    clearTimeout(this.#timer); clearTimeout(this.#deadline); this.#timer = this.#deadline = null; this.due = null;
     this.#sync();
   }
 
@@ -192,10 +207,11 @@ export class Scanner extends EventEmitter {
    */
   scanOnce({ image } = {}) {
     if (this.#running) return this.#running;
-    clearTimeout(this.#timer); this.#timer = null;
+    clearTimeout(this.#timer); this.#timer = null; this.due = null;
     const t0 = this.now();
     const done = () => {
       this.#running = null; this.#lastEnd = this.now();
+      if (this.frame) { this.frame = null; this.emit('frame', null); }
       if (this.active) this.#arm(this.#viewPending ? this.minGapMs : Math.max(this.intervalS * 1000, this.minGapMs));
       this.#viewPending = false;
       this.#sync();
@@ -229,6 +245,8 @@ export class Scanner extends EventEmitter {
       image = await this.camera.capture();
     }
     if (brightness(image) < this.minLuma) throw new Error('the frame is too dark to scan');
+    this.frame = crop(image, { x: 0, y: 0, w: image.width, h: image.height }, { maxW: this.frameW ?? 120, maxH: this.frameH ?? 90 });
+    this.emit('frame', this.frame);
     const fix = this.gps?.goodFix?.();   // where we are as the frame is taken, not ~4 s later
     const jpeg = this.camera.jpeg(image, { quality: this.jpegQuality });
     const known = this.world.entities();
@@ -261,6 +279,9 @@ export class Scanner extends EventEmitter {
 
   #arm(ms) {
     clearTimeout(this.#timer);
+    const from = this.now();
+    this.due = { from, at: from + ms };
+    this.emit('due', this.due);
     this.#timer = setTimeout(() => { this.#timer = null; this.#trigger(); }, ms);
     this.#timer.unref?.();
   }

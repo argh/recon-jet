@@ -332,3 +332,24 @@ test('scanner: a black frame is not scanned - our own capture is retaken once, a
   assert.equal(sc.failures, 1); assert.match(sc.lastError, /too dark/); assert.equal(llm.calls, 1, 'and no model call spent on it');
   assert.deepEqual(await sc.scanOnce({ image: dark }), []); assert.equal(llm.calls, 1);
 });
+
+test('scanner: the frame under analysis and the wait for the next scan are there for a view to draw', async () => {
+  let release;
+  const llm = { async chat() { await new Promise((r) => { release = r; }); return { content: 'SCENE: a desk\nred mug | mug | 100,100,300,300 | on the desk', usage: {} }; } };
+  const lit = { width: 640, height: 480, data: new Uint8Array(640 * 480 * 4).fill(140), t: 2 };
+  let clock = 1000;
+  const sc = Object.assign(new Scanner(), { model: 'm', prompt: 'Scan {maxItems}.', maxItems: 6, maxTokens: 400, intervalS: 10, minGapMs: 3000, maxScanS: 180, jpegQuality: 70, minLuma: 14, darkRetryMs: 1, frameW: 120, frameH: 90,
+    camera: { async capture() { return lit; }, jpeg: () => Buffer.from('J') }, llm, logger: null, now: () => clock,
+    world: { entities: () => [], observe: () => [{ id: 'e1' }] } });
+  const frames = []; sc.on('frame', (f) => frames.push(f && [f.width, f.height]));
+  assert.equal(sc.frame, null); assert.equal(sc.due, null);
+  sc.start();
+  await settle();
+  assert.equal(sc.state, 'looking'); assert.deepEqual([sc.frame.width, sc.frame.height], [120, 90], 'the frame, small'); assert.equal(sc.due, null, 'nothing is due while one is being analysed');
+  clock += 5000; release(); await settle();
+  assert.equal(sc.state, 'idle'); assert.equal(sc.frame, null, 'cleared when analysed');
+  assert.deepEqual(frames, [[120, 90], null]);
+  assert.deepEqual(sc.due, { from: 6000, at: 16000 }, 'the next one is due an interval after this one ended');
+  sc.stop();
+  assert.equal(sc.due, null);
+});
