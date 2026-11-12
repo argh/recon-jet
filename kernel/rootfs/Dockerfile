@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       busybox dropbear-bin wpasupplicant iw wireless-tools iproute2 ethtool i2c-tools alsa-utils \
       bluez avahi-daemon libnss-mdns v4l-utils evtest curl ca-certificates xz-utils procps \
-      kmod file less nano vim-tiny mg libatomic1 libstdc++6 openssh-client wireguard-tools apt-utils \
+      kmod file less nano vim-tiny mg libatomic1 libstdc++6 openssh-client wireguard-tools ntpsec-ntpdate apt-utils \
     && rm -rf /var/lib/apt/lists/*
 # Diagnostics and an editor, kept in the image rather than apt-installed by hand on each device:
 # these live on userdata and so survive a reflash, but not a rootfs rebuild, and re-deriving the

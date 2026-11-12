@@ -16,6 +16,13 @@
 # DNS: the conf's DNS is reachable only through the tunnel, so the hook points /etc/resolv.conf at it
 # while up; udhcpc leaves resolv.conf alone while wg0 exists (udhcpc-default.script), and a trusted
 # join drops the tunnel first so its lease then writes the LAN's own resolver back.
+# Clock: the Jet has no clock that survives a deep discharge; after one it boots in the year 2000,
+# and then no TLS certificate is valid and WireGuard's handshake timestamps run backwards - the
+# device looks as if the network were down. So every association sets the clock from the network,
+# over the fresh lease and BEFORE the tunnel: synchronously when the clock is absurd, in the
+# background otherwise (it only bounds drift then). An NTP client is used when the rootfs has one
+# (ntpdig/ntpdate/sntp); busybox rdate (RFC 868) is the fallback. Servers: one per line in
+#   /android-data/mainline/wireguard/timeservers   (default: pool.ntp.org, and time.nist.gov for rdate)
 IFACE=${1:-wlan0}
 DIR=/android-data/mainline/wireguard
 CONF=$DIR/wg0.conf
@@ -50,14 +57,35 @@ up() {   # split-tunnel wg0: route only the home prefixes, point resolv.conf at 
 
 down() { ip link show wg0 >/dev/null 2>&1 && ip link del wg0 2>/dev/null; }
 
+settime() {   # one shot at the network's time; quiet, bounded, first server that answers
+  servers=$(grep -v '^[[:space:]]*\(#\|$\)' "$DIR/timeservers" 2>/dev/null)
+  for s in ${servers:-pool.ntp.org}; do
+    if command -v ntpdig >/dev/null 2>&1; then timeout 10 ntpdig -S -t 5 "$s" >/dev/null 2>&1 && return 0
+    elif command -v ntpdate >/dev/null 2>&1; then timeout 10 ntpdate -u "$s" >/dev/null 2>&1 && return 0
+    elif command -v sntp >/dev/null 2>&1; then timeout 10 sntp -S "$s" >/dev/null 2>&1 && return 0
+    fi
+  done
+  for s in ${servers:-time.nist.gov}; do timeout 10 busybox rdate -s "$s" >/dev/null 2>&1 && return 0; done
+  return 1
+}
+
+clock() {
+  if [ "$(date -u +%Y)" -lt 2025 ]; then
+    settime && logger -t on-wifi "clock was wrong, set to $(date -u +%FT%TZ)" 2>/dev/null
+    hwclock -w 2>/dev/null
+  else
+    ( settime && hwclock -w 2>/dev/null ) &
+  fi
+}
+
 case "$2" in
   CONNECTED)
     SSID=$(wpa_cli -i "$IFACE" status 2>/dev/null | sed -n 's/^ssid=//p')
     [ -n "$SSID" ] || exit 0
     if grep -qxF "$SSID" "$TRUSTED" 2>/dev/null; then
-      down; dhcp          # trusted: tunnel off first, then the lease writes the LAN's own resolver
+      down; dhcp; clock   # trusted: tunnel off first, then the lease writes the LAN's own resolver
     else
-      dhcp; up            # untrusted: lease first so the endpoint is routable, then the tunnel over it
+      dhcp; clock; up     # untrusted: lease first so the endpoint is routable, the clock before any crypto, then the tunnel
     fi
     ;;
   DISCONNECTED|TERMINATING) down ;;

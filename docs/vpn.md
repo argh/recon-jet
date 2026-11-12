@@ -47,6 +47,17 @@ matches the goal -- reach home services off-home -- and keeps the Jet's general 
 make it a true full tunnel instead, enable `CONFIG_IP_MULTIPLE_TABLES` + `CONFIG_IP_ADVANCED_ROUTER`
 and switch the hook back to `wg-quick`.)
 
+## The clock comes first
+
+The Jet has no clock that survives a deep discharge: after one it boots in the year 2000. Then no
+TLS certificate is valid (every request fails at once) and the device behaves exactly as if the
+network or the tunnel were down - which is how it was found, outdoors, with the tunnel up and
+handshaking. So the hook sets the clock from the network on every association, after the lease
+and before the tunnel: synchronously when the year is absurd, in the background otherwise. It uses
+an NTP client when the rootfs has one (`ntpsec-ntpdate` is in the Dockerfile) and falls back to
+busybox `rdate` (RFC 868, `time.nist.gov`). Servers can be listed one per line in
+`/android-data/mainline/wireguard/timeservers`. To check by hand: `date -u` on the Jet.
+
 ## DNS and MTU
 
 The conf's `DNS` is reachable only through the tunnel, so the hook writes `/etc/resolv.conf` with it
