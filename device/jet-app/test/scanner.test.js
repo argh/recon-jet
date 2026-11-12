@@ -210,7 +210,17 @@ test('scanner: while on, the next scan follows the interval or a new view, never
   sc.stop();
 });
 
-test('scanner: switches itself off after maxScanS', async (t) => {
+test('scanner: scanning never ends by itself unless a limit is configured', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+  const { sc, llm } = scanner({ llm: fakeLlm(REPLY), maxScanS: 0 });
+  sc.start();
+  for (let s = 0; s < 1800; s += 10) { await settle(); t.mock.timers.tick(10000); }   // half an hour
+  await settle();
+  assert.equal(sc.active, true, 'still scanning'); assert.ok(llm.calls.length >= 150, `a scan every interval: ${llm.calls.length}`);
+  sc.stop(); assert.equal(sc.active, false, 'until it is told to stop');
+});
+
+test('scanner: with maxScanS set it switches itself off after that long', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
   const { sc, llm } = scanner({ llm: fakeLlm(REPLY), maxScanS: 60 });
   sc.start();
@@ -285,7 +295,7 @@ test('scanner: the container builds camera, world and both tools from Scanner al
   const { scanner: sc, tools, context } = mm.getModuleInstance('harness');
   assert.ok(sc instanceof Scanner); assert.ok(sc.camera instanceof Camera); assert.ok(sc.world instanceof World);
   assert.equal(sc.camera.deviceLink, link); assert.equal(sc.llm, llm); assert.equal(sc.sensors, sensors); assert.equal(sc.gps ?? null, null);
-  assert.deepEqual([sc.model, sc.maxItems, sc.maxTokens, sc.intervalS, sc.minGapMs, sc.maxScanS, sc.jpegQuality], ['qwen-vision', 4, 400, 10, 3000, 180, 70]);
+  assert.deepEqual([sc.model, sc.maxItems, sc.maxTokens, sc.intervalS, sc.minGapMs, sc.maxScanS, sc.jpegQuality], ['qwen-vision', 4, 400, 10, 3000, 0, 70]);
   assert.match(sc.prompt, /name \| kind \| x1,y1,x2,y2 \| note/);
   assert.deepEqual(tools.map((x) => x.name), ['look', 'sightings']);
   assert.equal(tools[0].scanner, sc); assert.equal(tools[0].camera, sc.camera); assert.equal(tools[0].jpegQuality, 55, 'scanner.lookTool.*');

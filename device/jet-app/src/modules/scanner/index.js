@@ -3,8 +3,8 @@
 // tolerant parse -> `world.observe`. One scan at a time, always: a `scanOnce` asked for while
 // one runs joins it. While scanning is on (`start()`), the next scan follows a new-view event
 // from the head tracker or `intervalS` after the last one finished, never sooner than
-// `minGapMs` after it, and the whole thing switches itself off after `maxScanS` so a forgotten
-// scan cannot hold the model. A failed scan is logged and counted (`failures`, `lastError`),
+// `minGapMs` after it. It runs until it is switched off or its screen is left (`maxScanS` can
+// put a limit on a forgotten scan; there is none by default). A failed scan is logged and counted (`failures`, `lastError`),
 // never thrown: views watch `state` and `scan` events.
 //
 // `start()`/`stop()` are the scanning switch (the contract in docs/agent.md), so the container's
@@ -134,7 +134,7 @@ export class Scanner extends EventEmitter {
       .property('maxTokens', s('number').default(400).meta('description', 'reply budget per scan; a reply cut off there keeps its complete items'))
       .property('intervalS', s('number').default(10).meta('description', 'while scanning: the next scan this long after the last finished, if no new view came first'))
       .property('minGapMs', s('number').default(3000).meta('description', 'while scanning: never start a scan sooner than this after the last finished'))
-      .property('maxScanS', s('number').default(180).meta('description', 'scanning switches itself off after this long'))
+      .property('maxScanS', s('number').default(0).meta('description', 'scanning switches itself off after this long; 0 (the default) = never: it stops when it is told to, or when its screen is left'))
       .property('jpegQuality', s('number').default(70).meta('description', 'quality of the frame sent to the model'))
       .property('frameW', s('number').default(120).meta('advanced').meta('description', 'the frame under analysis is offered to views fitted to this width'))
       .property('frameH', s('number').default(90).meta('advanced').meta('description', '... and this height'))
@@ -181,8 +181,12 @@ export class Scanner extends EventEmitter {
   start() {
     if (this.active) return;
     this.active = true;
-    this.#deadline = setTimeout(() => { this.logger?.info({ s: this.maxScanS }, 'scanner: time is up'); this.stop(); }, this.maxScanS * 1000);
-    this.#deadline.unref?.();
+    // no time limit by default: a scan that ends by itself three minutes in reads as a fault
+    // ("it sometimes turns itself off"). Scanning ends when it is switched off or its screen is left.
+    if (this.maxScanS > 0) {
+      this.#deadline = setTimeout(() => { this.logger?.info({ s: this.maxScanS }, 'scanner: time is up'); this.stop(); }, this.maxScanS * 1000);
+      this.#deadline.unref?.();
+    }
     this.#sync();
     this.#trigger();
   }

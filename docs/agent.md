@@ -208,8 +208,9 @@ scanner.scanOnce({ image? }) → Promise<entity[]>     // also what the `look` t
 ```
 
 While active: one scan at once; the next is triggered by a new-view event (`sensors` `view`) or
-`intervalS` (10) after the last finished, never sooner than `minGapMs` (3000); stops itself
-after `maxScanS` (180) so a forgotten scan cannot hold the model forever. A scan = capture →
+`intervalS` (10) after the last finished, never sooner than `minGapMs` (3000). It runs until
+it is switched off or its screen is left: there is no time limit by default (`maxScanS` 0; the
+first version stopped itself after 180 s, which on the device read as "it turns itself off"). A scan = capture →
 JPEG → one vision call (`scanner.model`, the terse line-format prompt with the known names) →
 parse (tolerant: the lines, or JSON with code fences, `bbox_2d`/`box`, `label`/`name`, cut off
 at the token limit) → `world.observe`. Failures are logged and counted, never thrown at a view.
