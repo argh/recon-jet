@@ -25,12 +25,24 @@ export class DialogCommand extends Command {
 
   /** No jetd connection: one HTTP request to jet-app. */
   async execute() {
-    const base = `http://${this.host}:${this.appPort}`, signal = AbortSignal.timeout(Math.max(this.timeoutMs, 30000));
+    // The timeout is on silence, not on the whole transfer: a long conversation is tens of MB
+    // of base64 audio over the Jet's WiFi, and takes as long as it takes while bytes keep coming.
+    const base = `http://${this.host}:${this.appPort}`, idleMs = Math.max(this.timeoutMs, 30000);
     const call = async (route, init) => {
-      const res = await fetch(base + route, { ...init, signal }).catch((error) => { throw new Error(`jet-app is not answering at ${base} (${error.cause?.code ?? error.message}): is voice.debugPort set on the device?`); });
-      const reply = await res.json().catch(() => ({ error: `status ${res.status}` }));
-      if (!res.ok) throw new Error(`${route}: ${reply.error ?? res.status}`);
-      return reply;
+      const stalled = new AbortController();
+      let timer;
+      const arm = () => { clearTimeout(timer); timer = setTimeout(() => stalled.abort(), idleMs); };
+      arm();
+      try {
+        const res = await fetch(base + route, { ...init, signal: stalled.signal }).catch((error) => { throw new Error(`jet-app is not answering at ${base} (${error.cause?.code ?? error.message}): is voice.debugPort set on the device?`); });
+        const chunks = [];
+        try { for await (const chunk of res.body) { chunks.push(chunk); arm(); } }
+        catch (error) { throw new Error(`${route}: the reply stopped partway (${stalled.signal.aborted ? `nothing for ${idleMs / 1000}s` : error.cause?.code ?? error.message})`); }
+        let reply;
+        try { reply = JSON.parse(Buffer.concat(chunks).toString()); } catch { reply = { error: `status ${res.status}, not JSON` }; }
+        if (!res.ok || reply.error) throw new Error(`${route}: ${reply.error ?? res.status}`);
+        return reply;
+      } finally { clearTimeout(timer); }
     };
     if (this.clear) { const { cleared } = await call('/dialog/clear', { method: 'POST' }); console.log(`cleared ${cleared} items`); return; }
 
