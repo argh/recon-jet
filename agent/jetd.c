@@ -760,6 +760,13 @@ static void console_spawn(void) {
         if (root && chroot(root) == 0) chdir("/");
         setenv("TERM", "linux", 1); setenv("HOME", "/root", 1); setenv("LANG", "C.UTF-8", 1); setenv("PS1", "jet$ ", 0);
         setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
+        /* jetd ignores SIGCHLD and SIGPIPE, and an ignored signal survives exec: bash cannot undo
+         * one it was started with, so everything run from this shell inherited both. With SIGCHLD
+         * ignored the kernel reaps children by itself and a parent's waitpid fails with ECHILD,
+         * which is apt-get's "Waited for dpkg-preconfigure but it wasn't there". The shell gets the
+         * defaults back, and none of jetd's descriptors (framebuffer, i2c, kmsg, sockets). */
+        signal(SIGCHLD, SIG_DFL); signal(SIGPIPE, SIG_DFL);
+        for (int fd = 3; fd < 256; fd++) close(fd);
         chdir("/root");
         execl("/bin/bash", "bash", "-l", (char *)0);
         execl("/bin/sh", "sh", "-i", (char *)0);
