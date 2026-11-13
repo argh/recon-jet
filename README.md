@@ -6,7 +6,16 @@ a small on-device daemon and a Node application, talking to an OpenAI-compatible
 you point it at. The stock software is long abandoned (activation servers are gone); the hardware
 is a complete wearable computer that deserves better.
 
-## Run it on your own Jet
+## You can run it on your own Jet - but please use common sense!
+
+First, set your expectations.  Although I've abstracted many settings, the setup is still highly
+biased towards an environment shaped like mine.  Most people will need/want to make changes to adapt
+to their own inference services.  Be forewarned that if you point at a commercial service, this code 
+gleefully burns tokens assuming they are free!  Don't blame me if you get a giant bill.  Or if the
+AI tells you to do something stupid.  Oh, and don't run this while doing anything other than sitting
+safely in an office chair.  If you wear it out in the world, it will distract you and you will likely
+get hurt or die or become emotionally damaged from people making fun of you.  And don't use it to
+record people without their consent.  Got it?  Cool.
 
 ```
 ./setup.sh      # your WiFi, your ssh key, your inference server — writes only gitignored files
@@ -45,17 +54,8 @@ This project stands on a lot of other people's work.
 
 **Claude**
 
-- First and foremost, [Claude](https://claude.com/product/claude-code) (Anthropic), working in
-  Claude Code. This was built by one person and an agent, as peers: the reverse-engineering of
-  the stock tree, the kernel bring-up, the device tree, the daemon, the application layer and
-  these docs were all done together. `AGENTS.md` is the orientation that collaboration runs on.
-
-**Version Zero libraries**
-
-- [@versionzero/module-manager](https://github.com/argh/module-manager),
-  [@versionzero/configurator](https://github.com/argh/configurator) and
-  [@versionzero/schema](https://github.com/argh/schema) (docs at <https://docs.v0.net/>): the
-  module, configuration and command-line structure of both `device/jet-app` and the `jet` CLI.
+- [Claude](https://claude.com/product/claude-code) (Anthropic) did the heavy lifting.  Kudos!
+  (@argh provided architectural review, and acted as Product Manager and Chief LGTM officer.)
 
 **The Jet itself: prior art and reverse-engineering references**
 
@@ -103,6 +103,10 @@ This project stands on a lot of other people's work.
 - [TensorFlow Lite Micro](https://github.com/tensorflow/tflite-micro), via
   [esp-tflite-micro](https://github.com/espressif/esp-tflite-micro), and
   [pymicro-features](https://github.com/rhasspy/pymicro-features) for the audio frontend.
+- [@versionzero/module-manager](https://github.com/argh/module-manager),
+  [@versionzero/configurator](https://github.com/argh/configurator) and
+  [@versionzero/schema](https://github.com/argh/schema) encode some of my architectural opinions; used as the
+  module, configuration and command-line structure of both `device/jet-app` and the `jet` CLI.
 
 **Inference and the agent's tools** (none of it runs on the Jet; all of it is why the Jet is useful)
 
@@ -125,7 +129,7 @@ This project stands on a lot of other people's work.
 
 ## Licensing
 
-This is a personal project. The code written for it (the `jetd` daemon and the rest of `agent/`,
+This is a non-commercial project. The code written for it (the `jetd` daemon and the rest of `agent/`,
 `device/jet-app/`, the `host/` CLI, `tools/`, the build and install scripts, and the docs) is
 licensed under the [Apache License 2.0](LICENSE); see [NOTICE](NOTICE).
 
