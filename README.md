@@ -6,6 +6,8 @@ a small on-device daemon and a Node application, talking to an OpenAI-compatible
 you point it at. The stock software is long abandoned (activation servers are gone); the hardware
 is a complete wearable computer that deserves better.
 
+The project is documented at [blog.v0.net](https://blog.v0.net/converting-obsolete-sports-tech-into-ai-glasses-part-1/)
+
 ## You can run it on your own Jet - but please use common sense!
 
 First, set your expectations.  Although I've abstracted many settings, the setup is still highly
