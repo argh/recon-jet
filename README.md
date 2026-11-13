@@ -1,4 +1,4 @@
-# Recon Jet on mainline Linux
+# Recon Jet on mainline Linux as DIY AI Glasses
 
 A 2013 Recon Jet heads-up display (OMAP4430) running mainline Linux 6.18 from its eMMC as a thin
 I/O peripheral: display, camera, mics, speaker, IMU, glance sensor, WiFi and Bluetooth, driven by
@@ -8,7 +8,9 @@ is a complete wearable computer that deserves better.
 
 The project is documented at [blog.v0.net](https://blog.v0.net/converting-obsolete-sports-tech-into-ai-glasses-part-1/)
 
-## You can run it on your own Jet - but please use common sense!
+(This repo should be considered a resource for forking/extending, rather than as an active project.)
+
+## You can run it on your own Jet - but use common sense!
 
 First, set your expectations.  Although I've abstracted many settings, the setup is still highly
 biased towards an environment shaped like mine.  Most people will need/want to make changes to adapt
