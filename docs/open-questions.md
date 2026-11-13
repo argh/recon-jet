@@ -189,9 +189,18 @@ Still open from it: 1008 MHz without the MPU voltage step; jetd's `play_close` d
 at 984 lines and gain 248: near the maximum, averaging the whole frame to luma ~124, which is
 what blooms small bright detail on a dark surface. No kernel change is needed to take a metered
 manual shot: let AE settle, read the two values, switch to manual, write a reduced gain,
-capture, restore auto. AE target, gain caps and the metering window exist in the chip
-(`CAM_AET_TARGET_AVERAGE_LUMA`, `CAM_AET_AE_MAX_VIRT_AGAIN`, `CAM_STAT_AE_INITIAL_WINDOW_*`) but
-not in the mainline driver: each is a small patch to a built-in driver, i.e. a new zImage.
+capture, restore auto. The metering window (`CAM_STAT_AE_INITIAL_WINDOW_*`) exists in the chip
+but not in the driver.
+
+**Low light** (2026-11-12, closed by the mt9m114 overlay, `docs/kernel.md`): the "984 lines,
+gain 248" above was AE pinned at mainline's ceiling, not a setting it chose. In an evening
+living room that gave a mean luma of 14-22, under the scanner's `minLuma` of 14 as soon as the
+lamps left the frame ("the frame is too dark to scan", and no model call). With the frame rate
+floating the same room meters to ~100 at 3-6 fps, a lit kitchen stays at 23.4 fps, and a cold
+snapshot settles in ~1.2 s (was 0.65-1.0). Measured on one desk view: mean luma 44 with
+mainline's limits, ~120 with the overlay's. Not measured: how much the top half of the
+analogue gain range (8x-16x) really adds, and noise. A viewfinder that crawls in good light is
+the CPU at its 100 C trip (600 MHz), not the sensor.
 
 The hypothesis as first written: the sensor is powered fully off between streams, so
 `mt9m114_initialize()` runs at every start and briefly streams at its power-on geometry
