@@ -49,14 +49,9 @@ and switch the hook back to `wg-quick`.)
 
 ## The clock comes first
 
-The Jet has no clock that survives a deep discharge: after one it boots in the year 2000. Then no
-TLS certificate is valid (every request fails at once) and the device behaves exactly as if the
-network or the tunnel were down - which is how it was found, outdoors, with the tunnel up and
-handshaking. So the hook sets the clock from the network on every association, after the lease
-and before the tunnel: synchronously when the year is absurd, in the background otherwise. It uses
-an NTP client when the rootfs has one (`ntpsec-ntpdate` is in the Dockerfile) and falls back to
-busybox `rdate` (RFC 868, `time.nist.gov`). Servers can be listed one per line in
-`/android-data/mainline/wireguard/timeservers`. To check by hand: `date -u` on the Jet.
+A Jet that boots in the year 2000 cannot handshake (and no TLS certificate is valid). The hook does
+not deal with it: the DHCP lease hook sets the clock on every lease, before `dhcp()` returns and so
+before the tunnel comes up. See "The clock" in networking.md.
 
 ## DNS and MTU
 

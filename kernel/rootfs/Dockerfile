@@ -20,9 +20,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 # busybox applets the initramfs init calls inside the chroot (Debian's busybox has no telnetd), and
 # the udhcpc lease hook Debian does not ship
-RUN for a in udhcpd udhcpc; do ln -sf /bin/busybox /usr/sbin/$a; done && mkdir -p /var/lib/misc /usr/share/udhcpc
+RUN for a in udhcpd udhcpc rdate; do ln -sf /bin/busybox /usr/sbin/$a; done && mkdir -p /var/lib/misc /usr/share/udhcpc
 COPY udhcpc-default.script /usr/share/udhcpc/default.script
-RUN chmod 755 /usr/share/udhcpc/default.script
+# the clock: the lease hook calls settime on every lease (the Jet boots in the year 2000 after a power loss)
+COPY settime /usr/local/sbin/settime
+RUN chmod 755 /usr/share/udhcpc/default.script /usr/local/sbin/settime
 # colour for the interactive shells (the glass terminal and ssh); --color=auto keeps pipes clean
 COPY bashrc /root/.bashrc
 # apt on the device is a feature (docs/setup.md): no debconf Dialog attempts on the glass shell

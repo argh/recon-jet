@@ -1,0 +1,59 @@
+#!/bin/sh
+# settime: set the Jet's clock from the network (docs/networking.md, "The clock").
+# The Jet keeps no time across a power loss: it boots in the year 2000, and then no TLS certificate
+# is valid - every https request fails at once and the device looks as if the network were down.
+#   settime            one pass over the time sources; says what it did; exit 1 if none answered
+#   settime -q         the same, silent
+#   settime -r         keep trying (every 15 s, 10 min) until one answers; one instance at a time
+#   settime @<epoch>   set it by hand, no network:  ssh root@jet "settime @$(date +%s)"
+# The DHCP lease hook runs it on every lease, so any network sets the clock - VPN or not.
+# Sources, first that answers: an NTP client if the rootfs has one, busybox rdate (RFC 868), then
+# the Date header of a plain-http response (to the second: plenty for TLS, and it passes where
+# NTP and port 37 are filtered). Hosts, one per line, replace the defaults for every source:
+#   /android-data/mainline/timeservers
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # the lease hook inherits init's
+FILE=/android-data/mainline/timeservers
+LOCK=/run/settime.lock
+Q=; R=
+say() { [ -n "$Q" ] || echo "$*"; }
+sane() { [ "$(date -u +%Y)" -ge 2025 ]; }
+done_() { sane || return 1; hwclock -w 2>/dev/null; say "clock set to $(date -u +%FT%TZ) ($1 $2)"; logger -t settime "clock set ($1 $2)" 2>/dev/null; return 0; }
+
+ntp() {
+  if command -v ntpdig >/dev/null 2>&1; then timeout 10 ntpdig -S -t 5 "$1"
+  elif command -v ntpdate >/dev/null 2>&1; then timeout 10 ntpdate -u "$1"
+  elif command -v sntp >/dev/null 2>&1; then timeout 10 sntp -S "$1"
+  else return 1; fi >/dev/null 2>&1
+}
+rfc868() { timeout 10 busybox rdate -s "$1" >/dev/null 2>&1; }
+http() {
+  d=$(curl -sI --max-time 8 "http://$1/" 2>/dev/null | tr -d '\r' | sed -n 's/^[Dd]ate: //p' | head -1)
+  [ -n "$d" ] && date -u -s "$d" >/dev/null 2>&1
+}
+
+once() {
+  hosts=$(grep -v '^[[:space:]]*\(#\|$\)' "$FILE" 2>/dev/null)
+  for h in ${hosts:-pool.ntp.org}; do ntp "$h" && done_ ntp "$h" && return 0; done
+  for h in ${hosts:-time.nist.gov}; do rfc868 "$h" && done_ rdate "$h" && return 0; done
+  for h in ${hosts:-www.google.com example.com}; do http "$h" && done_ http "$h" && return 0; done
+  return 1
+}
+
+for a; do
+  case "$a" in
+    -q) Q=1 ;;
+    -r) R=1; Q=1 ;;
+    @[0-9]*) date -u -s "$a" >/dev/null && done_ manual "$a"; exit ;;
+    *) echo "usage: settime [-q] [-r] | settime @<epoch>" >&2; exit 2 ;;
+  esac
+done
+
+if [ -n "$R" ]; then
+  mkdir "$LOCK" 2>/dev/null || exit 0
+  trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+  n=0; until once; do n=$((n + 1)); [ "$n" -ge 40 ] && exit 1; sleep 15; done
+  exit 0
+fi
+once && exit 0
+say "no time source answered (clock: $(date -u +%FT%TZ)). By hand, from the host: ssh root@jet \"settime @\$(date +%s)\""
+exit 1

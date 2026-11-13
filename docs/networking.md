@@ -42,6 +42,25 @@ userdata (`mainline/hub`, `mainline/usbnet`).
 avahi in the chroot (`host-name=jet`, usb0 + wlan0, no dbus), started by init: the Jet is
 **`jet.local`** on both links (`dns-sd -G v4 jet.local` on macOS returns both addresses).
 
+## The clock
+
+The PMIC's RTC keeps time across a `reboot2` but not across a power loss (a deep discharge, or the
+hold-POWER reset): the Jet then boots in the year 2000. No TLS certificate is valid on that date,
+so every https request fails at once and the device looks as if the network were down. First check
+when "it can't reach the services": `date -u` on the Jet.
+
+- `settime` (`kernel/rootfs/settime` -> `/usr/local/sbin/settime`) sets the clock from the network
+  and writes the RTC. Sources, first that answers: an NTP client if one is installed
+  (`ntpsec-ntpdate` is in the Dockerfile), busybox `rdate` against `time.nist.gov`, then the `Date`
+  header of a plain-http response (works where NTP and port 37 are filtered). Hosts listed one per
+  line in `/android-data/mainline/timeservers` replace the defaults.
+- The udhcpc lease hook (`udhcpc-default.script`) runs it on every lease - boot, roaming, VPN or
+  not. A year-2000 clock is fixed before the hook returns, with a background retry (`settime -r`,
+  every 15 s for 10 min) if nothing answered; a sane clock is only trimmed, in the background.
+- By hand: `settime` on the Jet says which source it used or that none answered. With no network
+  at all, from the host: `ssh root@jet "settime @$(date +%s)"`.
+- `./install.sh` keeps `settime`, the lease hook and the VPN hook current on an installed device.
+
 ## WiFi (WL1283 via wlcore, built in)
 
 - Firmware `wl128x-fw-5-sr.bin`/`-mr.bin` from linux-firmware (stock blobs are API 4 and do

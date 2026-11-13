@@ -123,7 +123,7 @@ else
 fi
 
 step "Debian rootfs (Docker arm/v7 emulation)"
-if newer_than work/rootfs-debian.tar kernel/rootfs/Dockerfile kernel/rootfs/udhcpc-default.script kernel/rootfs/wireguard/on-wifi.sh; then
+if newer_than work/rootfs-debian.tar kernel/rootfs/Dockerfile kernel/rootfs/udhcpc-default.script kernel/rootfs/settime kernel/rootfs/wireguard/on-wifi.sh; then
   ok "rootfs tarball current"
 elif [ $MODE = status ]; then warn "rootfs tarball stale or missing (would build)"
 else
@@ -300,6 +300,10 @@ mainline_sync() { # keep an installed device current; every piece skipped unless
   jsh 10 'mkdir -p /android-data/mainline/wireguard /etc/wpa_supplicant' >/dev/null
   sync_file work/wifi/wpa_supplicant.conf /etc/wpa_supplicant/wpa_supplicant.conf 600
   sync_file work/ssh/authorized_keys /root/.ssh/authorized_keys 600
+  # the rootfs's own scripts: small, and a fix to one should not need a rootfs rebuild + reinstall
+  sync_file kernel/rootfs/settime /usr/local/sbin/settime 755
+  sync_file kernel/rootfs/udhcpc-default.script /usr/share/udhcpc/default.script 755
+  sync_file kernel/rootfs/wireguard/on-wifi.sh /etc/wireguard/on-wifi.sh 755
   [ -s work/device/jet-app.json ] && sync_file work/device/jet-app.json /android-data/mainline/jet-app.json
   if [ -s work/wireguard/wg0.conf ]; then
     sync_file work/wireguard/wg0.conf /android-data/mainline/wireguard/wg0.conf 600

@@ -10,6 +10,13 @@ case "$1" in
     # leave resolv.conf to the WireGuard hook while a full tunnel is up (its DNS is the only one
     # reachable then); the physical link's DNS is irrelevant until the tunnel drops
     [ -n "$dns" ] && ! wg show wg0 >/dev/null 2>&1 && { : > /etc/resolv.conf.udhcpc; for d in $dns; do echo "nameserver $d" >> /etc/resolv.conf.udhcpc; done; mv /etc/resolv.conf.udhcpc /etc/resolv.conf; }
+    # the clock (settime): the Jet boots in the year 2000 after a power loss and no TLS works until
+    # it is set. Every lease sets it, on any network. An absurd clock is fixed before this hook
+    # returns (whoever waited for the lease - the VPN hook - then has a clock too), with a
+    # background retry if nothing answered yet; a sane one is only trimmed, in the background.
+    T=/usr/local/sbin/settime
+    if [ "$(date -u +%Y)" -lt 2025 ]; then $T -q || { $T -r </dev/null >/dev/null 2>&1 & }
+    else $T -q </dev/null >/dev/null 2>&1 & fi
     ;;
 esac
 exit 0
