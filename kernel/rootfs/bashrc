@@ -12,3 +12,6 @@ alias ip='ip -color=auto'
 alias dmesg='dmesg --color=auto'
 export LESS=-R
 PS1='\[\e[32m\]\u@\h\[\e[0m\]:\[\e[94m\]\w\[\e[0m\]\$ '
+# Debian keeps games out of root's PATH (/etc/profile), and root is the only user here: without
+# this, `apt-get install nethack-console` succeeds and `nethack` is "command not found"
+case ":$PATH:" in *:/usr/games:*) ;; *) PATH=$PATH:/usr/local/games:/usr/games ;; esac
