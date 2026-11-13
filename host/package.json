@@ -2,6 +2,7 @@
   "name": "@versionzero/jet-host",
   "version": "0.2.0",
   "private": true,
+  "license": "Apache-2.0",
   "description": "Mac-side developer tools for the Recon Jet (jet CLI, vision helper)",
   "type": "module",
   "bin": {

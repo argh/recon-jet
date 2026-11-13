@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 #ifndef OPL_JET_H
 #define OPL_JET_H
 #include <stdint.h>

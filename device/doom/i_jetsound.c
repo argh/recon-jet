@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Sound for Doom on the Recon Jet: doomgeneric's sound module (the slot i_sdlsound.c fills in the
  * SDL build) as a small software mixer. Doom's SFX lumps are 8-bit unsigned mono, mostly 11025 Hz;
  * a mixer thread resamples the playing channels (linear, 16.16 fixed point) into 10 ms slices of

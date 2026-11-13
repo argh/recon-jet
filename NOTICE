@@ -1,0 +1,10 @@
+Recon Jet on mainline Linux
+Copyright (c) 2026 Jolly Roger | github.com/argh
+
+Licensed under the Apache License, Version 2.0 (see LICENSE), except for the parts of this
+repository that derive from or bundle other people's work, which keep their own licences.
+The "Licensing" section of README.md lists them.
+
+The prebuilt wake word detectors (agent/wake/jetwake, agent/wake/jetwake-native) statically
+link TensorFlow Lite Micro and the TensorFlow Lite audio frontend (pymicro-features, with
+KISS FFT), Copyright The TensorFlow Authors and their contributors, Apache License 2.0.

@@ -122,3 +122,22 @@ This project stands on a lot of other people's work.
 - [doomgeneric](https://github.com/ozkl/doomgeneric) and
   [Chocolate Doom](https://github.com/chocolate-doom/chocolate-doom), and id Software for
   releasing the source in the first place.
+
+## Licensing
+
+This is a personal project. The code written for it (the `jetd` daemon and the rest of `agent/`,
+`device/jet-app/`, the `host/` CLI, `tools/`, the build and install scripts, and the docs) is
+licensed under the [Apache License 2.0](LICENSE); see [NOTICE](NOTICE).
+
+Parts of the repository derive from or bundle other work and keep that work's licence:
+
+| Path | What it is | Licence |
+|---|---|---|
+| `kernel/overlay/`, `kernel/patches/`, `kernel/*.dts` | Linux drivers, patches and device trees | GPL-2.0, as marked in each file's SPDX line |
+| `device/doom/` | platform code written against doomgeneric and Chocolate Doom, parts adapted from Chocolate Doom's SDL drivers | GPL-2.0-or-later |
+| `agent/font/`, `device/jet-app/assets/fonts/` | Terminus Font | SIL Open Font License 1.1 |
+| `device/jet-app/assets/places/` | city table derived from GeoNames | CC BY 4.0 |
+| `agent/wake/jetwake`, `agent/wake/jetwake-native` | prebuilt binaries linking TensorFlow Lite Micro | Apache-2.0 |
+
+A boot image built from this repository contains the Linux kernel and is distributed under the
+kernel's GPL-2.0 terms. Nothing here includes Recon's stock firmware or Doom's game data.

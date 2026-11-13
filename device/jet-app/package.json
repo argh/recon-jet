@@ -2,6 +2,7 @@
   "name": "@versionzero/jet-app",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "description": "Node application layer for the Recon Jet (talks to jetd over its line protocol)",
   "type": "module",
   "engines": {

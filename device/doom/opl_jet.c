@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Chocolate Doom's OPL layer on the Jet: the driver slot opl_sdl.c fills in the SDL build. The
  * emulated chip (opl3.c, Nuked OPL3) is clocked by the sfx mixer: i_jetsound.c asks for each 10 ms
  * slice through OPL_Jet_Render, which generates samples up to the next due callback, runs it (the

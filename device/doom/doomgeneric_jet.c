@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* doomgeneric platform for the Recon Jet.
  *
  * Pixels: Doom's 320x200 8-bit frame is palette-mapped to RGB565 (or XRGB) into /dev/fb0 and
